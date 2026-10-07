@@ -123,11 +123,45 @@ docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm ocu-l
 From the app's window, or:
 
 ```sh
-opencomputeruse install claude   # claude mcp add --scope user opencomputeruse -- <path> mcp
-opencomputeruse install codex    # codex mcp add opencomputeruse -- <path> mcp
+opencomputeruse install claude     # claude mcp add --scope user opencomputeruse -- <path> mcp
+opencomputeruse install codex      # codex mcp add opencomputeruse -- <path> mcp
+opencomputeruse install opencode   # an "mcp" entry in ~/.config/opencode/opencode.json(c)
+opencomputeruse clients            # which clients run this copy
 ```
 
+A client whose entry runs another copy (an old build, or the app before it
+moved) shows as "points elsewhere"; installing again points it here.
+
 For other clients, use `{ "command": "<path to opencomputeruse>", "args": ["mcp"] }`.
+
+## Other devices (HTTP)
+
+Off by default. Turn on **Serve over HTTP** in the app (or the local MCP
+server's `http_server` tool) and other devices can drive this computer
+through an HTTP API on port 8642, usually over Tailscale. While it is on, it
+starts again at login, so it survives reboots.
+
+Each device needs a key. **Generate Skill** asks for the device's name and the
+URL it reaches this computer at (this computer's Tailscale name by default),
+and gives back a `SKILL.md` to install on that device. The skill carries the
+URL, the key and how to call every tool with curl. Keys are stored only as
+hashes, so the skill is the one place a key appears. Devices are listed in
+the app with **Regenerate Key** and **Remove**, and in the local MCP server
+as `list_devices`, `generate_skill`, `regenerate_key` and `remove_device`.
+Regenerating or removing a key ends that device's sessions. None of this
+management is reachable over HTTP.
+
+The API:
+
+- `POST /v1/tools/<tool>` with JSON arguments returns `{content, isError}`,
+  the same as an MCP tool call. `GET /v1/tools` lists the tools.
+- `POST /mcp` is MCP over HTTP:
+  `claude mcp add --transport http <name> <url>/mcp --header "Authorization: Bearer <key>"`.
+- Every request needs `Authorization: Bearer <key>`, except `GET /health`.
+
+There is no TLS, so use it over Tailscale or another trusted network. On
+Linux and Windows, `opencomputeruse serve` runs the server, and
+`serve --install` starts it at login.
 
 ## Settings
 
