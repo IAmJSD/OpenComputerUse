@@ -32,7 +32,7 @@ path = "src/main.rs"
 ocu-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 base64.workspace = true
 png.workspace = true
 # Checking a self-update download against the digest its release lists.

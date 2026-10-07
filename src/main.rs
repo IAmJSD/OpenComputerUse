@@ -26,8 +26,9 @@ opencomputeruse — background computer use for agents, over MCP
 
 USAGE:
     opencomputeruse mcp                   Run the MCP server on stdio (what clients launch)
-    opencomputeruse install <client>      Register the MCP server with claude or codex
+    opencomputeruse install <client>      Register the MCP server with claude, codex or opencode
     opencomputeruse uninstall <client>    Remove it again
+    opencomputeruse clients               Show which clients run this copy
     opencomputeruse serve [--port N]      Run the HTTP server for other devices (the app does this on macOS)
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
@@ -48,7 +49,7 @@ fn run() -> Result<()> {
     match first {
         Some("mcp") => run_mcp(),
         Some("install") | Some("uninstall") => {
-            let Some(client) = args.get(1) else { bail!("name a client: claude or codex") };
+            let Some(client) = args.get(1) else { bail!("name a client: claude, codex or opencode") };
             let client = clients::Client::parse(client)?;
             if first == Some("install") {
                 clients::install(client)?;
@@ -61,6 +62,19 @@ fn run() -> Result<()> {
         }
         Some("serve") => run_serve(&args[1..]),
         Some("update") => run_update(args.iter().any(|a| a == "--check")),
+        Some("clients") => {
+            for client in clients::Client::ALL {
+                let found = clients::find(client).is_some();
+                let state = match (found, clients::registration(client)) {
+                    (false, _) => "not found".to_string(),
+                    (true, clients::Registration::Current) => "installed".to_string(),
+                    (true, clients::Registration::Elsewhere(path)) => format!("points elsewhere ({path}); `install` fixes it"),
+                    (true, clients::Registration::Absent) => "not installed".to_string(),
+                };
+                println!("{:<12} {state}", client.label());
+            }
+            Ok(())
+        }
         Some("config-path") => {
             println!("{}", config::Config::path().display());
             Ok(())

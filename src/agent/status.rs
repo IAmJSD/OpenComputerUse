@@ -86,7 +86,7 @@ pub struct Status {
     fields: Vec<(Field, LineEdit)>,
     saved: bool,
     error: Option<String>,
-    clients: [ClientState; 2],
+    clients: [ClientState; 3],
     busy: Option<Client>,
     client_message: Option<String>,
     updates: Updates,
@@ -124,10 +124,10 @@ struct Updates {
     error: Option<String>,
 }
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ClientState {
     found: bool,
-    installed: bool,
+    registration: clients::Registration,
 }
 
 const GOOD: u32 = 0x2E7D4F;
@@ -172,8 +172,8 @@ fn status(label: &str, good: bool) -> gpui::Div {
         )
 }
 
-fn client_states() -> [ClientState; 2] {
-    Client::ALL.map(|c| ClientState { found: clients::find(c).is_some(), installed: clients::installed(c) })
+fn client_states() -> [ClientState; 3] {
+    Client::ALL.map(|c| ClientState { found: clients::find(c).is_some(), registration: clients::registration(c) })
 }
 
 impl Status {
@@ -911,33 +911,54 @@ impl Render for Status {
                     .children(Client::ALL.iter().map(|&client| {
                         let state = &self.clients[client as usize];
                         let busy = self.busy == Some(client);
+                        let installed = state.registration != clients::Registration::Absent;
+                        let elsewhere = match &state.registration {
+                            clients::Registration::Elsewhere(path) => Some(path.clone()),
+                            _ => None,
+                        };
                         div()
                             .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::MEDIUM).child(client.label()))
-                            .child(div().w(px(110.0)).flex_none().child(match (state.found, state.installed, busy) {
-                                (_, _, true) => status("Working…", false),
-                                (false, _, _) => status("Not found", false),
-                                (true, true, _) => status("Installed", true),
-                                (true, false, _) => status("Not installed", false),
-                            }))
-                            .child(div().w(px(180.0)).flex_none().flex().justify_end().gap_2().when(state.found, |d| {
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::MEDIUM).child(client.label()))
+                                    .child(div().w(px(130.0)).flex_none().child(match (state.found, &state.registration, busy) {
+                                        (_, _, true) => status("Working…", false),
+                                        (false, _, _) => status("Not found", false),
+                                        (true, clients::Registration::Current, _) => status("Installed", true),
+                                        (true, clients::Registration::Elsewhere(_), _) => status("Points elsewhere", false),
+                                        (true, clients::Registration::Absent, _) => status("Not installed", false),
+                                    }))
+                                    .child(div().w(px(180.0)).flex_none().flex().justify_end().gap_2().when(state.found, |d| {
+                                        d.child(
+                                            Button::new(("install", client as usize), if installed { "Reinstall" } else { "Install" })
+                                                // A stale entry needs fixing as much as a missing one.
+                                                .when(state.registration != clients::Registration::Current, |b| b.primary())
+                                                .disabled(self.busy.is_some())
+                                                .on_click(cx.listener(move |s, _, _, cx| s.install(client, true, cx))),
+                                        )
+                                        .when(installed, |d| {
+                                            d.child(
+                                                Button::new(("remove", client as usize), "Remove")
+                                                    .ghost()
+                                                    .disabled(self.busy.is_some())
+                                                    .on_click(cx.listener(move |s, _, _, cx| s.install(client, false, cx))),
+                                            )
+                                        })
+                                    })),
+                            )
+                            .when_some(elsewhere, |d, path| {
                                 d.child(
-                                    Button::new(("install", client as usize), if state.installed { "Reinstall" } else { "Install" })
-                                        .when(!state.installed, |b| b.primary())
-                                        .disabled(self.busy.is_some())
-                                        .on_click(cx.listener(move |s, _, _, cx| s.install(client, true, cx))),
+                                    div()
+                                        .text_color(rgb(p.warning))
+                                        .text_size(px(11.0))
+                                        .child(format!("It runs {path}, not this app; Reinstall points it here.")),
                                 )
-                                .when(state.installed, |d| {
-                                    d.child(
-                                        Button::new(("remove", client as usize), "Remove")
-                                            .ghost()
-                                            .disabled(self.busy.is_some())
-                                            .on_click(cx.listener(move |s, _, _, cx| s.install(client, false, cx))),
-                                    )
-                                })
-                            }))
+                            })
                     }))
                     .when_some(self.client_message.clone(), |d, m| {
                         d.child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(m))
