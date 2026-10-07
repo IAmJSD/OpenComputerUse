@@ -171,6 +171,7 @@ fn open_bundle(bundle: &Path, spec: &LaunchSpec) -> Result<i32> {
 pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
     let front_before = frontmost_pid();
     let resolved = resolve(&spec.app)?;
+    let mut successor_of: Option<(String, Vec<i32>)> = None;
     let (pid, launched, child, name) = match resolved {
         Resolved::Bundle(bundle) => {
             let already: Vec<i32> = bundle_id(&bundle)
@@ -195,6 +196,11 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
             }
             let pid = open_bundle(&bundle, &spec)?;
             let name = bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Some(id) = bundle_id(&bundle) {
+                let mut known = already.clone();
+                known.push(pid);
+                successor_of = Some((id, known));
+            }
             (pid, !already.contains(&pid), None, name)
         }
         Resolved::Binary(path) => {
@@ -220,6 +226,8 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         closed: false,
         chromium: false,
         asked_for_tree: false,
+        successor_of,
+        launched_at: Instant::now(),
     };
     session.chromium = is_chromium(session.pid);
     // Wait for a window, putting the user's app back in front if this one
@@ -227,7 +235,10 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         session.restore_front();
-        if !app_windows(pid).is_empty() || !session.is_alive() || Instant::now() > deadline {
+        // A relaunching app is briefly without a process; give its
+        // successor a moment to appear before calling it gone.
+        let gone = !session.is_alive() && session.launched_at.elapsed() > Duration::from_secs(8);
+        if !app_windows(session.pid).is_empty() || gone || Instant::now() > deadline {
             break;
         }
         sleep(Duration::from_millis(150));
@@ -288,6 +299,12 @@ pub struct MacSession {
     chromium: bool,
     /// Whether that request has been made.
     asked_for_tree: bool,
+    /// The bundle id, and the processes of it that are not ours, for
+    /// following an app that relaunches itself as it starts (Firefox does
+    /// with a new profile): the process we started exits, and the one that
+    /// replaces it is the app.
+    successor_of: Option<(String, Vec<i32>)>,
+    launched_at: Instant,
 }
 
 impl MacSession {
@@ -311,6 +328,30 @@ impl MacSession {
                 #[allow(deprecated)]
                 app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
             }
+        }
+    }
+
+    /// Follows an app that replaced its first process early on: adopts a
+    /// process of the same app that appeared after our launch.
+    fn adopt_successor(&mut self) -> bool {
+        let Some((id, known)) = &self.successor_of else { return false };
+        if self.launched_at.elapsed() > Duration::from_secs(60) {
+            return false;
+        }
+        let next = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(id))
+            .iter()
+            .map(|a| a.processIdentifier())
+            .find(|p| !known.contains(p));
+        match next {
+            Some(pid) => {
+                log::info!("{} relaunched itself: following pid {} to {pid}", self.name, self.pid);
+                self.pid = pid;
+                if let Some((_, known)) = &mut self.successor_of {
+                    known.push(pid);
+                }
+                true
+            }
+            None => false,
         }
     }
 
@@ -458,7 +499,10 @@ impl Session for MacSession {
         if let Some(child) = &mut self.child {
             return matches!(child.try_wait(), Ok(None));
         }
-        running(self.pid).is_some_and(|a| !a.isTerminated())
+        if running(self.pid).is_some_and(|a| !a.isTerminated()) {
+            return true;
+        }
+        self.adopt_successor()
     }
 
     fn close(&mut self) {

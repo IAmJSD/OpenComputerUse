@@ -215,11 +215,11 @@ const PASSIVE: &[&str] = &[
     "LayoutArea", "LayoutItem", "Ruler", "RulerMarker", "Application", "Matte", "ValueIndicator", "TitleBar",
 ];
 
-/// Whether a frame is on the window and big enough to click.
-fn visible(f: &ocu_core::Rect, window: Option<&ocu_core::Rect>) -> bool {
-    f.width > 2.0
-        && f.height > 2.0
-        && window.is_none_or(|w| f.x + f.width > 0.0 && f.y + f.height > 0.0 && f.x < w.width && f.y < w.height)
+/// Whether an element has a real size. Off-screen ones (further down a
+/// page) still count: they can be pressed through accessibility. Chrome
+/// parks some it has not laid out at one pixel high, which do not.
+fn visible(f: &ocu_core::Rect, _window: Option<&ocu_core::Rect>) -> bool {
+    f.width > 2.0 && f.height > 2.0
 }
 
 /// `title` is the window's, so containers named after it can be left out
@@ -246,9 +246,16 @@ fn collect<'a>(
         if let Some(desc) = node.description.as_ref().filter(|s| Some(*s) != label.as_ref()) {
             d.push_str(&format!(" ({desc})"));
         }
-        if let Some(v) = node.value.as_ref().filter(|v| !v.is_empty()) {
-            let v: String = v.chars().take(60).collect();
-            d.push_str(&format!(" containing \"{v}\""));
+        // A toggle's value is its state, not text it contains.
+        let toggle = matches!(node.role.as_str(), "RadioButton" | "CheckBox" | "Switch");
+        match node.value.as_deref().filter(|v| !v.is_empty()) {
+            Some("1" | "true") if toggle => d.push_str(", selected"),
+            Some(_) if toggle => {}
+            Some(v) => {
+                let v: String = v.chars().take(60).collect();
+                d.push_str(&format!(" containing \"{v}\""));
+            }
+            None => {}
         }
         if node.focused {
             d.push_str(", focused");
@@ -378,11 +385,13 @@ struct Pick {
 }
 
 impl Pick {
-    /// Sure enough to act: likely enough outright, or a clear winner (twice
-    /// as likely as anything else), which a model spread over many similar
-    /// options often is without passing a fixed bar.
+    /// Sure enough to act: likely enough outright, or a clear winner (at
+    /// least even odds and twice anything else), which a model spread over
+    /// many similar options often is without passing a fixed bar. The floor
+    /// matters: asked for a train no longer listed, Clef gave the nearest
+    /// one 0.39 against 0.14, and acting on that would book the wrong train.
     fn sure(&self, min: f64) -> bool {
-        self.probability >= min || (self.probability >= 0.3 && self.probability >= 2.0 * self.runner_up)
+        self.probability >= min || (self.probability >= 0.5 && self.probability >= 2.0 * self.runner_up)
     }
 }
 
@@ -444,6 +453,29 @@ fn pick(config: &RecipeConfig, app: &str, instruction: &str, candidates: &[Candi
         }
         round = winners.into_iter().map(|(i, c, _, _, _)| (i, c)).collect();
     }
+}
+
+/// How sure the yes/no check must be that an element is exactly the one.
+const VERIFY_MIN: f64 = 0.6;
+
+/// Asks whether one element is exactly what a step means, details and all.
+/// Plain text and no screenshot: with the picture and a structured state,
+/// Clef answered 0.11 for a right element it rates 0.97 asked this way.
+fn verify(config: &RecipeConfig, _app: &str, step: &str, element: &str, _shot: Option<&Vec<u8>>) -> Result<f64> {
+    let state = Value::String(format!("Instruction: {step}\nCandidate element: {element}"));
+    let mut questions = Map::new();
+    questions.insert(
+        "exact".into(),
+        json!({
+            "type": "noul",
+            "instructions": "Is the candidate element the one the instruction describes, with the same details (times, names, numbers)?",
+        }),
+    );
+    let answers = ask(config, &state, &questions, &[])?;
+    answers
+        .get("exact")
+        .and_then(|a| a.get("noul").and_then(Value::as_f64).or_else(|| a.as_f64()))
+        .ok_or_else(|| anyhow!("the decision model gave no yes/no answer"))
 }
 
 fn perform(handler: &mut dyn Handler, session: &str, window: Option<u64>, action: Action) -> Result<()> {
@@ -508,12 +540,27 @@ fn locate(
             );
             // The chosen option's probability is the direct "is it this one";
             // Clef's confidence runs lower and stopped right picks.
-            let ok = pick.sure(min_confidence);
+            // A pick that is not plainly right gets a yes/no check: among
+            // many near-identical rows (trains a few minutes apart) the
+            // choice's odds are the same for "this is it" and "this is the
+            // closest there is", but asking about the one element is not.
+            let mut verified = None;
+            let ok = pick.sure(min_confidence) || {
+                let v = verify(config, app, target, &c.description, shot.as_ref())?;
+                verified = Some(v);
+                pick.probability >= 0.25 && v >= VERIFY_MIN
+            };
             (
                 c.node.clone(),
-                pick.probability,
+                verified.map_or(pick.probability, |v| v.max(pick.probability)),
                 ok,
-                format!("{} (confidence {:.2}, next {:.2})", c.description, pick.confidence, pick.runner_up),
+                format!(
+                    "{} (choice {:.2}, next {:.2}{})",
+                    c.description,
+                    pick.probability,
+                    pick.runner_up,
+                    verified.map(|v| format!(", exact match {v:.2}")).unwrap_or_default()
+                ),
             )
         } else if let Some(png) = &shot {
             let (x, y, sure) = look(config, app, target, png)?;
@@ -655,6 +702,16 @@ fn run_step(
                 }
                 Some((node, _, _)) => perform(handler, session, window, Action::Focus { element: node.id.clone() })?,
                 None => {}
+            }
+            // "Type X into Y" means Y should say X: clear what a field
+            // already holds (a remembered search, say) rather than add to it.
+            // End and backspaces, not select-all: ⌘A is a menu shortcut some
+            // apps only honour while active.
+            if let Some(len) = found.as_ref().and_then(|(n, _, _)| n.value.as_ref()).map(|v| v.chars().count()) {
+                if len > 0 {
+                    let keys = std::iter::once("end").chain(std::iter::repeat_n("backspace", len)).collect::<Vec<_>>().join(" ");
+                    perform(handler, session, window, Action::PressKey { keys })?;
+                }
             }
             perform(handler, session, window, Action::TypeText { text: text.clone() })?;
         }
