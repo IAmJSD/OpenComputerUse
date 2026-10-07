@@ -32,7 +32,7 @@ pub fn current_version() -> &'static str {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Update {
     pub version: String,
-    /// The release's own page — "what's new", and where someone whose
+    /// The release's own page: "what's new", and where someone whose
     /// copy we must not touch goes to get it.
     pub page: String,
     /// The asset this copy can install over itself, when there is one.
@@ -99,7 +99,7 @@ fn releases_api() -> String {
     std::env::var("OCU_RELEASES_API").unwrap_or_else(|_| RELEASES_API.to_string())
 }
 
-/// Ask GitHub for the latest release. Blocking — call it off the UI thread.
+/// Ask GitHub for the latest release. Blocking; call it off the UI thread.
 pub fn check() -> UpdateStatus {
     let response = ureq::get(&releases_api())
         .header("User-Agent", "opencomputeruse-update-check")
@@ -424,7 +424,7 @@ fn verify_signature(app: &Path, new_app: &Path) -> anyhow::Result<()> {
         );
     }
     let Some(ours) = signing_team(app) else {
-        // An unsigned build — a local one, or a fork's. It has no
+        // An unsigned build: a local one, or a fork's. It has no
         // identity to hold the download to.
         return Ok(());
     };

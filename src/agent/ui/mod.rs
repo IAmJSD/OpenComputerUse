@@ -2,7 +2,7 @@
 //! palette they draw with.
 //!
 //! Copied from VisualHub, which copied it from Schist's `schist-ui` crate (Infrawrench/schist, crates/ui,
-//! at 362c598b), MIT licensed — see `LICENSE-SCHIST` beside this file.
+//! at 362c598b), MIT licensed; see `LICENSE-SCHIST` beside this file.
 //! Only the components VisualHub draws with came across: the slider,
 //! number field, radio, swatch and document tab did not, and the progress
 //! bar was lifted out of the slider's module into `progress.rs`. Inside

@@ -18,7 +18,7 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// One line per parameter: `name` (type, required) — description.
+/// One line per parameter: `name` (type, required): description.
 fn params(schema: &Value) -> String {
     let required: Vec<&str> = schema
         .get("required")
