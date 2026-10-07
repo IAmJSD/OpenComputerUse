@@ -13,15 +13,17 @@ use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardState, MapVirtualKeyW, SetKeyboardState, VkKeyScanW, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_BACK,
-    VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN,
-    VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetKeyboardState, MapVirtualKeyW, SetKeyboardState, VkKeyScanW, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
+    VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME,
+    VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT,
+    VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    ChildWindowFromPointEx, GetGUIThreadInfo, GetWindowThreadProcessId, PostMessageW, CWP_SKIPDISABLED,
-    CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GUITHREADINFO, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    ChildWindowFromPointEx, GetGUIThreadInfo, GetWindowThreadProcessId, PostMessageW,
+    CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GUITHREADINFO, WM_CHAR, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP,
 };
 
 use ocu_core::keys::{Chord, Key, Modifiers, NamedKey};
@@ -44,7 +46,13 @@ fn target(top: HWND, p: POINT) -> (HWND, POINT) {
     loop {
         let mut local = p;
         let _ = unsafe { ScreenToClient(hwnd, &mut local) };
-        let child = unsafe { ChildWindowFromPointEx(hwnd, local, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT) };
+        let child = unsafe {
+            ChildWindowFromPointEx(
+                hwnd,
+                local,
+                CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT,
+            )
+        };
         if child.is_invalid() || child == hwnd {
             return (hwnd, local);
         }
@@ -76,7 +84,11 @@ pub fn click(top: HWND, p: POINT, button: MouseButton, count: u32, m: Modifiers)
     with_modifiers(top, m, || {
         post(h, WM_MOUSEMOVE, mk(m), at);
         for n in 0..count.max(1) {
-            let msg = if n == 1 && button == MouseButton::Left { WM_LBUTTONDBLCLK } else { down };
+            let msg = if n == 1 && button == MouseButton::Left {
+                WM_LBUTTONDBLCLK
+            } else {
+                down
+            };
             post(h, msg, flag | mk(m), at);
             sleep(Duration::from_millis(20));
             post(h, up, mk(m), at);
@@ -97,7 +109,12 @@ pub fn drag(top: HWND, from: POINT, to: POINT, button: MouseButton) {
     let d = (to.x - from.x, to.y - from.y);
     for i in 1..=12 {
         sleep(Duration::from_millis(12));
-        post(h, WM_MOUSEMOVE, flag, lparam_xy(a.x + d.0 * i / 12, a.y + d.1 * i / 12));
+        post(
+            h,
+            WM_MOUSEMOVE,
+            flag,
+            lparam_xy(a.x + d.0 * i / 12, a.y + d.1 * i / 12),
+        );
     }
     post(h, up, 0, lparam_xy(a.x + d.0, a.y + d.1));
 }
@@ -120,7 +137,10 @@ pub fn scroll(top: HWND, p: POINT, dx: f64, dy: f64) {
 /// which a thread keeps even while it is in the background.
 pub fn focus_target(top: HWND) -> HWND {
     let thread = unsafe { GetWindowThreadProcessId(top, None) };
-    let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
     if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_ok() && !info.hwndFocus.is_invalid() {
         info.hwndFocus
     } else {
@@ -141,7 +161,12 @@ fn with_modifiers(top: HWND, m: Modifiers, f: impl FnOnce()) {
     if attached {
         let _ = unsafe { GetKeyboardState(&mut saved) };
         let mut state = saved;
-        for (on, vk) in [(m.shift, VK_SHIFT), (m.ctrl, VK_CONTROL), (m.alt, VK_MENU), (m.meta, VK_LWIN)] {
+        for (on, vk) in [
+            (m.shift, VK_SHIFT),
+            (m.ctrl, VK_CONTROL),
+            (m.alt, VK_MENU),
+            (m.meta, VK_LWIN),
+        ] {
             if on {
                 state[vk.0 as usize] |= 0x80;
             }
@@ -207,12 +232,21 @@ pub fn press(top: HWND, chord: &Chord) {
         }
     };
     // Alt combinations are system keys.
-    let (down, up) = if m.alt { (WM_SYSKEYDOWN, WM_SYSKEYUP) } else { (WM_KEYDOWN, WM_KEYUP) };
+    let (down, up) = if m.alt {
+        (WM_SYSKEYDOWN, WM_SYSKEYUP)
+    } else {
+        (WM_KEYDOWN, WM_KEYUP)
+    };
     with_modifiers(top, m, || {
-        let mods: Vec<VIRTUAL_KEY> = [(m.ctrl, VK_CONTROL), (m.alt, VK_MENU), (m.shift, VK_SHIFT), (m.meta, VK_LWIN)]
-            .into_iter()
-            .filter_map(|(on, vk)| on.then_some(vk))
-            .collect();
+        let mods: Vec<VIRTUAL_KEY> = [
+            (m.ctrl, VK_CONTROL),
+            (m.alt, VK_MENU),
+            (m.shift, VK_SHIFT),
+            (m.meta, VK_LWIN),
+        ]
+        .into_iter()
+        .filter_map(|(on, vk)| on.then_some(vk))
+        .collect();
         for &mk in &mods {
             post(h, down, mk.0 as usize, key_lparam(mk, false));
         }
@@ -222,7 +256,11 @@ pub fn press(top: HWND, chord: &Chord) {
             // posted key bypasses it, so send the character too when the
             // chord types one.
             if let Some(c) = text.filter(|_| !m.ctrl && !m.alt && !m.meta) {
-                let shown = if m.shift { c.to_uppercase().next().unwrap_or(c) } else { c };
+                let shown = if m.shift {
+                    c.to_uppercase().next().unwrap_or(c)
+                } else {
+                    c
+                };
                 post(h, WM_CHAR, shown as usize, key_lparam(vk, false));
             }
             if vk == VK_RETURN && !m.ctrl && !m.alt {
@@ -246,7 +284,13 @@ pub fn type_text(top: HWND, text: &str) {
     let h = focus_target(top);
     for c in text.chars() {
         match c {
-            '\n' => press(top, &Chord { modifiers: Modifiers::default(), key: Some(Key::Named(NamedKey::Enter)) }),
+            '\n' => press(
+                top,
+                &Chord {
+                    modifiers: Modifiers::default(),
+                    key: Some(Key::Named(NamedKey::Enter)),
+                },
+            ),
             c => {
                 let mut buf = [0u16; 2];
                 for unit in c.encode_utf16(&mut buf) {

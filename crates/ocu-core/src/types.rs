@@ -144,7 +144,14 @@ impl UiNode {
 
     fn render_into(&self, out: &mut String, depth: usize) {
         use std::fmt::Write as _;
-        let _ = write!(out, "{:indent$}[{}] {}", "", self.id, self.role, indent = depth * 2);
+        let _ = write!(
+            out,
+            "{:indent$}[{}] {}",
+            "",
+            self.id,
+            self.role,
+            indent = depth * 2
+        );
         if let Some(name) = self.name.as_deref().filter(|s| !s.is_empty()) {
             let _ = write!(out, " \"{}\"", clip(name, 80));
         }
@@ -296,9 +303,9 @@ impl Action {
     /// Where the pointer ends up, for the cursor overlay.
     pub fn pointer(&self) -> Option<(f64, f64)> {
         match *self {
-            Action::Click { x, y, .. } | Action::MoveMouse { x, y } | Action::Scroll { x, y, .. } => {
-                Some((x, y))
-            }
+            Action::Click { x, y, .. }
+            | Action::MoveMouse { x, y }
+            | Action::Scroll { x, y, .. } => Some((x, y)),
             Action::Drag { to_x, to_y, .. } => Some((to_x, to_y)),
             _ => None,
         }

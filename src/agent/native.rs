@@ -5,8 +5,8 @@
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowOrderingMode,
+    NSApplication, NSApplicationActivationPolicy, NSScreen, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowOrderingMode,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -15,7 +15,9 @@ use ocu_core::Rect;
 
 pub fn ns_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
-    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return None };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return None;
+    };
     let view: &NSView = unsafe { h.ns_view.cast::<NSView>().as_ref() };
     view.window()
 }
@@ -39,13 +41,18 @@ pub fn make_overlay(window: &NSWindow) {
 /// The height of the screen whose bottom-left is AppKit's origin; window
 /// server frames measure from its top-left.
 fn primary_height(mtm: MainThreadMarker) -> f64 {
-    NSScreen::screens(mtm).firstObject().map(|s| s.frame().size.height).unwrap_or(0.0)
+    NSScreen::screens(mtm)
+        .firstObject()
+        .map(|s| s.frame().size.height)
+        .unwrap_or(0.0)
 }
 
 /// Places the overlay over `target` (a window-server frame), `margin`
 /// points bigger on every side for the halo, just above `target_id`.
 pub fn cover(window: &NSWindow, target: Rect, target_id: u64, margin: f64) {
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     let h = primary_height(mtm);
     let frame = NSRect::new(
         NSPoint::new(target.x - margin, h - (target.y + target.height) - margin),
@@ -64,7 +71,9 @@ pub fn hide(window: &NSWindow) {
 /// Regular while the status window is open (a Dock icon, ⌘-Tab), an agent
 /// otherwise.
 pub fn set_regular(regular: bool) {
-    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(if regular {
         NSApplicationActivationPolicy::Regular

@@ -20,7 +20,12 @@ pub enum Client {
 }
 
 impl Client {
-    pub const ALL: [Client; 4] = [Client::ClaudeCode, Client::ClaudeDesktop, Client::Codex, Client::OpenCode];
+    pub const ALL: [Client; 4] = [
+        Client::ClaudeCode,
+        Client::ClaudeDesktop,
+        Client::Codex,
+        Client::OpenCode,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -86,10 +91,23 @@ pub fn find(client: Client) -> Option<PathBuf> {
 }
 
 fn find_cli(name: &str) -> Option<PathBuf> {
-    let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let exe = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
     let h = home();
-    for d in [".local/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin"] {
+    for d in [
+        ".local/bin",
+        ".claude/local",
+        ".npm-global/bin",
+        ".bun/bin",
+        ".volta/bin",
+        ".cargo/bin",
+    ] {
         dirs.push(h.join(d));
     }
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].map(PathBuf::from));
@@ -110,18 +128,33 @@ pub fn registered_command(client: Client) -> Option<String> {
         Client::ClaudeCode => std::fs::read(home().join(".claude.json"))
             .ok()
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| v.get("mcpServers")?.get(SERVER_NAME)?.get("command")?.as_str().map(str::to_string)),
+            .and_then(|v| {
+                v.get("mcpServers")?
+                    .get(SERVER_NAME)?
+                    .get("command")?
+                    .as_str()
+                    .map(str::to_string)
+            }),
         Client::OpenCode => opencode::registered_command(),
         Client::ClaudeDesktop => desktop::registered_command(),
         Client::Codex => {
             let text = std::fs::read_to_string(home().join(".codex/config.toml")).ok()?;
-            let header = [format!("[mcp_servers.{SERVER_NAME}]"), format!("[mcp_servers.\"{SERVER_NAME}\"]")];
+            let header = [
+                format!("[mcp_servers.{SERVER_NAME}]"),
+                format!("[mcp_servers.\"{SERVER_NAME}\"]"),
+            ];
             let mut lines = text.lines().map(str::trim);
             lines.by_ref().find(|l| header.iter().any(|h| h == l))?;
-            let line = lines.take_while(|l| !l.starts_with('[')).find(|l| l.starts_with("command"))?;
+            let line = lines
+                .take_while(|l| !l.starts_with('['))
+                .find(|l| l.starts_with("command"))?;
             // command = "/path/to/opencomputeruse"
             let value = line.split_once('=')?.1.trim();
-            Some(value.trim_matches(|c| c == '"' || c == '\'').replace("\\\\", "\\"))
+            Some(
+                value
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .replace("\\\\", "\\"),
+            )
         }
     }
 }
@@ -146,7 +179,9 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 pub fn registration(client: Client) -> Registration {
-    let Some(command) = registered_command(client) else { return Registration::Absent };
+    let Some(command) = registered_command(client) else {
+        return Registration::Absent;
+    };
     // Someone else's server by the same name is never ours to touch.
     if !command.contains("opencomputeruse") {
         return Registration::Absent;
@@ -174,14 +209,27 @@ fn run(cli: &Path, args: &[&str]) -> Result<String> {
     // Both CLIs are often scripts that want their own directory on PATH.
     if let Some(dir) = cli.parent() {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths: Vec<PathBuf> = vec![dir.to_path_buf(), "/opt/homebrew/bin".into(), "/usr/local/bin".into()];
+        let mut paths: Vec<PathBuf> = vec![
+            dir.to_path_buf(),
+            "/opt/homebrew/bin".into(),
+            "/usr/local/bin".into(),
+        ];
         paths.extend(std::env::split_paths(&path));
         cmd.env("PATH", std::env::join_paths(paths)?);
     }
     let out = cmd.output()?;
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     if !out.status.success() {
-        bail!("{} {} failed: {}", cli.display(), args.join(" "), text.trim());
+        bail!(
+            "{} {} failed: {}",
+            cli.display(),
+            args.join(" "),
+            text.trim()
+        );
     }
     Ok(text)
 }
@@ -194,7 +242,13 @@ pub fn install(client: Client) -> Result<()> {
         Client::ClaudeDesktop => return desktop::set(Some(&server_command()?.to_string_lossy())),
         _ => {}
     }
-    let cli = find(client).ok_or_else(|| anyhow!("{} is not installed (no `{}` command found)", client.label(), client.binary()))?;
+    let cli = find(client).ok_or_else(|| {
+        anyhow!(
+            "{} is not installed (no `{}` command found)",
+            client.label(),
+            client.binary()
+        )
+    })?;
     let exe = server_command()?;
     let exe = exe.to_string_lossy();
     match client {
@@ -202,7 +256,19 @@ pub fn install(client: Client) -> Result<()> {
             if installed(client) {
                 run(&cli, &["mcp", "remove", "--scope", "user", SERVER_NAME])?;
             }
-            run(&cli, &["mcp", "add", "--scope", "user", SERVER_NAME, "--", &exe, "mcp"])?;
+            run(
+                &cli,
+                &[
+                    "mcp",
+                    "add",
+                    "--scope",
+                    "user",
+                    SERVER_NAME,
+                    "--",
+                    &exe,
+                    "mcp",
+                ],
+            )?;
         }
         Client::Codex => {
             if installed(client) {
@@ -217,7 +283,10 @@ pub fn install(client: Client) -> Result<()> {
 
 pub fn uninstall(client: Client) -> Result<()> {
     if !installed(client) {
-        bail!("{} has no {SERVER_NAME} server of ours to remove", client.label());
+        bail!(
+            "{} has no {SERVER_NAME} server of ours to remove",
+            client.label()
+        );
     }
     match client {
         Client::OpenCode => return opencode::set(None),
@@ -235,7 +304,9 @@ pub fn uninstall(client: Client) -> Result<()> {
 
 /// A JSON snippet for clients set up by hand (Cursor, Windsurf, …).
 pub fn json_snippet() -> String {
-    let exe = server_command().map(|p| p.display().to_string()).unwrap_or_else(|_| "opencomputeruse".into());
+    let exe = server_command()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "opencomputeruse".into());
     serde_json::to_string_pretty(&serde_json::json!({
         "mcpServers": { SERVER_NAME: { "command": exe, "args": ["mcp"] } }
     }))
@@ -274,9 +345,15 @@ mod desktop {
         if cfg!(target_os = "macos") {
             home().join("Library/Application Support/Claude")
         } else if cfg!(windows) {
-            std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData/Roaming")).join("Claude")
+            std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home().join("AppData/Roaming"))
+                .join("Claude")
         } else {
-            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config")).join("Claude")
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home().join(".config"))
+                .join("Claude")
         }
     }
 
@@ -286,11 +363,16 @@ mod desktop {
 
     /// The app, or its config folder once it has run.
     pub fn find() -> Option<PathBuf> {
-        let mut apps = vec![PathBuf::from("/Applications/Claude.app"), home().join("Applications/Claude.app")];
+        let mut apps = vec![
+            PathBuf::from("/Applications/Claude.app"),
+            home().join("Applications/Claude.app"),
+        ];
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             apps.push(PathBuf::from(local).join("AnthropicClaude"));
         }
-        apps.into_iter().find(|p| p.exists()).or_else(|| Some(config_dir()).filter(|d| d.is_dir()))
+        apps.into_iter()
+            .find(|p| p.exists())
+            .or_else(|| Some(config_dir()).filter(|d| d.is_dir()))
     }
 
     fn load() -> Result<(String, Value)> {
@@ -298,25 +380,40 @@ mod desktop {
         if text.trim().is_empty() {
             return Ok((text, json!({})));
         }
-        let value = serde_json::from_str(&text).with_context(|| format!("reading {}", path().display()))?;
+        let value =
+            serde_json::from_str(&text).with_context(|| format!("reading {}", path().display()))?;
         Ok((text, value))
     }
 
     pub fn registered_command() -> Option<String> {
         let (_, config) = load().ok()?;
-        config.get("mcpServers")?.get(SERVER_NAME)?.get("command")?.as_str().map(str::to_string)
+        config
+            .get("mcpServers")?
+            .get(SERVER_NAME)?
+            .get("command")?
+            .as_str()
+            .map(str::to_string)
     }
 
     /// Adds (with `exe`) or removes the server's entry, keeping the app's
     /// preferences and other servers as they were.
     pub fn set(exe: Option<&str>) -> Result<()> {
         let (original, mut config) = load()?;
-        let root = config.as_object_mut().context("Claude Desktop's config is not a JSON object")?;
-        let servers = root.entry("mcpServers").or_insert_with(|| Value::Object(Map::new()));
-        let servers = servers.as_object_mut().context("Claude Desktop's \"mcpServers\" setting is not an object")?;
+        let root = config
+            .as_object_mut()
+            .context("Claude Desktop's config is not a JSON object")?;
+        let servers = root
+            .entry("mcpServers")
+            .or_insert_with(|| Value::Object(Map::new()));
+        let servers = servers
+            .as_object_mut()
+            .context("Claude Desktop's \"mcpServers\" setting is not an object")?;
         match exe {
             Some(exe) => {
-                servers.insert(SERVER_NAME.into(), json!({ "command": exe, "args": ["mcp"] }));
+                servers.insert(
+                    SERVER_NAME.into(),
+                    json!({ "command": exe, "args": ["mcp"] }),
+                );
             }
             None => {
                 servers.remove(SERVER_NAME);
@@ -381,14 +478,25 @@ mod opencode {
 
     fn load() -> Result<Value> {
         match std::fs::read_to_string(path()) {
-            Ok(text) if text.trim().is_empty() => Ok(json!({ "$schema": "https://opencode.ai/config.json" })),
-            Ok(text) => serde_json::from_str(&text).with_context(|| format!("reading {}", path().display())),
+            Ok(text) if text.trim().is_empty() => {
+                Ok(json!({ "$schema": "https://opencode.ai/config.json" }))
+            }
+            Ok(text) => {
+                serde_json::from_str(&text).with_context(|| format!("reading {}", path().display()))
+            }
             Err(_) => Ok(json!({ "$schema": "https://opencode.ai/config.json" })),
         }
     }
 
     pub fn registered_command() -> Option<String> {
-        load().ok().and_then(|v| v.get("mcp")?.get(SERVER_NAME)?.get("command")?.get(0)?.as_str().map(str::to_string))
+        load().ok().and_then(|v| {
+            v.get("mcp")?
+                .get(SERVER_NAME)?
+                .get("command")?
+                .get(0)?
+                .as_str()
+                .map(str::to_string)
+        })
     }
 
     /// Adds (with `exe`) or removes the server's entry, keeping the rest of
@@ -404,12 +512,21 @@ mod opencode {
             );
         }
         let mut config = load()?;
-        let root = config.as_object_mut().context("OpenCode's config is not a JSON object")?;
-        let mcp = root.entry("mcp").or_insert_with(|| Value::Object(Map::new()));
-        let mcp = mcp.as_object_mut().context("OpenCode's \"mcp\" setting is not an object")?;
+        let root = config
+            .as_object_mut()
+            .context("OpenCode's config is not a JSON object")?;
+        let mcp = root
+            .entry("mcp")
+            .or_insert_with(|| Value::Object(Map::new()));
+        let mcp = mcp
+            .as_object_mut()
+            .context("OpenCode's \"mcp\" setting is not an object")?;
         match exe {
             Some(exe) => {
-                mcp.insert(SERVER_NAME.into(), json!({ "type": "local", "command": [exe, "mcp"], "enabled": true }));
+                mcp.insert(
+                    SERVER_NAME.into(),
+                    json!({ "type": "local", "command": [exe, "mcp"], "enabled": true }),
+                );
             }
             None => {
                 mcp.remove(SERVER_NAME);

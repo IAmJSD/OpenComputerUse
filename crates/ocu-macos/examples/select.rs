@@ -29,18 +29,31 @@ document.getElementById('s').addEventListener('change',e=>document.title=k+'|cha
     let args = match (attach, chrome) {
         (true, _) => vec![],
         (false, true) => vec![
-            format!("--user-data-dir={}", std::env::temp_dir().join("ocu-select-chrome").display()),
+            format!(
+                "--user-data-dir={}",
+                std::env::temp_dir().join("ocu-select-chrome").display()
+            ),
             "--no-first-run".into(),
             "--no-default-browser-check".into(),
             url,
         ],
         (false, false) => vec![url],
     };
-    let mut s = p.launch(&LaunchSpec { app, args, new_instance: chrome && !attach, ..Default::default() })?;
+    let mut s = p.launch(&LaunchSpec {
+        app,
+        args,
+        new_instance: chrome && !attach,
+        ..Default::default()
+    })?;
     if !attach {
         std::thread::sleep(std::time::Duration::from_secs(4));
     }
-    let title = |s: &mut Box<dyn ocu_core::Session>| s.windows().ok().and_then(|w| w.first().map(|w| w.title.clone())).unwrap_or_default();
+    let title = |s: &mut Box<dyn ocu_core::Session>| {
+        s.windows()
+            .ok()
+            .and_then(|w| w.first().map(|w| w.title.clone()))
+            .unwrap_or_default()
+    };
     // Firefox may relaunch itself and load the page late: wait for it.
     for _ in 0..20 {
         let tree = s.ui_tree(None, &TreeOptions::default())?;
@@ -49,15 +62,30 @@ document.getElementById('s').addEventListener('change',e=>document.title=k+'|cha
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    for want in ["Senior Railcard", "16-25 Railcard", "26-30 railcard", "Gold Card"] {
+    for want in [
+        "Senior Railcard",
+        "16-25 Railcard",
+        "26-30 railcard",
+        "Gold Card",
+    ] {
         let tree = s.ui_tree(None, &TreeOptions::default())?;
         let Some(el) = find(&tree, "WebArea").and_then(|web| find(web, "PopUpButton")) else {
             println!("no PopUpButton in the page's tree");
             break;
         };
-        let result = s.perform(None, &Action::SetValue { element: el.id.clone(), value: want.into() });
+        let result = s.perform(
+            None,
+            &Action::SetValue {
+                element: el.id.clone(),
+                value: want.into(),
+            },
+        );
         std::thread::sleep(std::time::Duration::from_millis(300));
-        println!("set {want:?}: {:?}, title now {:?}", result.map_err(|e| e.to_string()), title(&mut s));
+        println!(
+            "set {want:?}: {:?}, title now {:?}",
+            result.map_err(|e| e.to_string()),
+            title(&mut s)
+        );
     }
     s.close();
     Ok(())

@@ -3,18 +3,20 @@
 //! background windows capture as they look (minimised ones do not draw).
 
 use anyhow::{bail, Result};
+use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, GW_OWNER,
+    EnumWindows, GetWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_OWNER,
 };
-use windows::core::BOOL;
 
 use ocu_core::image::{encode_png, Order};
 use ocu_core::{Rect, Screenshot, WindowInfo};
@@ -23,13 +25,23 @@ pub fn frame(hwnd: HWND) -> Rect {
     let mut r = RECT::default();
     // The visible frame, without the invisible resize borders.
     let ok = unsafe {
-        DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut _ as *mut _, std::mem::size_of::<RECT>() as u32)
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut _ as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
     }
     .is_ok();
     if !ok {
         let _ = unsafe { GetWindowRect(hwnd, &mut r) };
     }
-    Rect { x: r.left as f64, y: r.top as f64, width: (r.right - r.left) as f64, height: (r.bottom - r.top) as f64 }
+    Rect {
+        x: r.left as f64,
+        y: r.top as f64,
+        width: (r.right - r.left) as f64,
+        height: (r.bottom - r.top) as f64,
+    }
 }
 
 fn title(hwnd: HWND) -> String {
@@ -44,7 +56,8 @@ fn title(hwnd: HWND) -> String {
 
 fn cloaked(hwnd: HWND) -> bool {
     let mut c = 0u32;
-    unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut c as *mut _ as *mut _, 4) }.is_ok() && c != 0
+    unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut c as *mut _ as *mut _, 4) }.is_ok()
+        && c != 0
 }
 
 /// Visible top-level windows of `pids`, in z-order (topmost first), with
@@ -61,14 +74,27 @@ pub fn windows(pids: &[u32]) -> Vec<WindowInfo> {
         if acc.pids.contains(&pid) && IsWindowVisible(hwnd).as_bool() && !cloaked(hwnd) {
             let f = frame(hwnd);
             if f.width >= 20.0 && f.height >= 20.0 {
-                let owned = GetWindow(hwnd, GW_OWNER).map(|o| !o.is_invalid()).unwrap_or(false);
+                let owned = GetWindow(hwnd, GW_OWNER)
+                    .map(|o| !o.is_invalid())
+                    .unwrap_or(false);
                 let on_screen = !IsIconic(hwnd).as_bool();
-                acc.out.push((WindowInfo { id: hwnd.0 as usize as u64, title: title(hwnd), frame: f, on_screen }, owned));
+                acc.out.push((
+                    WindowInfo {
+                        id: hwnd.0 as usize as u64,
+                        title: title(hwnd),
+                        frame: f,
+                        on_screen,
+                    },
+                    owned,
+                ));
             }
         }
         BOOL(1)
     }
-    let mut acc = Acc { pids, out: Vec::new() };
+    let mut acc = Acc {
+        pids,
+        out: Vec::new(),
+    };
     let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut acc as *mut _ as isize)) };
     acc.out.sort_by_key(|(w, owned)| (*owned, !w.on_screen));
     acc.out.into_iter().map(|(w, _)| w).collect()
@@ -120,11 +146,22 @@ pub fn capture(window: &WindowInfo) -> Result<Screenshot> {
             bail!("the window would not draw itself");
         }
         let f = window.frame;
-        let (ox, oy) = ((f.x as i32 - wr.left).max(0) as usize, (f.y as i32 - wr.top).max(0) as usize);
-        let (cw, ch) = ((f.width as usize).min(w as usize - ox), (f.height as usize).min(ht as usize - oy));
+        let (ox, oy) = (
+            (f.x as i32 - wr.left).max(0) as usize,
+            (f.y as i32 - wr.top).max(0) as usize,
+        );
+        let (cw, ch) = (
+            (f.width as usize).min(w as usize - ox),
+            (f.height as usize).min(ht as usize - oy),
+        );
         let stride = w as usize * 4;
         let cropped = &data[oy * stride + ox * 4..];
         let png = encode_png(cw as u32, ch as u32, stride, cropped, Order::Bgra)?;
-        Ok(Screenshot { window_id: Some(window.id), width: cw as u32, height: ch as u32, png })
+        Ok(Screenshot {
+            window_id: Some(window.id),
+            width: cw as u32,
+            height: ch as u32,
+            png,
+        })
     }
 }

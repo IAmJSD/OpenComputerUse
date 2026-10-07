@@ -10,7 +10,9 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::AllocAnyThread as _;
-use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+};
 use objc2_core_graphics::{
     CGDataProvider, CGImage, CGImageAlphaInfo, CGWindowListCopyWindowInfo, CGWindowListOption,
 };
@@ -42,12 +44,18 @@ pub fn window(id: u64) -> Option<WindowInfo> {
 
 /// The app's normal-layer windows, front to back, on-screen ones first.
 pub fn windows(pid: i32) -> Vec<WindowInfo> {
-    let opts = CGWindowListOption(CGWindowListOption::OptionAll.0 | CGWindowListOption::ExcludeDesktopElements.0);
-    let Some(list) = CGWindowListCopyWindowInfo(opts, 0) else { return Vec::new() };
+    let opts = CGWindowListOption(
+        CGWindowListOption::OptionAll.0 | CGWindowListOption::ExcludeDesktopElements.0,
+    );
+    let Some(list) = CGWindowListCopyWindowInfo(opts, 0) else {
+        return Vec::new();
+    };
     let list: &CFArray<CFDictionary> = unsafe { list.cast_unchecked() };
     let mut out = Vec::new();
     for dict in list.iter() {
-        if num(&dict, "kCGWindowOwnerPID") != Some(pid as f64) || num(&dict, "kCGWindowLayer") != Some(0.0) {
+        if num(&dict, "kCGWindowOwnerPID") != Some(pid as f64)
+            || num(&dict, "kCGWindowLayer") != Some(0.0)
+        {
             continue;
         }
         if num(&dict, "kCGWindowAlpha").unwrap_or(1.0) <= 0.0 {
@@ -92,15 +100,17 @@ unsafe impl<T> Send for Sendable<T> {}
 
 pub(crate) fn shareable_content() -> Result<Retained<SCShareableContent>> {
     let (tx, rx) = mpsc::channel();
-    let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
-        let result = match unsafe { Retained::retain(content) } {
-            Some(c) => Ok(Sendable(c)),
-            None => Err(unsafe { error.as_ref() }
-                .map(|e| e.localizedDescription().to_string())
-                .unwrap_or_else(|| "no content".into())),
-        };
-        let _ = tx.send(result);
-    });
+    let block = RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut NSError| {
+            let result = match unsafe { Retained::retain(content) } {
+                Some(c) => Ok(Sendable(c)),
+                None => Err(unsafe { error.as_ref() }
+                    .map(|e| e.localizedDescription().to_string())
+                    .unwrap_or_else(|| "no content".into())),
+            };
+            let _ = tx.send(result);
+        },
+    );
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
             true, false, &block,
@@ -122,9 +132,14 @@ pub fn capture(window: &WindowInfo) -> Result<Screenshot> {
         .iter()
         .find(|w| unsafe { w.windowID() } as u64 == window.id)
         .ok_or_else(|| anyhow!("ScreenCaptureKit cannot see window {}", window.id))?;
-    let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &sc_window) };
+    let filter = unsafe {
+        SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &sc_window)
+    };
     let config = unsafe { SCStreamConfiguration::new() };
-    let (w, h) = (window.frame.width.round().max(1.0) as usize, window.frame.height.round().max(1.0) as usize);
+    let (w, h) = (
+        window.frame.width.round().max(1.0) as usize,
+        window.frame.height.round().max(1.0) as usize,
+    );
     unsafe {
         config.setWidth(w);
         config.setHeight(h);
@@ -140,11 +155,19 @@ pub fn capture(window: &WindowInfo) -> Result<Screenshot> {
                 .unwrap_or_else(|| "no image".into()))
         } else {
             // Retain across the queue hop; the handler's reference is borrowed.
-            Ok(Sendable(unsafe { CFRetained::retain(std::ptr::NonNull::new_unchecked(image)) }))
+            Ok(Sendable(unsafe {
+                CFRetained::retain(std::ptr::NonNull::new_unchecked(image))
+            }))
         };
         let _ = tx.send(result);
     });
-    unsafe { SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(&filter, &config, Some(&block)) };
+    unsafe {
+        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+            &filter,
+            &config,
+            Some(&block),
+        )
+    };
     let image = match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(i)) => i.0,
         Ok(Err(e)) => bail!("capturing window {} failed: {e}", window.id),
@@ -163,16 +186,25 @@ fn image_png(image: &CGImage) -> Result<Vec<u8>> {
     let width = CGImage::width(Some(image));
     let height = CGImage::height(Some(image));
     let stride = CGImage::bytes_per_row(Some(image));
-    anyhow::ensure!(CGImage::bits_per_pixel(Some(image)) == 32, "unexpected pixel size");
-    let provider = CGImage::data_provider(Some(image)).ok_or_else(|| anyhow!("image has no data"))?;
-    let data = CGDataProvider::data(Some(&provider)).ok_or_else(|| anyhow!("image data unreadable"))?;
+    anyhow::ensure!(
+        CGImage::bits_per_pixel(Some(image)) == 32,
+        "unexpected pixel size"
+    );
+    let provider =
+        CGImage::data_provider(Some(image)).ok_or_else(|| anyhow!("image has no data"))?;
+    let data =
+        CGDataProvider::data(Some(&provider)).ok_or_else(|| anyhow!("image data unreadable"))?;
     let bytes = data.to_vec();
     let info = CGImage::bitmap_info(Some(image));
     // kCGBitmapByteOrderMask and kCGBitmapByteOrder32Little.
     let little = info.0 & 0x7000 == 0x2000;
     let alpha = CGImage::alpha_info(Some(image));
-    let alpha_first = [CGImageAlphaInfo::PremultipliedFirst, CGImageAlphaInfo::First, CGImageAlphaInfo::NoneSkipFirst]
-        .contains(&alpha);
+    let alpha_first = [
+        CGImageAlphaInfo::PremultipliedFirst,
+        CGImageAlphaInfo::First,
+        CGImageAlphaInfo::NoneSkipFirst,
+    ]
+    .contains(&alpha);
     let order = match (little, alpha_first) {
         // ARGB stored little-endian is BGRA in memory.
         (true, true) => Order::Bgra,

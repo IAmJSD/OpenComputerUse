@@ -43,7 +43,10 @@ pub fn serve(mut handler: Box<dyn Handler>) -> Result<()> {
         let msg: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                write(&mut stdout, &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": e.to_string() } }))?;
+                write(
+                    &mut stdout,
+                    &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": e.to_string() } }),
+                )?;
                 continue;
             }
         };
@@ -83,7 +86,8 @@ fn watch_recipe_availability() {
             let now = crate::recipe::available();
             if now != was {
                 was = now;
-                let note = json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
+                let note =
+                    json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" });
                 if write(&mut std::io::stdout(), &note).is_err() {
                     break;
                 }
@@ -97,7 +101,10 @@ fn watch_recipe_availability() {
 pub fn dispatch_value(handler: &mut dyn Handler, msg: &Value, local: bool) -> Option<Value> {
     match msg {
         Value::Array(items) => {
-            let replies: Vec<Value> = items.iter().filter_map(|m| dispatch(handler, m, local)).collect();
+            let replies: Vec<Value> = items
+                .iter()
+                .filter_map(|m| dispatch(handler, m, local))
+                .collect();
             (!replies.is_empty()).then_some(Value::Array(replies))
         }
         single => dispatch(handler, single, local),
@@ -115,11 +122,15 @@ fn result_json(result: Result<tools::Output>) -> Value {
         Ok(out) => {
             let mut content = vec![json!({ "type": "text", "text": out.text })];
             if let Some(img) = out.image {
-                content.push(json!({ "type": "image", "data": img.base64(), "mimeType": "image/png" }));
+                content.push(
+                    json!({ "type": "image", "data": img.base64(), "mimeType": "image/png" }),
+                );
             }
             json!({ "content": content, "isError": false })
         }
-        Err(e) => json!({ "content": [{ "type": "text", "text": format!("Error: {e:#}") }], "isError": true }),
+        Err(e) => {
+            json!({ "content": [{ "type": "text", "text": format!("Error: {e:#}") }], "isError": true })
+        }
     }
 }
 
@@ -127,14 +138,24 @@ fn result_json(result: Result<tools::Output>) -> Value {
 /// devices allowed in over HTTP. Remote callers never see those tools.
 fn dispatch(handler: &mut dyn Handler, msg: &Value, local: bool) -> Option<Value> {
     let id = msg.get("id").cloned();
-    let method = msg.get("method").and_then(Value::as_str).unwrap_or_default();
+    let method = msg
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     // Notifications (no id) get no reply.
     let id = id?;
     let result = match method {
         "initialize" => {
-            let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSIONS[0]);
-            let version = PROTOCOL_VERSIONS.iter().find(|v| **v == asked).copied().unwrap_or(PROTOCOL_VERSIONS[0]);
+            let asked = params
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or(PROTOCOL_VERSIONS[0]);
+            let version = PROTOCOL_VERSIONS
+                .iter()
+                .find(|v| **v == asked)
+                .copied()
+                .unwrap_or(PROTOCOL_VERSIONS[0]);
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": true } },
@@ -151,8 +172,14 @@ fn dispatch(handler: &mut dyn Handler, msg: &Value, local: bool) -> Option<Value
             Ok(json!({ "tools": list }))
         }
         "tools/call" => {
-            let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             log::debug!("tools/call {name} {args}");
             Ok(if local && crate::remote::is_tool(name) {
                 result_json(crate::remote::call(name, &args))
@@ -166,6 +193,8 @@ fn dispatch(handler: &mut dyn Handler, msg: &Value, local: bool) -> Option<Value
     };
     Some(match result {
         Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
-        Err((code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+        Err((code, message)) => {
+            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+        }
     })
 }

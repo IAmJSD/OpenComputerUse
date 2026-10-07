@@ -9,7 +9,11 @@ fn main() -> anyhow::Result<()> {
     };
     let before = front();
     let p = ocu_macos::MacPlatform;
-    let mut s = p.launch(&LaunchSpec { app: std::env::args().nth(1).unwrap_or("TextEdit".into()), new_instance: true, ..Default::default() })?;
+    let mut s = p.launch(&LaunchSpec {
+        app: std::env::args().nth(1).unwrap_or("TextEdit".into()),
+        new_instance: true,
+        ..Default::default()
+    })?;
     let pid = s.describe().pid.unwrap() as i64;
     let out = Command::new("python3").args(["-c", &format!(r#"
 import Quartz
@@ -17,7 +21,11 @@ ws = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly | 
 order = [w['kCGWindowOwnerPID'] for w in ws if w['kCGWindowLayer'] == 0]
 print('session index', order.index({pid}) if {pid} in order else None, 'user app index', order.index({before}) if {before} in order else None)
 "#)]).output()?;
-    print!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    print!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     println!("front before {before}, after {}", front());
     s.close();
     Ok(())

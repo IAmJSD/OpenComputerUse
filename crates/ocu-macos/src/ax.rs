@@ -48,7 +48,10 @@ impl Element {
 
     pub fn attr(&self, name: &str) -> Option<CFRetained<CFType>> {
         let mut out: *const CFType = std::ptr::null();
-        let err = unsafe { self.0.copy_attribute_value(&cfstr(name), NonNull::from(&mut out)) };
+        let err = unsafe {
+            self.0
+                .copy_attribute_value(&cfstr(name), NonNull::from(&mut out))
+        };
         if err != AXError::Success || out.is_null() {
             return None;
         }
@@ -65,14 +68,20 @@ impl Element {
     }
 
     pub fn elements(&self, name: &str) -> Vec<Element> {
-        let Some(v) = self.attr(name) else { return Vec::new() };
+        let Some(v) = self.attr(name) else {
+            return Vec::new();
+        };
         if let Some(arr) = v.downcast_ref::<CFArray>() {
             let arr: &CFArray<CFType> = unsafe { arr.cast_unchecked() };
             arr.iter()
                 .filter_map(|v| v.downcast::<AXUIElement>().ok().map(Element))
                 .collect()
         } else {
-            v.downcast::<AXUIElement>().ok().map(Element).into_iter().collect()
+            v.downcast::<AXUIElement>()
+                .ok()
+                .map(Element)
+                .into_iter()
+                .collect()
         }
     }
 
@@ -93,7 +102,8 @@ impl Element {
         if err != AXError::Success || names.is_null() {
             return Vec::new();
         }
-        let names: CFRetained<CFArray> = unsafe { CFRetained::from_raw(NonNull::new_unchecked(names as *mut _)) };
+        let names: CFRetained<CFArray> =
+            unsafe { CFRetained::from_raw(NonNull::new_unchecked(names as *mut _)) };
         let names: &CFArray<CFString> = unsafe { names.cast_unchecked() };
         names.iter().map(|s| s.to_string()).collect()
     }
@@ -103,12 +113,18 @@ impl Element {
     }
 
     pub fn set(&self, name: &str, value: &CFType) -> Result<()> {
-        check(unsafe { self.0.set_attribute_value(&cfstr(name), value) }, &format!("setting {name}"))
+        check(
+            unsafe { self.0.set_attribute_value(&cfstr(name), value) },
+            &format!("setting {name}"),
+        )
     }
 
     pub fn settable(&self, name: &str) -> bool {
         let mut out: u8 = 0;
-        let err = unsafe { self.0.is_attribute_settable(&cfstr(name), NonNull::from(&mut out).cast()) };
+        let err = unsafe {
+            self.0
+                .is_attribute_settable(&cfstr(name), NonNull::from(&mut out).cast())
+        };
         err == AXError::Success && out != 0
     }
 
@@ -157,7 +173,9 @@ pub fn window_element(pid: i32, window_id: Option<u32>) -> Result<Element> {
     app.element("AXFocusedWindow")
         .or_else(|| app.element("AXMainWindow"))
         .or_else(|| windows.into_iter().next())
-        .ok_or_else(|| anyhow!("the app exposes no accessible windows (is Accessibility permission granted?)"))
+        .ok_or_else(|| {
+            anyhow!("the app exposes no accessible windows (is Accessibility permission granted?)")
+        })
 }
 
 /// Element ids handed out by the last tree read.
@@ -181,13 +199,24 @@ impl ElementTable {
 /// Roles that only group others; unnamed ones are flattened away.
 const GROUPING: &[&str] = &["AXGroup", "AXUnknown", "AXSplitGroup", "AXLayoutArea"];
 
-pub fn read_tree(root: &Element, origin: CGPoint, opts: &TreeOptions, table: &mut ElementTable) -> UiNode {
+pub fn read_tree(
+    root: &Element,
+    origin: CGPoint,
+    opts: &TreeOptions,
+    table: &mut ElementTable,
+) -> UiNode {
     table.elements.clear();
     let mut budget = opts.max_nodes;
     let mut nodes = walk(root, origin, 0, opts, &mut budget, table);
     match nodes.len() {
         1 => nodes.pop().unwrap(),
-        _ => UiNode { id: "root".into(), role: "AXWindow".into(), children: nodes, enabled: true, ..Default::default() },
+        _ => UiNode {
+            id: "root".into(),
+            role: "AXWindow".into(),
+            children: nodes,
+            enabled: true,
+            ..Default::default()
+        },
     }
 }
 
@@ -219,15 +248,25 @@ fn walk(
     };
     // Window buttons and the like have only a subrole to go by.
     // A field's placeholder ("Departing from") is often all that names it.
-    let name = name.or(label).or_else(|| el.string("AXPlaceholderValue").filter(|s| !s.is_empty())).or_else(|| {
-        (description.is_none())
-            .then(|| el.string("AXSubrole"))
-            .flatten()
-            .filter(|s| s.ends_with("Button"))
-            .map(|s| s.trim_start_matches("AX").to_string())
-    });
-    let flatten = GROUPING.contains(&role.as_str()) && name.is_none() && description.is_none() && value.is_none();
-    let children_els = if depth < opts.max_depth { el.elements("AXChildren") } else { Vec::new() };
+    let name = name
+        .or(label)
+        .or_else(|| el.string("AXPlaceholderValue").filter(|s| !s.is_empty()))
+        .or_else(|| {
+            (description.is_none())
+                .then(|| el.string("AXSubrole"))
+                .flatten()
+                .filter(|s| s.ends_with("Button"))
+                .map(|s| s.trim_start_matches("AX").to_string())
+        });
+    let flatten = GROUPING.contains(&role.as_str())
+        && name.is_none()
+        && description.is_none()
+        && value.is_none();
+    let children_els = if depth < opts.max_depth {
+        el.elements("AXChildren")
+    } else {
+        Vec::new()
+    };
     if flatten {
         let mut children = Vec::new();
         for c in &children_els {
@@ -274,8 +313,16 @@ pub fn action_name(name: &str) -> String {
         return name.to_string();
     }
     let known = [
-        "AXPress", "AXShowMenu", "AXConfirm", "AXCancel", "AXIncrement", "AXDecrement", "AXRaise", "AXPick",
-        "AXOpen", "AXScrollToVisible",
+        "AXPress",
+        "AXShowMenu",
+        "AXConfirm",
+        "AXCancel",
+        "AXIncrement",
+        "AXDecrement",
+        "AXRaise",
+        "AXPick",
+        "AXOpen",
+        "AXScrollToVisible",
     ];
     let want = format!("ax{}", name.to_lowercase().replace(['_', ' ', '-'], ""));
     known

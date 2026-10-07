@@ -9,9 +9,10 @@ use anyhow::{bail, Result};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, ResumeThread, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED,
@@ -111,7 +112,8 @@ impl Job {
             let mut cmdline = wide(OsStr::new(&cmdline));
 
             let env_block: Option<Vec<u16>> = (!spec.env.is_empty()).then(|| {
-                let mut vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+                let mut vars: std::collections::BTreeMap<String, String> =
+                    std::env::vars().collect();
                 vars.extend(spec.env.clone());
                 let mut block = Vec::new();
                 for (k, v) in vars {
@@ -139,7 +141,9 @@ impl Job {
                 false,
                 CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP,
                 env_block.as_ref().map(|b| b.as_ptr() as *const _),
-                cwd.as_ref().map(|c| PCWSTR(c.as_ptr())).unwrap_or(PCWSTR::null()),
+                cwd.as_ref()
+                    .map(|c| PCWSTR(c.as_ptr()))
+                    .unwrap_or(PCWSTR::null()),
                 &si,
                 &mut pi,
             );
@@ -152,7 +156,11 @@ impl Job {
             AssignProcessToJobObject(job, pi.hProcess)?;
             ResumeThread(pi.hThread);
             let _ = CloseHandle(pi.hThread);
-            Ok(Self { handle: job, pid: pi.dwProcessId, process: pi.hProcess })
+            Ok(Self {
+                handle: job,
+                pid: pi.dwProcessId,
+                process: pi.hProcess,
+            })
         }
     }
 
@@ -177,7 +185,8 @@ impl Job {
             return vec![self.pid];
         }
         let n = list.head.NumberOfProcessIdsInList as usize;
-        let ids = unsafe { std::slice::from_raw_parts(list.head.ProcessIdList.as_ptr(), n.min(256)) };
+        let ids =
+            unsafe { std::slice::from_raw_parts(list.head.ProcessIdList.as_ptr(), n.min(256)) };
         ids.iter().map(|&p| p as u32).collect()
     }
 

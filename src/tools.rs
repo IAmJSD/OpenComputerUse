@@ -3,7 +3,10 @@
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
 
-use ocu_core::{Action, Handler, LaunchSpec, MouseButton, Observe, Request, Response, Screenshot, TreeOptions, UiNode};
+use ocu_core::{
+    Action, Handler, LaunchSpec, MouseButton, Observe, Request, Response, Screenshot, TreeOptions,
+    UiNode,
+};
 
 use crate::recipe;
 
@@ -49,7 +52,8 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     })
 }
 
-const COORDS: &str = "Coordinates are points from the window's top-left: the pixel grid of its screenshot.";
+const COORDS: &str =
+    "Coordinates are points from the window's top-left: the pixel grid of its screenshot.";
 
 pub fn list() -> Vec<Value> {
     let mut tools = base_tools();
@@ -211,7 +215,9 @@ fn base_tools() -> Vec<Value> {
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
-    args.get(key).and_then(Value::as_str).ok_or_else(|| anyhow!("missing \"{key}\""))
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing \"{key}\""))
 }
 
 fn opt_str(args: &Value, key: &str) -> Option<String> {
@@ -219,7 +225,9 @@ fn opt_str(args: &Value, key: &str) -> Option<String> {
 }
 
 fn num(args: &Value, key: &str) -> Result<f64> {
-    args.get(key).and_then(Value::as_f64).ok_or_else(|| anyhow!("missing \"{key}\""))
+    args.get(key)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow!("missing \"{key}\""))
 }
 
 fn opt_u64(args: &Value, key: &str) -> Option<u64> {
@@ -247,9 +255,14 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
                 let action = match (button(args)?, opt_u64(args, "count").unwrap_or(1)) {
                     (MouseButton::Left, 1) => None,
                     (MouseButton::Right, 1) => Some("showmenu".to_string()),
-                    _ => bail!("element clicks are single left or right clicks; use x/y for others"),
+                    _ => {
+                        bail!("element clicks are single left or right clicks; use x/y for others")
+                    }
                 };
-                Action::ElementAction { element, name: action }
+                Action::ElementAction {
+                    element,
+                    name: action,
+                }
             }
             None => Action::Click {
                 x: num(args, "x")?,
@@ -259,7 +272,10 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
                 modifiers: opt_str(args, "modifiers"),
             },
         },
-        "move_mouse" => Action::MoveMouse { x: num(args, "x")?, y: num(args, "y")? },
+        "move_mouse" => Action::MoveMouse {
+            x: num(args, "x")?,
+            y: num(args, "y")?,
+        },
         "drag" => Action::Drag {
             from_x: num(args, "from_x")?,
             from_y: num(args, "from_y")?,
@@ -273,8 +289,12 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
             dx: args.get("dx").and_then(Value::as_f64).unwrap_or(0.0),
             dy: args.get("dy").and_then(Value::as_f64).unwrap_or(0.0),
         },
-        "type_text" => Action::TypeText { text: str_arg(args, "text")?.to_string() },
-        "press_key" => Action::PressKey { keys: str_arg(args, "keys")?.to_string() },
+        "type_text" => Action::TypeText {
+            text: str_arg(args, "text")?.to_string(),
+        },
+        "press_key" => Action::PressKey {
+            keys: str_arg(args, "keys")?.to_string(),
+        },
         "set_value" => Action::SetValue {
             element: str_arg(args, "element")?.to_string(),
             value: str_arg(args, "value")?.to_string(),
@@ -286,7 +306,9 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
                 name => Action::ElementAction { element, name },
             }
         }
-        "wait" => Action::Wait { ms: opt_u64(args, "ms").unwrap_or(1000) },
+        "wait" => Action::Wait {
+            ms: opt_u64(args, "ms").unwrap_or(1000),
+        },
         _ => return Ok(None),
     }))
 }
@@ -296,7 +318,12 @@ fn tree_text(tree: &UiNode) -> String {
 }
 
 pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Output> {
-    let text = |t: String| Ok(Output { text: t, image: None });
+    let text = |t: String| {
+        Ok(Output {
+            text: t,
+            image: None,
+        })
+    };
     if let Some(action) = action_for(name, args)? {
         let session = str_arg(args, "session_id")?.to_string();
         let observe = Observe {
@@ -304,7 +331,10 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
             ui_tree: flag(args, "ui_tree", false),
             ..Default::default()
         };
-        let Response::Performed { screenshot, ui_tree } = handler.handle(Request::Perform {
+        let Response::Performed {
+            screenshot,
+            ui_tree,
+        } = handler.handle(Request::Perform {
             session,
             window: opt_u64(args, "window_id"),
             action,
@@ -315,18 +345,32 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
         };
         let mut out = format!("Done: {name}.");
         if let Some(s) = &screenshot {
-            out.push_str(&format!(" Screenshot of window {} ({}x{}).", s.window_id.unwrap_or(0), s.width, s.height));
+            out.push_str(&format!(
+                " Screenshot of window {} ({}x{}).",
+                s.window_id.unwrap_or(0),
+                s.width,
+                s.height
+            ));
         }
         if let Some(t) = &ui_tree {
             out.push('\n');
             out.push_str(&tree_text(t));
         }
-        return Ok(Output { text: out, image: screenshot });
+        return Ok(Output {
+            text: out,
+            image: screenshot,
+        });
     }
     match name {
         "start_session" => {
-            let display_size = match (opt_u64(args, "display_width"), opt_u64(args, "display_height")) {
-                (Some(w), Some(h)) => Some(ocu_core::Size { width: w as u32, height: h as u32 }),
+            let display_size = match (
+                opt_u64(args, "display_width"),
+                opt_u64(args, "display_height"),
+            ) {
+                (Some(w), Some(h)) => Some(ocu_core::Size {
+                    width: w as u32,
+                    height: h as u32,
+                }),
                 _ => None,
             };
             let spec = LaunchSpec {
@@ -337,22 +381,31 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
                 new_instance: flag(args, "new_instance", false),
                 display_size,
             };
-            let Response::Session { info, windows } = handler.handle(Request::StartSession(spec))? else {
+            let Response::Session { info, windows } =
+                handler.handle(Request::StartSession(spec))?
+            else {
                 bail!("unexpected reply");
             };
-            text(serde_json::to_string_pretty(&json!({ "session_id": info.id, "session": info, "windows": windows }))?)
+            text(serde_json::to_string_pretty(
+                &json!({ "session_id": info.id, "session": info, "windows": windows }),
+            )?)
         }
         "end_session" => {
-            handler.handle(Request::EndSession { session: str_arg(args, "session_id")?.to_string() })?;
+            handler.handle(Request::EndSession {
+                session: str_arg(args, "session_id")?.to_string(),
+            })?;
             text("Session ended.".into())
         }
         "list_sessions" => {
-            let Response::Sessions(s) = handler.handle(Request::ListSessions)? else { bail!("unexpected reply") };
+            let Response::Sessions(s) = handler.handle(Request::ListSessions)? else {
+                bail!("unexpected reply")
+            };
             text(serde_json::to_string_pretty(&s)?)
         }
         "list_windows" => {
-            let Response::Windows(w) =
-                handler.handle(Request::ListWindows { session: str_arg(args, "session_id")?.to_string() })?
+            let Response::Windows(w) = handler.handle(Request::ListWindows {
+                session: str_arg(args, "session_id")?.to_string(),
+            })?
             else {
                 bail!("unexpected reply")
             };
@@ -361,20 +414,33 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
         "screenshot" => {
             let session = str_arg(args, "session_id")?.to_string();
             let window = opt_u64(args, "window_id");
-            let Response::Screenshot(shot) = handler.handle(Request::Screenshot { session: session.clone(), window })?
+            let Response::Screenshot(shot) = handler.handle(Request::Screenshot {
+                session: session.clone(),
+                window,
+            })?
             else {
                 bail!("unexpected reply")
             };
-            let mut out = format!("Window {} ({}x{}).", shot.window_id.unwrap_or(0), shot.width, shot.height);
+            let mut out = format!(
+                "Window {} ({}x{}).",
+                shot.window_id.unwrap_or(0),
+                shot.width,
+                shot.height
+            );
             if flag(args, "ui_tree", false) {
-                if let Response::UiTree(t) =
-                    handler.handle(Request::UiTree { session, window, options: TreeOptions::default() })?
-                {
+                if let Response::UiTree(t) = handler.handle(Request::UiTree {
+                    session,
+                    window,
+                    options: TreeOptions::default(),
+                })? {
                     out.push('\n');
                     out.push_str(&tree_text(&t));
                 }
             }
-            Ok(Output { text: out, image: Some(shot) })
+            Ok(Output {
+                text: out,
+                image: Some(shot),
+            })
         }
         "get_ui_tree" => {
             let mut options = TreeOptions::default();
@@ -396,7 +462,9 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
         }
         "run_recipe" => recipe::run(handler, args),
         "permissions" => {
-            let Response::Permissions(p) = handler.handle(Request::Permissions)? else { bail!("unexpected reply") };
+            let Response::Permissions(p) = handler.handle(Request::Permissions)? else {
+                bail!("unexpected reply")
+            };
             if p.is_empty() {
                 return text("This platform needs no special permissions.".into());
             }

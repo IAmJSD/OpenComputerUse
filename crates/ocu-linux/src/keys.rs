@@ -4,9 +4,9 @@
 
 use anyhow::{bail, Result};
 use x11rb::connection::Connection as _;
-use x11rb::wrapper::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, Keycode, Keysym};
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
 use ocu_core::keys::{Key, Modifiers, NamedKey};
 
@@ -76,10 +76,20 @@ impl Keymap {
         let reply = conn.get_keyboard_mapping(min, max - min + 1)?.reply()?;
         let per = reply.keysyms_per_keycode as usize;
         let spare = (0..=(max - min) as usize)
-            .filter(|&i| reply.keysyms[i * per..(i + 1) * per].iter().all(|&s| s == 0))
+            .filter(|&i| {
+                reply.keysyms[i * per..(i + 1) * per]
+                    .iter()
+                    .all(|&s| s == 0)
+            })
             .map(|i| min + i as u8)
             .collect();
-        Ok(Self { min, per, syms: reply.keysyms, spare, next_spare: 0 })
+        Ok(Self {
+            min,
+            per,
+            syms: reply.keysyms,
+            spare,
+            next_spare: 0,
+        })
     }
 
     /// The keycode for `sym`, and whether it needs shift.

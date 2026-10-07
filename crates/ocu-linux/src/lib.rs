@@ -31,7 +31,10 @@ use x11rb::rust_connection::{DefaultStream, RustConnection};
 
 use ocu_core::image::{encode_png, Order};
 use ocu_core::keys::{parse_chord, parse_chords, Chord, Key, Modifiers, NamedKey};
-use ocu_core::{pick_window, Action, Description, LaunchSpec, MouseButton, Platform, Rect, Screenshot, Session, Size, WindowInfo};
+use ocu_core::{
+    pick_window, Action, Description, LaunchSpec, MouseButton, Platform, Rect, Screenshot, Session,
+    Size, WindowInfo,
+};
 
 pub struct LinuxPlatform {
     xvfb: Option<PathBuf>,
@@ -54,7 +57,10 @@ fn find_xvfb() -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let mut candidates = vec![exe_dir.join("Xvfb"), exe_dir.join("../lib/opencomputeruse/Xvfb")];
+    let mut candidates = vec![
+        exe_dir.join("Xvfb"),
+        exe_dir.join("../lib/opencomputeruse/Xvfb"),
+    ];
     if let Some(path) = std::env::var_os("PATH") {
         candidates.extend(std::env::split_paths(&path).map(|d| d.join("Xvfb")));
     }
@@ -76,7 +82,9 @@ impl Platform for LinuxPlatform {
 
     fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>> {
         let xvfb = self.xvfb.as_ref().ok_or_else(|| {
-            anyhow!("Xvfb is not installed; install it (apt install xvfb) or set OCU_XVFB to its path")
+            anyhow!(
+                "Xvfb is not installed; install it (apt install xvfb) or set OCU_XVFB to its path"
+            )
         })?;
         Ok(Box::new(LinuxSession::start(xvfb, spec)?))
     }
@@ -116,7 +124,11 @@ fn write_xauthority(path: &Path, cookie: &[u8]) -> Result<()> {
     field(&mut out, b"MIT-MAGIC-COOKIE-1");
     field(&mut out, cookie);
     use std::os::unix::fs::OpenOptionsExt as _;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
     std::io::Write::write_all(&mut f, &out)?;
     Ok(())
 }
@@ -129,7 +141,11 @@ struct Display {
 
 impl Display {
     fn start(xvfb: &Path, size: Size) -> Result<(Self, Vec<u8>)> {
-        let dir = std::env::temp_dir().join(format!("ocu-{}-{}", std::process::id(), hex(&random_bytes(4)?)));
+        let dir = std::env::temp_dir().join(format!(
+            "ocu-{}-{}",
+            std::process::id(),
+            hex(&random_bytes(4)?)
+        ));
         std::fs::create_dir(&dir)?;
         let cookie = random_bytes(16)?;
         let auth = dir.join("Xauthority");
@@ -173,7 +189,14 @@ impl Display {
                 bail!("Xvfb did not start (it reported \"{}\")", out.trim());
             }
         };
-        Ok((Self { number, server, dir }, cookie))
+        Ok((
+            Self {
+                number,
+                server,
+                dir,
+            },
+            cookie,
+        ))
     }
 
     fn name(&self) -> String {
@@ -208,10 +231,17 @@ fn connect(display: &Display, cookie: &[u8]) -> Result<(RustConnection, Window)>
         }
     };
     let (stream, _) = DefaultStream::from_unix_stream(unix)?;
-    let conn = RustConnection::connect_to_stream_with_auth_info(stream, 0, b"MIT-MAGIC-COOKIE-1".to_vec(), cookie.to_vec())
-        .context("X handshake")?;
+    let conn = RustConnection::connect_to_stream_with_auth_info(
+        stream,
+        0,
+        b"MIT-MAGIC-COOKIE-1".to_vec(),
+        cookie.to_vec(),
+    )
+    .context("X handshake")?;
     let root = conn.setup().roots[0].root;
-    conn.xtest_get_version(2, 2)?.reply().context("the X server has no XTEST")?;
+    conn.xtest_get_version(2, 2)?
+        .reply()
+        .context("the X server has no XTEST")?;
     Ok((conn, root))
 }
 
@@ -228,7 +258,10 @@ pub struct LinuxSession {
 
 impl LinuxSession {
     fn start(xvfb: &Path, spec: &LaunchSpec) -> Result<Self> {
-        let size = spec.display_size.unwrap_or(Size { width: 1440, height: 900 });
+        let size = spec.display_size.unwrap_or(Size {
+            width: 1440,
+            height: 900,
+        });
         let (display, cookie) = Display::start(xvfb, size)?;
         let (conn, root) = connect(&display, &cookie)?;
         let keymap = keys::Keymap::read(&conn)?;
@@ -252,9 +285,22 @@ impl LinuxSession {
             cmd.current_dir(cwd);
         }
         die_with_parent(&mut cmd);
-        let app = cmd.spawn().with_context(|| format!("starting {}", spec.app))?;
-        let name = Path::new(&spec.app).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut session = Self { app, name, conn, root, keymap, display, closed: false };
+        let app = cmd
+            .spawn()
+            .with_context(|| format!("starting {}", spec.app))?;
+        let name = Path::new(&spec.app)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut session = Self {
+            app,
+            name,
+            conn,
+            root,
+            keymap,
+            display,
+            closed: false,
+        };
 
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline && session.is_alive() {
@@ -268,9 +314,20 @@ impl LinuxSession {
     }
 
     fn title(&self, w: Window) -> String {
-        let atom = |name: &[u8]| self.conn.intern_atom(false, name).ok()?.reply().ok().map(|r| r.atom);
+        let atom = |name: &[u8]| {
+            self.conn
+                .intern_atom(false, name)
+                .ok()?
+                .reply()
+                .ok()
+                .map(|r| r.atom)
+        };
         if let (Some(net_name), Some(utf8)) = (atom(b"_NET_WM_NAME"), atom(b"UTF8_STRING")) {
-            if let Ok(Ok(r)) = self.conn.get_property(false, w, net_name, utf8, 0, 1024).map(|c| c.reply()) {
+            if let Ok(Ok(r)) = self
+                .conn
+                .get_property(false, w, net_name, utf8, 0, 1024)
+                .map(|c| c.reply())
+            {
                 if !r.value.is_empty() {
                     return String::from_utf8_lossy(&r.value).into_owned();
                 }
@@ -290,18 +347,29 @@ impl LinuxSession {
         let tree = self.conn.query_tree(self.root)?.reply()?;
         let mut out = Vec::new();
         for &w in tree.children.iter().rev() {
-            let Ok(attrs) = self.conn.get_window_attributes(w)?.reply() else { continue };
-            if attrs.map_state != MapState::VIEWABLE || attrs.class == xproto::WindowClass::INPUT_ONLY {
+            let Ok(attrs) = self.conn.get_window_attributes(w)?.reply() else {
+                continue;
+            };
+            if attrs.map_state != MapState::VIEWABLE
+                || attrs.class == xproto::WindowClass::INPUT_ONLY
+            {
                 continue;
             }
-            let Ok(g) = self.conn.get_geometry(w)?.reply() else { continue };
+            let Ok(g) = self.conn.get_geometry(w)?.reply() else {
+                continue;
+            };
             if g.width < 2 || g.height < 2 {
                 continue;
             }
             let info = WindowInfo {
                 id: w as u64,
                 title: self.title(w),
-                frame: Rect { x: g.x as f64, y: g.y as f64, width: g.width as f64, height: g.height as f64 },
+                frame: Rect {
+                    x: g.x as f64,
+                    y: g.y as f64,
+                    width: g.width as f64,
+                    height: g.height as f64,
+                },
                 on_screen: true,
             };
             out.push((info, attrs.override_redirect));
@@ -316,30 +384,46 @@ impl LinuxSession {
     }
 
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<()> {
-        self.conn.xtest_fake_input(kind, detail, x11rb::CURRENT_TIME, self.root, x, y, 0)?;
+        self.conn
+            .xtest_fake_input(kind, detail, x11rb::CURRENT_TIME, self.root, x, y, 0)?;
         Ok(())
     }
 
     fn move_to(&self, w: &WindowInfo, x: f64, y: f64) -> Result<()> {
-        let (gx, gy) = ((w.frame.x + x).round() as i16, (w.frame.y + y).round() as i16);
+        let (gx, gy) = (
+            (w.frame.x + x).round() as i16,
+            (w.frame.y + y).round() as i16,
+        );
         self.fake(xproto::MOTION_NOTIFY_EVENT, 0, gx, gy)?;
         self.conn.flush()?;
         Ok(())
     }
 
     fn button(&self, b: u8, down: bool) -> Result<()> {
-        let kind = if down { xproto::BUTTON_PRESS_EVENT } else { xproto::BUTTON_RELEASE_EVENT };
+        let kind = if down {
+            xproto::BUTTON_PRESS_EVENT
+        } else {
+            xproto::BUTTON_RELEASE_EVENT
+        };
         self.fake(kind, b, 0, 0)
     }
 
     fn key(&self, code: u8, down: bool) -> Result<()> {
-        let kind = if down { xproto::KEY_PRESS_EVENT } else { xproto::KEY_RELEASE_EVENT };
+        let kind = if down {
+            xproto::KEY_PRESS_EVENT
+        } else {
+            xproto::KEY_RELEASE_EVENT
+        };
         self.fake(kind, code, 0, 0)
     }
 
     /// Gives `w` the keyboard. There is no window manager to do it.
     fn focus(&self, w: &WindowInfo) -> Result<()> {
-        self.conn.set_input_focus(InputFocus::POINTER_ROOT, w.id as Window, x11rb::CURRENT_TIME)?;
+        self.conn.set_input_focus(
+            InputFocus::POINTER_ROOT,
+            w.id as Window,
+            x11rb::CURRENT_TIME,
+        )?;
         Ok(())
     }
 
@@ -384,8 +468,15 @@ impl Session for LinuxSession {
     fn describe(&self) -> Description {
         let mut details = BTreeMap::new();
         details.insert("display".into(), self.display.name());
-        details.insert("xauthority".into(), self.display.auth_file().display().to_string());
-        Description { app: self.name.clone(), pid: Some(self.app.id()), details }
+        details.insert(
+            "xauthority".into(),
+            self.display.auth_file().display().to_string(),
+        );
+        Description {
+            app: self.name.clone(),
+            pid: Some(self.app.id()),
+            details,
+        }
     }
 
     fn windows(&mut self) -> Result<Vec<WindowInfo>> {
@@ -411,7 +502,12 @@ impl Session for LinuxSession {
         }
         let stride = img.data.len() / height.max(1) as usize;
         let png = encode_png(width as u32, height as u32, stride, &img.data, Order::Bgra)?;
-        Ok(Screenshot { window_id: Some(w.id), width: width as u32, height: height as u32, png })
+        Ok(Screenshot {
+            window_id: Some(w.id),
+            width: width as u32,
+            height: height as u32,
+            png,
+        })
     }
 
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
@@ -427,7 +523,13 @@ impl Session for LinuxSession {
         }
         let w = self.window(window)?;
         match action {
-            Action::Click { x, y, button, count, modifiers } => {
+            Action::Click {
+                x,
+                y,
+                button,
+                count,
+                modifiers,
+            } => {
                 let mods = match modifiers.as_deref().filter(|s| !s.is_empty()) {
                     Some(s) => parse_chord(s)?.modifiers,
                     None => Modifiers::default(),
@@ -452,14 +554,24 @@ impl Session for LinuxSession {
                 self.conn.flush()?;
             }
             Action::MoveMouse { x, y } => self.move_to(&w, *x, *y)?,
-            Action::Drag { from_x, from_y, to_x, to_y, button } => {
+            Action::Drag {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                button,
+            } => {
                 self.move_to(&w, *from_x, *from_y)?;
                 self.button(x_button(*button), true)?;
                 self.conn.flush()?;
                 for i in 1..=12 {
                     let t = i as f64 / 12.0;
                     sleep(Duration::from_millis(12));
-                    self.move_to(&w, from_x + (to_x - from_x) * t, from_y + (to_y - from_y) * t)?;
+                    self.move_to(
+                        &w,
+                        from_x + (to_x - from_x) * t,
+                        from_y + (to_y - from_y) * t,
+                    )?;
                 }
                 self.button(x_button(*button), false)?;
                 self.conn.flush()?;
@@ -467,7 +579,8 @@ impl Session for LinuxSession {
             Action::Scroll { x, y, dx, dy } => {
                 self.move_to(&w, *x, *y)?;
                 // Wheel buttons: 4 up, 5 down, 6 left, 7 right; ~40px a notch.
-                let notches = |d: f64| ((d.abs() / 40.0).round() as u32).max(if d != 0.0 { 1 } else { 0 });
+                let notches =
+                    |d: f64| ((d.abs() / 40.0).round() as u32).max(if d != 0.0 { 1 } else { 0 });
                 let (vb, hb) = (if *dy > 0.0 { 5 } else { 4 }, if *dx > 0.0 { 7 } else { 6 });
                 for _ in 0..notches(*dy) {
                     self.button(vb, true)?;
@@ -489,7 +602,10 @@ impl Session for LinuxSession {
                     };
                     // Characters keep their case: keysym() maps 'A' to its
                     // own keysym, which the keymap finds on the shifted level.
-                    self.press_chord(&Chord { modifiers: Modifiers::default(), key: Some(key) })?;
+                    self.press_chord(&Chord {
+                        modifiers: Modifiers::default(),
+                        key: Some(key),
+                    })?;
                     sleep(Duration::from_millis(3));
                 }
             }
@@ -500,7 +616,10 @@ impl Session for LinuxSession {
                     sleep(Duration::from_millis(20));
                 }
             }
-            Action::ElementAction { .. } | Action::SetValue { .. } | Action::Focus { .. } | Action::Wait { .. } => {
+            Action::ElementAction { .. }
+            | Action::SetValue { .. }
+            | Action::Focus { .. }
+            | Action::Wait { .. } => {
                 unreachable!()
             }
         }

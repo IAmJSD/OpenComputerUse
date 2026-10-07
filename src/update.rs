@@ -167,7 +167,10 @@ fn installer_for(release: &Value) -> Option<Installer> {
 
 /// A string field, or "" when it is missing.
 fn s(v: &Value, key: &str) -> String {
-    v.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+    v.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Whether a release asset is the one that installs this platform.
@@ -189,7 +192,6 @@ fn sha256_from_digest(digest: &str) -> Option<String> {
 
 /// Whether this copy is one we can replace in place: an
 /// application bundle we can write next to on macOS.
-
 pub fn self_installable() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -295,7 +297,10 @@ fn bundle_path() -> Option<PathBuf> {
 /// so ask the filesystem instead.
 #[cfg(target_os = "macos")]
 fn is_writable(dir: &Path) -> bool {
-    let probe = dir.join(format!(".opencomputeruse-write-probe-{}", std::process::id()));
+    let probe = dir.join(format!(
+        ".opencomputeruse-write-probe-{}",
+        std::process::id()
+    ));
     match std::fs::create_dir(&probe) {
         Ok(()) => {
             let _ = std::fs::remove_dir(&probe);
@@ -443,7 +448,10 @@ pub fn quit_running_app() {
         .output();
     for _ in 0..50 {
         let running = std::process::Command::new("/usr/bin/pgrep")
-            .args(["-f", "OpenComputerUse.app/Contents/MacOS/opencomputeruse agent"])
+            .args([
+                "-f",
+                "OpenComputerUse.app/Contents/MacOS/opencomputeruse agent",
+            ])
             .output()
             .is_ok_and(|o| o.status.success());
         if !running {

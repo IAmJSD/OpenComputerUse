@@ -23,20 +23,30 @@ pub struct Issued {
 pub fn generate(name: &str, url: &str) -> Result<Issued> {
     let mut d = Devices::load();
     let (device, key) = d.add(name, url)?;
-    Ok(Issued { skill: skill::render(&device, &key, &crate::tools::list()), device })
+    Ok(Issued {
+        skill: skill::render(&device, &key, &crate::tools::list()),
+        device,
+    })
 }
 
 pub fn regenerate(id: &str, url: Option<&str>) -> Result<Issued> {
     let mut d = Devices::load();
     let (device, key) = d.regenerate(id, url)?;
-    Ok(Issued { skill: skill::render(&device, &key, &crate::tools::list()), device })
+    Ok(Issued {
+        skill: skill::render(&device, &key, &crate::tools::list()),
+        device,
+    })
 }
 
 /// Where a skill is saved: `~/Downloads/<skill name>/SKILL.md`, ready to
 /// copy into a device's skills folder.
 pub fn save_skill(skill: &str) -> Result<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
-    let dir = std::path::Path::new(&home).join("Downloads").join(skill::skill_name());
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .unwrap_or_default();
+    let dir = std::path::Path::new(&home)
+        .join("Downloads")
+        .join(skill::skill_name());
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("SKILL.md");
     std::fs::write(&path, skill)?;
@@ -70,7 +80,13 @@ pub fn set_server(enabled: Option<bool>, port: Option<u16>) -> Result<Config> {
 
 // ------------------------------------------------------------- MCP tools
 
-const TOOLS: &[&str] = &["list_devices", "generate_skill", "regenerate_key", "remove_device", "http_server"];
+const TOOLS: &[&str] = &[
+    "list_devices",
+    "generate_skill",
+    "regenerate_key",
+    "remove_device",
+    "http_server",
+];
 
 pub fn is_tool(name: &str) -> bool {
     TOOLS.contains(&name)
@@ -119,7 +135,10 @@ pub fn tool_definitions() -> Vec<Value> {
 }
 
 fn text(t: String) -> Result<Output> {
-    Ok(Output { text: t, image: None })
+    Ok(Output {
+        text: t,
+        image: None,
+    })
 }
 
 fn server_state(config: &Config) -> String {
@@ -132,7 +151,10 @@ fn server_state(config: &Config) -> String {
     } else {
         "`opencomputeruse serve` serves it; `opencomputeruse serve --install` keeps it running after a reboot"
     };
-    format!("The HTTP server is on, listening on {}:{}; {how}.", h.bind, h.port)
+    format!(
+        "The HTTP server is on, listening on {}:{}; {how}.",
+        h.bind, h.port
+    )
 }
 
 pub fn call(name: &str, args: &Value) -> Result<Output> {
@@ -141,7 +163,11 @@ pub fn call(name: &str, args: &Value) -> Result<Output> {
         "http_server" => {
             let enabled = args.get("enabled").and_then(Value::as_bool);
             let port = args.get("port").and_then(Value::as_u64).map(|p| p as u16);
-            let config = if enabled.is_some() || port.is_some() { set_server(enabled, port)? } else { Config::load() };
+            let config = if enabled.is_some() || port.is_some() {
+                set_server(enabled, port)?
+            } else {
+                Config::load()
+            };
             text(server_state(&config))
         }
         "list_devices" => {
@@ -149,25 +175,39 @@ pub fn call(name: &str, args: &Value) -> Result<Output> {
             if d.devices.is_empty() {
                 return text("No devices yet; generate_skill adds one.".into());
             }
-            let list: Vec<Value> =
-                d.devices.iter().map(|d| json!({ "id": d.id, "name": d.name, "url": d.url, "created": d.created })).collect();
+            let list: Vec<Value> = d
+                .devices
+                .iter()
+                .map(|d| json!({ "id": d.id, "name": d.name, "url": d.url, "created": d.created }))
+                .collect();
             text(serde_json::to_string_pretty(&list)?)
         }
         "generate_skill" => {
-            let Some(device_name) = s("device_name") else { bail!("missing \"device_name\"") };
-            let url = s("url").filter(|u| !u.trim().is_empty()).unwrap_or_else(|| devices::suggested_url(Config::load().http.port));
+            let Some(device_name) = s("device_name") else {
+                bail!("missing \"device_name\"")
+            };
+            let url = s("url")
+                .filter(|u| !u.trim().is_empty())
+                .unwrap_or_else(|| devices::suggested_url(Config::load().http.port));
             let issued = generate(&device_name, &url)?;
             text(issued_text(&issued))
         }
         "regenerate_key" => {
-            let Some(device) = s("device") else { bail!("missing \"device\"") };
+            let Some(device) = s("device") else {
+                bail!("missing \"device\"")
+            };
             let issued = regenerate(&device, s("url").as_deref())?;
             text(issued_text(&issued))
         }
         "remove_device" => {
-            let Some(device) = s("device") else { bail!("missing \"device\"") };
+            let Some(device) = s("device") else {
+                bail!("missing \"device\"")
+            };
             let d = Devices::load().remove(&device)?;
-            text(format!("Removed {} ({}); its key no longer works.", d.name, d.id))
+            text(format!(
+                "Removed {} ({}); its key no longer works.",
+                d.name, d.id
+            ))
         }
         _ => bail!("unknown tool \"{name}\""),
     }
@@ -217,9 +257,14 @@ pub mod autostart {
             return Ok(());
         }
         let exe = std::env::current_exe()?;
-        let Some(bundle) = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) else {
+        let Some(bundle) = exe
+            .ancestors()
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+        else {
             // A development build has no bundle to open at login.
-            anyhow::bail!("not running from OpenComputerUse.app, so there is nothing to start at login");
+            anyhow::bail!(
+                "not running from OpenComputerUse.app, so there is nothing to start at login"
+            );
         };
         let plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -255,7 +300,9 @@ pub mod autostart {
 
     #[cfg(target_os = "macos")]
     fn xml_escape(s: &str) -> String {
-        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
     }
 
     #[cfg(target_os = "macos")]
@@ -267,7 +314,9 @@ pub mod autostart {
     fn unit_path() -> PathBuf {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+            });
         base.join("systemd/user/opencomputeruse.service")
     }
 
@@ -276,7 +325,12 @@ pub mod autostart {
     #[cfg(target_os = "linux")]
     pub fn set(on: bool) -> Result<()> {
         let path = unit_path();
-        let systemctl = |args: &[&str]| std::process::Command::new("systemctl").arg("--user").args(args).status();
+        let systemctl = |args: &[&str]| {
+            std::process::Command::new("systemctl")
+                .arg("--user")
+                .args(args)
+                .status()
+        };
         if !on {
             let _ = systemctl(&["disable", "--now", "opencomputeruse.service"]);
             let _ = std::fs::remove_file(&path);
@@ -301,11 +355,22 @@ pub mod autostart {
         let status = if on {
             let exe = std::env::current_exe()?;
             std::process::Command::new("reg")
-                .args(["add", key, "/v", "OpenComputerUse", "/t", "REG_SZ", "/f", "/d"])
+                .args([
+                    "add",
+                    key,
+                    "/v",
+                    "OpenComputerUse",
+                    "/t",
+                    "REG_SZ",
+                    "/f",
+                    "/d",
+                ])
                 .arg(format!("\"{}\" serve", exe.display()))
                 .status()?
         } else {
-            std::process::Command::new("reg").args(["delete", key, "/v", "OpenComputerUse", "/f"]).status()?
+            std::process::Command::new("reg")
+                .args(["delete", key, "/v", "OpenComputerUse", "/f"])
+                .status()?
         };
         anyhow::ensure!(status.success() || !on, "reg failed");
         Ok(())

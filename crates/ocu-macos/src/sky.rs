@@ -104,7 +104,11 @@ pub fn set_window_location(event: &CGEvent, local: CGPoint) {
 pub fn set_field(event: &CGEvent, field: u32, value: i64) {
     match symbols().set_int_field {
         Some(f) => unsafe { f(event, field, value) },
-        None => CGEvent::set_integer_value_field(Some(event), objc2_core_graphics::CGEventField(field), value),
+        None => CGEvent::set_integer_value_field(
+            Some(event),
+            objc2_core_graphics::CGEventField(field),
+            value,
+        ),
     }
 }
 
@@ -136,7 +140,11 @@ pub struct FocusLease {
 /// AppKit requires before it acts on a click, without raising the window or
 /// changing the frontmost app. The user's app is told it lost focus until
 /// the returned lease is dropped.
-pub fn focus_without_raise(pid: i32, window_id: u32, previous: Option<(i32, u32)>) -> Option<FocusLease> {
+pub fn focus_without_raise(
+    pid: i32,
+    window_id: u32,
+    previous: Option<(i32, u32)>,
+) -> Option<FocusLease> {
     let post = symbols().post_record?;
     let target = psn(pid)?;
     let previous = previous
@@ -150,13 +158,21 @@ pub fn focus_without_raise(pid: i32, window_id: u32, previous: Option<(i32, u32)
     }
     // Let AppKit update its key-window routing before events arrive.
     std::thread::sleep(std::time::Duration::from_millis(50));
-    Some(FocusLease { previous, target, window_id })
+    Some(FocusLease {
+        previous,
+        target,
+        window_id,
+    })
 }
 
 impl Drop for FocusLease {
     fn drop(&mut self) {
-        let Some(post) = symbols().post_record else { return };
-        let Some((prev, prev_wid)) = &self.previous else { return };
+        let Some(post) = symbols().post_record else {
+            return;
+        };
+        let Some((prev, prev_wid)) = &self.previous else {
+            return;
+        };
         unsafe {
             post(&self.target, focus_record(self.window_id, 2).as_ptr());
             post(prev, focus_record(*prev_wid, 1).as_ptr());
@@ -167,7 +183,9 @@ impl Drop for FocusLease {
 /// Brings an app and all its windows back to the front: how focus goes back
 /// to the user's app after a launch put a session window on top.
 pub fn bring_to_front(pid: i32) -> bool {
-    let (Some(front), Some(psn)) = (symbols().set_front_process, psn(pid)) else { return false };
+    let (Some(front), Some(psn)) = (symbols().set_front_process, psn(pid)) else {
+        return false;
+    };
     // kCPSAllWindows: raise every window, not just the key one.
     unsafe { front(&psn, 0, 0x100) == 0 }
 }

@@ -4,7 +4,17 @@
 
 use gpui::{actions, App, KeyBinding, Menu, MenuItem};
 
-actions!(opencomputeruse, [Quit, Hide, HideOthers, ShowAll, CloseWindow, CheckForUpdates]);
+actions!(
+    opencomputeruse,
+    [
+        Quit,
+        Hide,
+        HideOthers,
+        ShowAll,
+        CloseWindow,
+        CheckForUpdates
+    ]
+);
 
 pub fn install(cx: &mut App) {
     cx.bind_keys([
@@ -34,6 +44,9 @@ pub fn install(cx: &mut App) {
                 MenuItem::action("Quit OpenComputerUse", Quit),
             ],
         },
-        Menu { name: "Window".into(), items: vec![MenuItem::action("Close Window", CloseWindow)] },
+        Menu {
+            name: "Window".into(),
+            items: vec![MenuItem::action("Close Window", CloseWindow)],
+        },
     ]);
 }

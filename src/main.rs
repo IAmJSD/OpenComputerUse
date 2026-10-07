@@ -49,11 +49,18 @@ fn run() -> Result<()> {
     match first {
         Some("mcp") => run_mcp(),
         Some("install") | Some("uninstall") => {
-            let Some(client) = args.get(1) else { bail!("name a client: claude, claude-desktop, codex or opencode") };
+            let Some(client) = args.get(1) else {
+                bail!("name a client: claude, claude-desktop, codex or opencode")
+            };
             let client = clients::Client::parse(client)?;
             if first == Some("install") {
                 clients::install(client)?;
-                println!("Installed as \"{}\" in {}. {}", clients::SERVER_NAME, client.label(), client.next_step());
+                println!(
+                    "Installed as \"{}\" in {}. {}",
+                    clients::SERVER_NAME,
+                    client.label(),
+                    client.next_step()
+                );
             } else {
                 clients::uninstall(client)?;
                 println!("Removed from {}.", client.label());
@@ -68,7 +75,9 @@ fn run() -> Result<()> {
                 let state = match (found, clients::registration(client)) {
                     (false, _) => "not found".to_string(),
                     (true, clients::Registration::Current) => "installed".to_string(),
-                    (true, clients::Registration::Elsewhere(path)) => format!("points elsewhere ({path}); `install` fixes it"),
+                    (true, clients::Registration::Elsewhere(path)) => {
+                        format!("points elsewhere ({path}); `install` fixes it")
+                    }
                     (true, clients::Registration::Absent) => "not installed".to_string(),
                 };
                 println!("{:<15} {state}", client.label());
@@ -109,14 +118,24 @@ fn run_serve(args: &[String]) -> Result<()> {
         {
             let on = args.iter().any(|a| a == "--install");
             remote::autostart::set(on)?;
-            println!("{}", if on { "The HTTP server now starts at login." } else { "The HTTP server no longer starts at login." });
+            println!(
+                "{}",
+                if on {
+                    "The HTTP server now starts at login."
+                } else {
+                    "The HTTP server no longer starts at login."
+                }
+            );
             return Ok(());
         }
     }
     init_stderr_log();
     let config = config::Config::load();
     let port = match args.iter().position(|a| a == "--port") {
-        Some(i) => args.get(i + 1).and_then(|p| p.parse().ok()).ok_or_else(|| anyhow::anyhow!("--port takes a number"))?,
+        Some(i) => args
+            .get(i + 1)
+            .and_then(|p| p.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("--port takes a number"))?,
         None => config.http.port,
     };
     #[cfg(target_os = "macos")]
@@ -127,7 +146,11 @@ fn run_serve(args: &[String]) -> Result<()> {
     let platform = std::sync::Arc::new(ocu_windows::WindowsPlatform::new());
     let service = ocu_core::Service::new(platform, None);
     let server = remote::server::HttpServer::start(service, &config.http.bind, port)?;
-    eprintln!("Serving on {} for the devices in {}.", server.addr, remote::devices::path().display());
+    eprintln!(
+        "Serving on {} for the devices in {}.",
+        server.addr,
+        remote::devices::path().display()
+    );
     server.wait();
     Ok(())
 }
@@ -136,10 +159,18 @@ fn run_serve(args: &[String]) -> Result<()> {
 fn run_update(check_only: bool) -> Result<()> {
     use std::sync::atomic::AtomicU64;
     match update::check() {
-        update::UpdateStatus::UpToDate => println!("opencomputeruse {} is the latest version.", update::current_version()),
+        update::UpdateStatus::UpToDate => println!(
+            "opencomputeruse {} is the latest version.",
+            update::current_version()
+        ),
         update::UpdateStatus::Failed(e) => bail!("couldn't check for updates: {e}"),
         update::UpdateStatus::Available(up) => {
-            println!("Version {} is available (this is {}): {}", up.version, update::current_version(), up.page);
+            println!(
+                "Version {} is available (this is {}): {}",
+                up.version,
+                update::current_version(),
+                up.page
+            );
             if check_only {
                 return Ok(());
             }
@@ -147,7 +178,10 @@ fn run_update(check_only: bool) -> Result<()> {
                 println!("Download it from the release page.");
                 return Ok(());
             };
-            println!("Downloading {} ({} bytes)…", installer.file_name, installer.size);
+            println!(
+                "Downloading {} ({} bytes)…",
+                installer.file_name, installer.size
+            );
             let file = update::download(&installer, &AtomicU64::new(0))?;
             #[cfg(target_os = "macos")]
             update::quit_running_app();
@@ -214,7 +248,10 @@ mod macos {
     fn launch_agent() -> Result<()> {
         let exe = std::env::current_exe()?;
         let exe = exe.canonicalize().unwrap_or(exe);
-        if let Some(bundle) = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
+        if let Some(bundle) = exe
+            .ancestors()
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+        {
             let status = Command::new("/usr/bin/open")
                 .arg("-g")
                 .arg("-a")
@@ -255,7 +292,9 @@ mod macos {
                 return Ok(r);
             }
             if Instant::now() > deadline {
-                bail!("the OpenComputerUse app did not start; open it once to finish setting it up");
+                bail!(
+                    "the OpenComputerUse app did not start; open it once to finish setting it up"
+                );
             }
         }
     }
@@ -269,7 +308,11 @@ mod macos {
                     self.remote = Some(connect()?);
                 }
                 let result = self.remote.as_mut().unwrap().handle(req.clone());
-                match result.as_ref().err().and_then(|e| e.downcast_ref::<Disconnected>()) {
+                match result
+                    .as_ref()
+                    .err()
+                    .and_then(|e| e.downcast_ref::<Disconnected>())
+                {
                     None => return result,
                     Some(d) => {
                         self.remote = None;

@@ -52,7 +52,11 @@ impl Devices {
     pub fn load() -> Self {
         std::fs::read(path())
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).map_err(|e| log::warn!("ignoring a malformed devices.json: {e}")).ok())
+            .and_then(|b| {
+                serde_json::from_slice(&b)
+                    .map_err(|e| log::warn!("ignoring a malformed devices.json: {e}"))
+                    .ok()
+            })
             .unwrap_or_default()
     }
 
@@ -90,7 +94,13 @@ impl Devices {
         anyhow::ensure!(!name.is_empty(), "name the device that will connect");
         let url = normalize_url(url)?;
         let key = format!("ocu_{}", random_hex(24)?);
-        let device = Device { id: random_hex(4)?, name: name.into(), url, key_hash: hash_key(&key), created: now() };
+        let device = Device {
+            id: random_hex(4)?,
+            name: name.into(),
+            url,
+            key_hash: hash_key(&key),
+            created: now(),
+        };
         self.devices.push(device.clone());
         self.save()?;
         Ok((device, key))
@@ -100,7 +110,10 @@ impl Devices {
     /// stored one when given.
     pub fn regenerate(&mut self, id: &str, url: Option<&str>) -> Result<(Device, String)> {
         let key = format!("ocu_{}", random_hex(24)?);
-        let url = url.filter(|u| !u.trim().is_empty()).map(normalize_url).transpose()?;
+        let url = url
+            .filter(|u| !u.trim().is_empty())
+            .map(normalize_url)
+            .transpose()?;
         let device = self.find(id)?;
         device.key_hash = hash_key(&key);
         if let Some(url) = url {
@@ -122,8 +135,15 @@ impl Devices {
 /// "my-mac.ts.net:8642" → "http://my-mac.ts.net:8642", without a trailing slash.
 fn normalize_url(url: &str) -> Result<String> {
     let url = url.trim().trim_end_matches('/');
-    anyhow::ensure!(!url.is_empty(), "give the URL the device will reach this computer at");
-    Ok(if url.contains("://") { url.to_string() } else { format!("http://{url}") })
+    anyhow::ensure!(
+        !url.is_empty(),
+        "give the URL the device will reach this computer at"
+    );
+    Ok(if url.contains("://") {
+        url.to_string()
+    } else {
+        format!("http://{url}")
+    })
 }
 
 /// This computer's MagicDNS name, when Tailscale runs here.
@@ -136,12 +156,22 @@ pub fn tailscale_name() -> Option<String> {
         "tailscale",
     ];
     for cli in candidates {
-        let Ok(out) = std::process::Command::new(cli).args(["status", "--json"]).output() else { continue };
+        let Ok(out) = std::process::Command::new(cli)
+            .args(["status", "--json"])
+            .output()
+        else {
+            continue;
+        };
         if !out.status.success() {
             continue;
         }
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-        let name = v.get("Self")?.get("DNSName")?.as_str()?.trim_end_matches('.').to_string();
+        let name = v
+            .get("Self")?
+            .get("DNSName")?
+            .as_str()?
+            .trim_end_matches('.')
+            .to_string();
         if !name.is_empty() {
             return Some(name);
         }
@@ -160,7 +190,10 @@ pub fn suggested_url(port: u16) -> String {
 /// What this computer is called: "Astrid's MacBook Pro".
 pub fn computer_name() -> String {
     #[cfg(target_os = "macos")]
-    if let Ok(out) = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output() {
+    if let Ok(out) = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+    {
         let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if out.status.success() && !name.is_empty() {
             return name;
@@ -208,7 +241,10 @@ mod tests {
 
     #[test]
     fn urls_and_slugs() {
-        assert_eq!(normalize_url("my-mac.ts.net:8642/").unwrap(), "http://my-mac.ts.net:8642");
+        assert_eq!(
+            normalize_url("my-mac.ts.net:8642/").unwrap(),
+            "http://my-mac.ts.net:8642"
+        );
         assert_eq!(normalize_url("https://x").unwrap(), "https://x");
         assert!(normalize_url("  ").is_err());
         assert_eq!(slug("Astrid's MacBook Pro"), "astrid-s-macbook-pro");
@@ -218,7 +254,13 @@ mod tests {
     #[test]
     fn keys_authenticate_by_hash() {
         let mut d = Devices::default();
-        d.devices.push(Device { id: "a".into(), name: "n".into(), url: "u".into(), key_hash: hash_key("ocu_k"), created: 0 });
+        d.devices.push(Device {
+            id: "a".into(),
+            name: "n".into(),
+            url: "u".into(),
+            key_hash: hash_key("ocu_k"),
+            created: 0,
+        });
         assert!(d.authenticate("ocu_k").is_some());
         assert!(d.authenticate("ocu_x").is_none());
     }

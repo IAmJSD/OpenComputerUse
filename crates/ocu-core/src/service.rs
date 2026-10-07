@@ -15,16 +15,30 @@ use serde::{Deserialize, Serialize};
 use crate::backend::{pick_window, Observer, Platform, Session};
 use crate::types::*;
 
+type SharedSession = Arc<Mutex<Box<dyn Session>>>;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     Permissions,
     StartSession(LaunchSpec),
-    EndSession { session: String },
+    EndSession {
+        session: String,
+    },
     ListSessions,
-    ListWindows { session: String },
-    Screenshot { session: String, window: Option<u64> },
-    UiTree { session: String, window: Option<u64>, #[serde(default)] options: TreeOptions },
+    ListWindows {
+        session: String,
+    },
+    Screenshot {
+        session: String,
+        window: Option<u64>,
+    },
+    UiTree {
+        session: String,
+        window: Option<u64>,
+        #[serde(default)]
+        options: TreeOptions,
+    },
     Perform {
         session: String,
         window: Option<u64>,
@@ -55,13 +69,21 @@ fn settle() -> u64 {
 
 impl Default for Observe {
     fn default() -> Self {
-        Self { screenshot: true, ui_tree: false, settle_ms: settle() }
+        Self {
+            screenshot: true,
+            ui_tree: false,
+            settle_ms: settle(),
+        }
     }
 }
 
 impl Observe {
     pub fn nothing() -> Self {
-        Self { screenshot: false, ui_tree: false, settle_ms: 0 }
+        Self {
+            screenshot: false,
+            ui_tree: false,
+            settle_ms: 0,
+        }
     }
 }
 
@@ -70,12 +92,18 @@ impl Observe {
 pub enum Response {
     Ok,
     Permissions(Vec<Permission>),
-    Session { info: SessionInfo, windows: Vec<WindowInfo> },
+    Session {
+        info: SessionInfo,
+        windows: Vec<WindowInfo>,
+    },
     Sessions(Vec<SessionInfo>),
     Windows(Vec<WindowInfo>),
     Screenshot(Screenshot),
     UiTree(UiNode),
-    Performed { screenshot: Option<Screenshot>, ui_tree: Option<UiNode> },
+    Performed {
+        screenshot: Option<Screenshot>,
+        ui_tree: Option<UiNode>,
+    },
 }
 
 /// Anything that answers requests: the in-process service, or the socket
@@ -87,7 +115,7 @@ pub trait Handler: Send {
 struct Entry {
     info: SessionInfo,
     owner: u64,
-    session: Arc<Mutex<Box<dyn Session>>>,
+    session: SharedSession,
 }
 
 pub struct Service {
@@ -128,7 +156,12 @@ impl Service {
     }
 
     pub fn sessions(&self) -> Vec<SessionInfo> {
-        self.sessions.lock().unwrap().values().map(|e| e.info.clone()).collect()
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.info.clone())
+            .collect()
     }
 
     /// Ends a session whoever owns it (the UI's "End" button).
@@ -171,11 +204,11 @@ impl Service {
         format!("s{n}-{a:016x}{b:08x}").chars().take(28).collect()
     }
 
-    fn session(&self, client: &Client, id: &str) -> Result<(Arc<Mutex<Box<dyn Session>>>, SessionInfo)> {
+    fn session(&self, client: &Client, id: &str) -> Result<(SharedSession, SessionInfo)> {
         let sessions = self.sessions.lock().unwrap();
-        let entry = sessions
-            .get(id)
-            .ok_or_else(|| anyhow!("no session {id}; it may have ended (list_sessions shows the live ones)"))?;
+        let entry = sessions.get(id).ok_or_else(|| {
+            anyhow!("no session {id}; it may have ended (list_sessions shows the live ones)")
+        })?;
         if entry.owner != client.id {
             bail!("session {id} belongs to another client");
         }
@@ -196,7 +229,12 @@ impl Service {
                     backend: self.platform.name().to_string(),
                     details: d.details,
                 };
-                log::info!("started session {} ({}, pid {:?})", info.id, info.app, info.pid);
+                log::info!(
+                    "started session {} ({}, pid {:?})",
+                    info.id,
+                    info.app,
+                    info.pid
+                );
                 self.sessions.lock().unwrap().insert(
                     info.id.clone(),
                     Entry {
@@ -236,19 +274,36 @@ impl Service {
                 self.remember(&session, &shot);
                 Ok(Response::Screenshot(shot))
             }
-            Request::UiTree { session, window, options } => {
+            Request::UiTree {
+                session,
+                window,
+                options,
+            } => {
                 let (s, _) = self.session(client, &session)?;
                 let tree = s.lock().unwrap().ui_tree(window, &options)?;
                 Ok(Response::UiTree(tree))
             }
-            Request::Perform { session, window, action, observe } => {
+            Request::Perform {
+                session,
+                window,
+                action,
+                observe,
+            } => {
                 let (s, _) = self.session(client, &session)?;
                 let mut s = s.lock().unwrap();
-                let target = s.windows().ok().and_then(|ws| pick_window(&ws, window).ok().cloned());
+                let target = s
+                    .windows()
+                    .ok()
+                    .and_then(|ws| pick_window(&ws, window).ok().cloned());
                 // A picture from before, to compare with the one after.
                 if observe.screenshot {
                     if let Some(w) = &target {
-                        if !self.last_shots.lock().unwrap().contains_key(&(session.clone(), w.id)) {
+                        if !self
+                            .last_shots
+                            .lock()
+                            .unwrap()
+                            .contains_key(&(session.clone(), w.id))
+                        {
                             if let Ok(shot) = s.screenshot(Some(w.id)) {
                                 self.remember(&session, &shot);
                             }
@@ -260,14 +315,19 @@ impl Service {
                 } else {
                     if let (Some(o), Some(w)) = (&self.observer, &target) {
                         match action.pointer() {
-                            Some((x, y)) => o.pointer(&session, w, x, y, matches!(action, Action::Click { .. })),
+                            Some((x, y)) => {
+                                o.pointer(&session, w, x, y, matches!(action, Action::Click { .. }))
+                            }
                             None => o.acted(&session, w),
                         }
                     }
                     s.perform(window, &action)?;
                 }
                 if !s.is_alive() {
-                    return Ok(Response::Performed { screenshot: None, ui_tree: None });
+                    return Ok(Response::Performed {
+                        screenshot: None,
+                        ui_tree: None,
+                    });
                 }
                 if observe.screenshot || observe.ui_tree {
                     std::thread::sleep(Duration::from_millis(observe.settle_ms.min(10_000)));
@@ -275,16 +335,24 @@ impl Service {
                 // Looking is best effort: the action happened either way.
                 let mut screenshot = observe
                     .screenshot
-                    .then(|| s.screenshot(window).map_err(|e| log::warn!("screenshot after action: {e:#}")).ok())
+                    .then(|| {
+                        s.screenshot(window)
+                            .map_err(|e| log::warn!("screenshot after action: {e:#}"))
+                            .ok()
+                    })
                     .flatten();
                 // Pixel-identical after an action usually means a window that
                 // stopped drawing while covered: look again, uncovered.
                 if let Some(shot) = &screenshot {
                     let unchanged = shot.window_id.is_some_and(|id| {
-                        self.last_shots.lock().unwrap().get(&(session.clone(), id)) == Some(&shot.png)
+                        self.last_shots.lock().unwrap().get(&(session.clone(), id))
+                            == Some(&shot.png)
                     });
                     if unchanged {
-                        log::info!("screenshot unchanged after {:?}; capturing it uncovered", action);
+                        log::info!(
+                            "screenshot unchanged after {:?}; capturing it uncovered",
+                            action
+                        );
                         match s.screenshot_uncovered(window) {
                             Ok(fresh) => screenshot = Some(fresh),
                             Err(e) => log::warn!("uncovered screenshot: {e:#}"),
@@ -296,16 +364,26 @@ impl Service {
                 }
                 let ui_tree = observe
                     .ui_tree
-                    .then(|| s.ui_tree(window, &TreeOptions::default()).map_err(|e| log::warn!("tree after action: {e:#}")).ok())
+                    .then(|| {
+                        s.ui_tree(window, &TreeOptions::default())
+                            .map_err(|e| log::warn!("tree after action: {e:#}"))
+                            .ok()
+                    })
                     .flatten();
-                Ok(Response::Performed { screenshot, ui_tree })
+                Ok(Response::Performed {
+                    screenshot,
+                    ui_tree,
+                })
             }
         }
     }
 
     fn remember(&self, session: &str, shot: &Screenshot) {
         if let Some(id) = shot.window_id {
-            self.last_shots.lock().unwrap().insert((session.to_string(), id), shot.png.clone());
+            self.last_shots
+                .lock()
+                .unwrap()
+                .insert((session.to_string(), id), shot.png.clone());
         }
     }
 
@@ -315,7 +393,12 @@ impl Service {
             let sessions = self.sessions.lock().unwrap();
             sessions
                 .iter()
-                .filter(|(_, e)| e.session.try_lock().map(|mut s| !s.is_alive()).unwrap_or(false))
+                .filter(|(_, e)| {
+                    e.session
+                        .try_lock()
+                        .map(|mut s| !s.is_alive())
+                        .unwrap_or(false)
+                })
                 .map(|(id, _)| id.clone())
                 .collect()
         };
@@ -353,7 +436,9 @@ impl Drop for Client {
                 .filter(|(_, e)| e.owner == self.id)
                 .map(|(id, _)| id.clone())
                 .collect();
-            ids.into_iter().filter_map(|id| sessions.remove(&id).map(|e| (id, e))).collect()
+            ids.into_iter()
+                .filter_map(|id| sessions.remove(&id).map(|e| (id, e)))
+                .collect()
         };
         for (id, entry) in owned {
             self.service.close(&id, entry);

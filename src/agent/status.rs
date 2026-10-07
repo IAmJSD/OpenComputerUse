@@ -7,19 +7,23 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, rgb, App, AppContext as _, ClipboardItem, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, px, rgb, App, AppContext as _, ClipboardItem, Context, ElementId, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window,
 };
 
 use ocu_core::{Permission, Service, SessionInfo};
 
-use super::ui::{icon, palette, Badge, Button, Checkbox, Divider, Heading, LineEdit, LineEditKey, TextInput, TextPress};
+use super::ui::{
+    icon, palette, Badge, Button, Checkbox, Divider, Heading, LineEdit, LineEditKey, TextInput,
+    TextPress,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clients::{self, Client};
+use crate::config::{Config, Provider};
 use crate::remote::{self, devices::Device, devices::Devices, skill};
 use crate::update::{self, Installer, Progress, UpdateStatus};
-use crate::config::{Config, Provider};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Field {
@@ -109,7 +113,11 @@ struct Remote {
 
 enum Panel {
     Form,
-    Issued { device: String, skill: String, note: Option<String> },
+    Issued {
+        device: String,
+        skill: String,
+        note: Option<String>,
+    },
 }
 
 /// The Updates section's state.
@@ -135,12 +143,17 @@ const GOOD: u32 = 0x2E7D4F;
 /// The .app this is running from, if it is.
 fn bundle() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(Into::into)
+    exe.ancestors()
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
+        .map(Into::into)
 }
 
 fn reveal_app() {
     if let Some(b) = bundle() {
-        let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(b).spawn();
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(b)
+            .spawn();
     }
 }
 
@@ -149,7 +162,9 @@ fn reveal_app() {
 fn reopen(cx: &mut App) {
     if let Some(b) = bundle() {
         let script = format!("sleep 1; /usr/bin/open {:?}", b.display().to_string());
-        let _ = std::process::Command::new("/bin/sh").args(["-c", &script]).spawn();
+        let _ = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .spawn();
     }
     cx.quit();
 }
@@ -163,7 +178,13 @@ fn status(label: &str, good: bool) -> gpui::Div {
         .flex_none()
         .items_center()
         .gap_1p5()
-        .child(div().size(px(7.0)).flex_none().rounded_full().bg(rgb(if good { 0x3FB26B } else { p.text_faint })))
+        .child(
+            div()
+                .size(px(7.0))
+                .flex_none()
+                .rounded_full()
+                .bg(rgb(if good { 0x3FB26B } else { p.text_faint })),
+        )
         .child(
             div()
                 .whitespace_nowrap()
@@ -173,7 +194,10 @@ fn status(label: &str, good: bool) -> gpui::Div {
 }
 
 fn client_states() -> [ClientState; 4] {
-    Client::ALL.map(|c| ClientState { found: clients::find(c).is_some(), registration: clients::registration(c) })
+    Client::ALL.map(|c| ClientState {
+        found: clients::find(c).is_some(),
+        registration: clients::registration(c),
+    })
 }
 
 impl Status {
@@ -219,7 +243,10 @@ impl Status {
             error: None,
             clients: client_states(),
             updates: Updates::default(),
-            remote: Remote { devices: Devices::load().devices, ..Default::default() },
+            remote: Remote {
+                devices: Devices::load().devices,
+                ..Default::default()
+            },
             busy: None,
             client_message: None,
         };
@@ -231,14 +258,27 @@ impl Status {
         let permissions = self.service.platform().permissions();
         let sessions = self.service.sessions();
         let http = super::http::state();
-        let server_changed = (http.listening.clone(), http.error.clone()) != self.remote.server_seen;
+        let server_changed =
+            (http.listening.clone(), http.error.clone()) != self.remote.server_seen;
         self.remote.server_seen = (http.listening, http.error);
         let devices = Devices::load().devices;
-        let devices_changed = devices.iter().map(|d| (&d.id, &d.key_hash)).ne(self.remote.devices.iter().map(|d| (&d.id, &d.key_hash)));
+        let devices_changed = devices.iter().map(|d| (&d.id, &d.key_hash)).ne(self
+            .remote
+            .devices
+            .iter()
+            .map(|d| (&d.id, &d.key_hash)));
         self.remote.devices = devices;
         let clients = client_states();
-        let changed = devices_changed || server_changed || permissions.iter().map(|p| p.granted).ne(self.permissions.iter().map(|p| p.granted))
-            || sessions.iter().map(|s| &s.id).ne(self.sessions.iter().map(|s| &s.id))
+        let changed = devices_changed
+            || server_changed
+            || permissions
+                .iter()
+                .map(|p| p.granted)
+                .ne(self.permissions.iter().map(|p| p.granted))
+            || sessions
+                .iter()
+                .map(|s| &s.id)
+                .ne(self.sessions.iter().map(|s| &s.id))
             || clients != self.clients;
         self.permissions = permissions;
         self.sessions = sessions;
@@ -302,7 +342,11 @@ impl Status {
     }
 
     fn show_issued(&mut self, issued: remote::Issued) {
-        self.remote.panel = Some(Panel::Issued { device: issued.device.name.clone(), skill: issued.skill, note: None });
+        self.remote.panel = Some(Panel::Issued {
+            device: issued.device.name.clone(),
+            skill: issued.skill,
+            note: None,
+        });
         self.remote.error = None;
         self.remote.devices = Devices::load().devices;
         for (_, e) in &mut self.fields {
@@ -385,21 +429,37 @@ impl Status {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().font_weight(gpui::FontWeight::MEDIUM).child(d.name.clone()))
-                            .child(div().text_color(rgb(p.text_dim)).text_size(px(11.0)).child(d.url.clone())),
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(d.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(p.text_dim))
+                                    .text_size(px(11.0))
+                                    .child(d.url.clone()),
+                            ),
                     )
                     .child(
-                        Button::new(ElementId::Name(SharedString::from(format!("regen-{}", d.id))), "Regenerate Key")
-                            .flex_none()
-                            .on_click(cx.listener(move |s, _, _, cx| {
-                                s.regenerate(&rid);
-                                cx.notify();
-                            })),
+                        Button::new(
+                            ElementId::Name(SharedString::from(format!("regen-{}", d.id))),
+                            "Regenerate Key",
+                        )
+                        .flex_none()
+                        .on_click(cx.listener(move |s, _, _, cx| {
+                            s.regenerate(&rid);
+                            cx.notify();
+                        })),
                     )
                     .child(
                         Button::new(
                             ElementId::Name(SharedString::from(format!("remove-{}", d.id))),
-                            if confirming { "Confirm Remove" } else { "Remove" },
+                            if confirming {
+                                "Confirm Remove"
+                            } else {
+                                "Remove"
+                            },
                         )
                         .flex_none()
                         .when(!confirming, |b| b.ghost())
@@ -521,7 +581,9 @@ impl Status {
                 )
             }
         };
-        section.when_some(self.remote.error.clone(), |d, e| d.child(div().text_color(rgb(p.warning)).child(e)))
+        section.when_some(self.remote.error.clone(), |d, e| {
+            d.child(div().text_color(rgb(p.warning)).child(e))
+        })
     }
 
     /// Asks GitHub for the latest release, off the main thread.
@@ -552,7 +614,10 @@ impl Status {
     fn install_update(&mut self, installer: Installer, cx: &mut Context<Self>) {
         let received = self.updates.received.clone();
         received.store(0, Ordering::Relaxed);
-        self.updates.progress = Some(Progress::Downloading { received: 0, total: installer.size });
+        self.updates.progress = Some(Progress::Downloading {
+            received: 0,
+            total: installer.size,
+        });
         self.updates.error = None;
         cx.notify();
         let total = installer.size;
@@ -562,14 +627,19 @@ impl Status {
         });
         // Progress, while the download runs.
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_millis(150)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
             let alive = this.update(cx, |s, cx| {
                 if let Some(Progress::Downloading { .. }) = s.updates.progress {
                     let got = s.updates.received.load(Ordering::Relaxed);
                     s.updates.progress = Some(if got >= total && total > 0 {
                         Progress::Installing
                     } else {
-                        Progress::Downloading { received: got, total }
+                        Progress::Downloading {
+                            received: got,
+                            total,
+                        }
                     });
                     cx.notify();
                     true
@@ -603,22 +673,29 @@ impl Status {
         let u = &self.updates;
         let line = |text: String| div().text_color(rgb(p.text_dim)).child(text);
         let mut row = div().flex().items_center().gap_3();
-        row = row.child(div().flex_1().min_w_0().child(match (&u.progress, &u.status, u.checking) {
-            (Some(Progress::Downloading { received, total }), _, _) if *total > 0 => {
-                line(format!("Downloading… {}%", received * 100 / total))
-            }
-            (Some(Progress::Downloading { .. }), _, _) => line("Downloading…".into()),
-            (Some(Progress::Installing), _, _) => line("Installing; OpenComputerUse will reopen.".into()),
-            (_, _, true) => line("Checking…".into()),
-            (_, Some(UpdateStatus::UpToDate), _) => {
-                line(format!("OpenComputerUse {} is the latest version.", update::current_version()))
-            }
-            (_, Some(UpdateStatus::Available(up)), _) => {
-                line(format!("Version {} is available (you have {}).", up.version, update::current_version()))
-            }
-            (_, Some(UpdateStatus::Failed(e)), _) => line(format!("Couldn't check: {e}")),
-            (_, None, _) => line(format!("Version {}", update::current_version())),
-        }));
+        row = row.child(div().flex_1().min_w_0().child(
+            match (&u.progress, &u.status, u.checking) {
+                (Some(Progress::Downloading { received, total }), _, _) if *total > 0 => {
+                    line(format!("Downloading… {}%", received * 100 / total))
+                }
+                (Some(Progress::Downloading { .. }), _, _) => line("Downloading…".into()),
+                (Some(Progress::Installing), _, _) => {
+                    line("Installing; OpenComputerUse will reopen.".into())
+                }
+                (_, _, true) => line("Checking…".into()),
+                (_, Some(UpdateStatus::UpToDate), _) => line(format!(
+                    "OpenComputerUse {} is the latest version.",
+                    update::current_version()
+                )),
+                (_, Some(UpdateStatus::Available(up)), _) => line(format!(
+                    "Version {} is available (you have {}).",
+                    up.version,
+                    update::current_version()
+                )),
+                (_, Some(UpdateStatus::Failed(e)), _) => line(format!("Couldn't check: {e}")),
+                (_, None, _) => line(format!("Version {}", update::current_version())),
+            },
+        ));
         let busy = u.checking || u.progress.is_some();
         row = match &u.status {
             Some(UpdateStatus::Available(up)) if u.progress.is_none() => match up.install.clone() {
@@ -626,13 +703,21 @@ impl Status {
                     Button::new("install-update", format!("Update to {}", up.version))
                         .primary()
                         .flex_none()
-                        .on_click(cx.listener(move |s, _, _, cx| s.install_update(installer.clone(), cx))),
+                        .on_click(
+                            cx.listener(move |s, _, _, cx| s.install_update(installer.clone(), cx)),
+                        ),
                 ),
                 None => {
                     let page = up.page.clone();
-                    row.child(Button::new("release-page", "Open Release Page").flex_none().on_click(move |_, _, _| {
-                        let _ = std::process::Command::new("/usr/bin/open").arg(&page).spawn();
-                    }))
+                    row.child(
+                        Button::new("release-page", "Open Release Page")
+                            .flex_none()
+                            .on_click(move |_, _, _| {
+                                let _ = std::process::Command::new("/usr/bin/open")
+                                    .arg(&page)
+                                    .spawn();
+                            }),
+                    )
                 }
             },
             _ => row.child(
@@ -647,16 +732,31 @@ impl Status {
             .flex_col()
             .gap_2()
             .child(row)
-            .when(!self.sessions.is_empty() && matches!(u.status, Some(UpdateStatus::Available(_))), |d| {
-                d.child(line("Updating restarts the app, which ends the sessions running now.".into()).text_size(px(11.5)))
+            .when(
+                !self.sessions.is_empty() && matches!(u.status, Some(UpdateStatus::Available(_))),
+                |d| {
+                    d.child(
+                        line(
+                            "Updating restarts the app, which ends the sessions running now."
+                                .into(),
+                        )
+                        .text_size(px(11.5)),
+                    )
+                },
+            )
+            .when_some(u.error.clone(), |d, e| {
+                d.child(div().text_color(rgb(p.warning)).child(e))
             })
-            .when_some(u.error.clone(), |d, e| d.child(div().text_color(rgb(p.warning)).child(e)))
             .child(
-                Checkbox::new("auto-update", "Check for updates automatically", update::check_automatically())
-                    .on_change(cx.listener(|_, on: &bool, _, cx| {
-                        update::set_check_automatically(*on);
-                        cx.notify();
-                    })),
+                Checkbox::new(
+                    "auto-update",
+                    "Check for updates automatically",
+                    update::check_automatically(),
+                )
+                .on_change(cx.listener(|_, on: &bool, _, cx| {
+                    update::set_check_automatically(*on);
+                    cx.notify();
+                })),
             )
     }
 
@@ -678,7 +778,9 @@ impl Status {
             let _ = this.update(cx, |s, cx| {
                 s.busy = None;
                 s.client_message = Some(match result {
-                    Ok(()) if install => format!("Installed in {}. {}", client.label(), client.next_step()),
+                    Ok(()) if install => {
+                        format!("Installed in {}. {}", client.label(), client.next_step())
+                    }
                     Ok(()) => format!("Removed from {}.", client.label()),
                     Err(e) => format!("{e:#}"),
                 });
@@ -694,7 +796,14 @@ impl Status {
     }
 
     fn text(&self, f: Field) -> String {
-        self.fields.iter().find(|(k, _)| *k == f).unwrap().1.text.trim().to_string()
+        self.fields
+            .iter()
+            .find(|(k, _)| *k == f)
+            .unwrap()
+            .1
+            .text
+            .trim()
+            .to_string()
     }
 
     fn activate(&mut self, f: Field) {
@@ -708,7 +817,8 @@ impl Status {
     }
 
     fn save(&mut self) {
-        let [key, model, account, token, cf_model, confidence] = Field::RECIPE.map(|f| self.text(f));
+        let [key, model, account, token, cf_model, confidence] =
+            Field::RECIPE.map(|f| self.text(f));
         let r = &mut self.config.recipe;
         r.typesafe_api_key = key;
         r.typesafe_model = model;
@@ -742,7 +852,11 @@ impl Status {
         if key == "tab" {
             let i = Field::ALL.iter().position(|x| *x == f).unwrap();
             let n = Field::ALL.len();
-            let next = Field::ALL[if ev.keystroke.modifiers.shift { (i + n - 1) % n } else { (i + 1) % n }];
+            let next = Field::ALL[if ev.keystroke.modifiers.shift {
+                (i + n - 1) % n
+            } else {
+                (i + 1) % n
+            }];
             self.activate(next);
             self.field(next).select_all();
             cx.notify();
@@ -805,12 +919,20 @@ impl Status {
             .flex()
             .items_center()
             .gap_3()
-            .child(div().w(px(130.0)).flex_none().text_color(rgb(p.text_dim)).child(label.to_string()))
+            .child(
+                div()
+                    .w(px(130.0))
+                    .flex_none()
+                    .text_color(rgb(p.text_dim))
+                    .child(label.to_string()),
+            )
             .child(div().flex_1().min_w_0().child(child))
     }
 
     fn section(title: &str) -> impl IntoElement {
-        div().pt_2().child(Heading::new(title.to_string()).uppercase())
+        div()
+            .pt_2()
+            .child(Heading::new(title.to_string()).uppercase())
     }
 }
 
@@ -1092,7 +1214,10 @@ pub fn open(service: Arc<Service>, cx: &mut App) -> Option<gpui::WindowHandle<St
         .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions { title: Some("OpenComputerUse".into()), ..Default::default() }),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("OpenComputerUse".into()),
+                    ..Default::default()
+                }),
                 window_min_size: Some(size(px(460.0), px(420.0))),
                 ..Default::default()
             },

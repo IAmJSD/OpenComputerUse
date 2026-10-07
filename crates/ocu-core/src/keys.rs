@@ -55,7 +55,10 @@ pub struct Chord {
 
 /// Parses whitespace-separated chords: "cmd+a cmd+c".
 pub fn parse_chords(s: &str) -> Result<Vec<Chord>> {
-    let chords: Vec<Chord> = s.split_whitespace().map(parse_chord).collect::<Result<_>>()?;
+    let chords: Vec<Chord> = s
+        .split_whitespace()
+        .map(parse_chord)
+        .collect::<Result<_>>()?;
     if chords.is_empty() {
         bail!("no keys given");
     }
@@ -136,7 +139,10 @@ mod tests {
         assert!(c.modifiers.meta && c.modifiers.shift);
         assert_eq!(c.key, Some(Key::Char('t')));
         assert_eq!(parse_chord("cmd++").unwrap().key, Some(Key::Char('+')));
-        assert_eq!(parse_chord("F12").unwrap().key, Some(Key::Named(NamedKey::F(12))));
+        assert_eq!(
+            parse_chord("F12").unwrap().key,
+            Some(Key::Named(NamedKey::F(12)))
+        );
         assert_eq!(parse_chords("cmd+a cmd+c").unwrap().len(), 2);
         assert!(parse_chord("ctrl+a+b").is_err());
     }

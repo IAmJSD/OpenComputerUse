@@ -65,7 +65,8 @@ impl RecipeConfig {
         match self.provider {
             Provider::Typesafe => !self.typesafe_api_key.trim().is_empty(),
             Provider::Cloudflare => {
-                !self.cloudflare_account_id.trim().is_empty() && !self.cloudflare_api_token.trim().is_empty()
+                !self.cloudflare_account_id.trim().is_empty()
+                    && !self.cloudflare_api_token.trim().is_empty()
             }
         }
     }
@@ -84,7 +85,11 @@ pub struct HttpConfig {
 
 impl Default for HttpConfig {
     fn default() -> Self {
-        Self { enabled: false, port: 8642, bind: "0.0.0.0".into() }
+        Self {
+            enabled: false,
+            port: 8642,
+            bind: "0.0.0.0".into(),
+        }
     }
 }
 
@@ -110,12 +115,20 @@ impl Config {
     pub fn load() -> Self {
         let mut config: Config = std::fs::read(Self::path())
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).map_err(|e| log::warn!("ignoring a malformed config: {e}")).ok())
+            .and_then(|b| {
+                serde_json::from_slice(&b)
+                    .map_err(|e| log::warn!("ignoring a malformed config: {e}"))
+                    .ok()
+            })
             .unwrap_or_default();
         let r = &mut config.recipe;
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         if let Some(v) = env("OCU_RECIPE_PROVIDER") {
-            r.provider = if v.eq_ignore_ascii_case("cloudflare") { Provider::Cloudflare } else { Provider::Typesafe };
+            r.provider = if v.eq_ignore_ascii_case("cloudflare") {
+                Provider::Cloudflare
+            } else {
+                Provider::Typesafe
+            };
         }
         if let Some(v) = env("TYPESAFE_API_KEY") {
             r.typesafe_api_key = v;

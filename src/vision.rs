@@ -24,7 +24,10 @@ pub struct Cell {
 
 impl Cell {
     pub fn center(&self) -> (f64, f64) {
-        (self.x as f64 + self.width as f64 / 2.0, self.y as f64 + self.height as f64 / 2.0)
+        (
+            self.x as f64 + self.width as f64 / 2.0,
+            self.y as f64 + self.height as f64 / 2.0,
+        )
     }
 }
 
@@ -53,7 +56,11 @@ impl Image {
                 }
             }
         }
-        Ok(Self { width: w, height: h, rgb })
+        Ok(Self {
+            width: w,
+            height: h,
+            rgb,
+        })
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -96,7 +103,11 @@ impl Image {
                 rgb.extend_from_slice(&self.rgb[i..i + 3]);
             }
         }
-        Image { width: w, height: h, rgb }
+        Image {
+            width: w,
+            height: h,
+            rgb,
+        }
     }
 
     /// The image shrunk (box-averaged) so its longer side is at most `max`.
@@ -105,18 +116,27 @@ impl Image {
         if longest <= max {
             return self.clone();
         }
-        let (w, h) = ((self.width * max / longest).max(1), (self.height * max / longest).max(1));
+        let (w, h) = (
+            (self.width * max / longest).max(1),
+            (self.height * max / longest).max(1),
+        );
         let mut rgb = Vec::with_capacity(w * h * 3);
         for y in 0..h {
-            let (y0, y1) = (y * self.height / h, ((y + 1) * self.height / h).max(y * self.height / h + 1));
+            let (y0, y1) = (
+                y * self.height / h,
+                ((y + 1) * self.height / h).max(y * self.height / h + 1),
+            );
             for x in 0..w {
-                let (x0, x1) = (x * self.width / w, ((x + 1) * self.width / w).max(x * self.width / w + 1));
+                let (x0, x1) = (
+                    x * self.width / w,
+                    ((x + 1) * self.width / w).max(x * self.width / w + 1),
+                );
                 let mut sum = [0u32; 3];
                 for sy in y0..y1 {
                     for sx in x0..x1 {
                         let i = (sy * self.width + sx) * 3;
-                        for c in 0..3 {
-                            sum[c] += self.rgb[i + c] as u32;
+                        for (acc, v) in sum.iter_mut().zip(&self.rgb[i..i + 3]) {
+                            *acc += *v as u32;
                         }
                     }
                 }
@@ -124,7 +144,11 @@ impl Image {
                 rgb.extend(sum.iter().map(|v| (v / n) as u8));
             }
         }
-        Image { width: w, height: h, rgb }
+        Image {
+            width: w,
+            height: h,
+            rgb,
+        }
     }
 
     /// A rectangle outline, `thick` pixels wide.
@@ -152,7 +176,12 @@ pub fn cells(width: usize, height: usize, cols: usize, rows: usize) -> Vec<Cell>
             let x1 = width * (c + 1) / cols;
             let y0 = height * r / rows;
             let y1 = height * (r + 1) / rows;
-            out.push(Cell { x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+            out.push(Cell {
+                x: x0,
+                y: y0,
+                width: x1 - x0,
+                height: y1 - y0,
+            });
         }
     }
     out
@@ -182,7 +211,13 @@ fn label(img: &mut Image, x: usize, y: usize, n: usize, px: usize) {
         for (row, bits) in glyph.iter().enumerate() {
             for col in 0..3 {
                 if bits & (0b100 >> col) != 0 {
-                    img.fill(x + px + i * 4 * px + col * px, y + px + row * px, px, px, [255, 255, 255]);
+                    img.fill(
+                        x + px + i * 4 * px + col * px,
+                        y + px + row * px,
+                        px,
+                        px,
+                        [255, 255, 255],
+                    );
                 }
             }
         }
@@ -208,8 +243,15 @@ mod tests {
     fn grid_covers_the_image() {
         let g = cells(101, 57, 4, 4);
         assert_eq!(g.len(), 16);
-        assert_eq!(g.iter().map(|c| c.width * c.height).sum::<usize>(), 101 * 57);
-        let mut img = Image { width: 101, height: 57, rgb: vec![0; 101 * 57 * 3] };
+        assert_eq!(
+            g.iter().map(|c| c.width * c.height).sum::<usize>(),
+            101 * 57
+        );
+        let mut img = Image {
+            width: 101,
+            height: 57,
+            rgb: vec![0; 101 * 57 * 3],
+        };
         draw_grid(&mut img, &g);
         let png = img.encode().unwrap();
         let back = Image::decode(&png).unwrap();
@@ -228,6 +270,10 @@ mod preview {
         let mut img = Image::decode(&std::fs::read(input).unwrap()).unwrap();
         let grid = cells(img.width, img.height, 4, 4);
         draw_grid(&mut img, &grid);
-        std::fs::write(std::env::var("OCU_GRID_OUT").unwrap(), img.encode().unwrap()).unwrap();
+        std::fs::write(
+            std::env::var("OCU_GRID_OUT").unwrap(),
+            img.encode().unwrap(),
+        )
+        .unwrap();
     }
 }

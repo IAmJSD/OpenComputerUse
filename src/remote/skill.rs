@@ -25,17 +25,27 @@ fn params(schema: &Value) -> String {
         .and_then(Value::as_array)
         .map(|r| r.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let Some(props) = schema.get("properties").and_then(Value::as_object) else { return String::new() };
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return String::new();
+    };
     let mut out = String::new();
     for (name, p) in props {
         let ty = p.get("type").and_then(Value::as_str).unwrap_or("any");
-        let req = if required.contains(&name.as_str()) { ", required" } else { "" };
+        let req = if required.contains(&name.as_str()) {
+            ", required"
+        } else {
+            ""
+        };
         let _ = write!(out, "  - `{name}` ({ty}{req})");
         if let Some(d) = p.get("description").and_then(Value::as_str) {
             let _ = write!(out, ": {d}");
         }
         if let Some(e) = p.get("enum").and_then(Value::as_array) {
-            let vals: Vec<String> = e.iter().filter_map(Value::as_str).map(|v| format!("`{v}`")).collect();
+            let vals: Vec<String> = e
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|v| format!("`{v}`"))
+                .collect();
             let _ = write!(out, " One of {}.", vals.join(", "));
         }
         out.push('\n');
@@ -114,11 +124,14 @@ claude mcp add --transport http {name} {url_q}/mcp --header "Authorization: Bear
     );
     for t in tools {
         let tname = t.get("name").and_then(Value::as_str).unwrap_or_default();
-        let desc = t.get("description").and_then(Value::as_str).unwrap_or_default();
+        let desc = t
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let _ = write!(s, "### `{tname}`\n\n{desc}\n\n");
         let p = params(t.get("inputSchema").unwrap_or(&Value::Null));
         if !p.is_empty() {
-            let _ = write!(s, "{p}\n");
+            let _ = writeln!(s, "{p}");
         }
     }
     s
@@ -130,7 +143,13 @@ mod tests {
 
     #[test]
     fn the_skill_carries_url_key_and_tools() {
-        let device = Device { id: "a".into(), name: "Laptop".into(), url: "http://x.ts.net:8642".into(), key_hash: String::new(), created: 0 };
+        let device = Device {
+            id: "a".into(),
+            name: "Laptop".into(),
+            url: "http://x.ts.net:8642".into(),
+            key_hash: String::new(),
+            created: 0,
+        };
         let tools = vec![serde_json::json!({
             "name": "click", "description": "Click.",
             "inputSchema": {"type": "object", "properties": {"x": {"type": "number", "description": "Across."}}, "required": ["x"]}

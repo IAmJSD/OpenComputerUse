@@ -63,7 +63,8 @@ pub fn accessibility_granted() -> bool {
 pub fn request_permissions() {
     if !accessibility_granted() {
         let key = CFString::from_static_str("AXTrustedCheckOptionPrompt");
-        let dict = CFDictionary::<CFString, CFBoolean>::from_slices(&[&*key], &[CFBoolean::new(true)]);
+        let dict =
+            CFDictionary::<CFString, CFBoolean>::from_slices(&[&*key], &[CFBoolean::new(true)]);
         unsafe { AXIsProcessTrustedWithOptions(Some(dict.as_opaque())) };
     }
     if !CGPreflightScreenCaptureAccess() {
@@ -79,8 +80,14 @@ pub fn request_permissions() {
 
 /// Opens the System Settings pane for one permission.
 pub fn open_settings(permission: &str) {
-    let anchor = if permission.starts_with("Screen") { "Privacy_ScreenCapture" } else { "Privacy_Accessibility" };
+    let anchor = if permission.starts_with("Screen") {
+        "Privacy_ScreenCapture"
+    } else {
+        "Privacy_Accessibility"
+    };
     let _ = std::process::Command::new("open")
-        .arg(format!("x-apple.systempreferences:com.apple.preference.security?{anchor}"))
+        .arg(format!(
+            "x-apple.systempreferences:com.apple.preference.security?{anchor}"
+        ))
         .status();
 }

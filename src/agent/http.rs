@@ -17,7 +17,10 @@ pub struct HttpState {
     pub error: Option<String>,
 }
 
-pub static STATE: Mutex<HttpState> = Mutex::new(HttpState { listening: None, error: None });
+pub static STATE: Mutex<HttpState> = Mutex::new(HttpState {
+    listening: None,
+    error: None,
+});
 
 pub fn state() -> HttpState {
     STATE.lock().unwrap().clone()

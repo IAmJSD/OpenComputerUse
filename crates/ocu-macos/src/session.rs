@@ -11,12 +11,17 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context as _, Result};
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
+use objc2_app_kit::{
+    NSApplicationActivationOptions, NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration,
+};
 use objc2_core_foundation::{CFBoolean, CGPoint};
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSString, NSURL};
 
 use ocu_core::keys::{parse_chord, parse_chords};
-use ocu_core::{pick_window, Action, MouseButton, Description, LaunchSpec, Screenshot, Session, TreeOptions, UiNode, WindowInfo};
+use ocu_core::{
+    pick_window, Action, Description, LaunchSpec, MouseButton, Screenshot, Session, TreeOptions,
+    UiNode, WindowInfo,
+};
 
 use crate::ax::{self, Element, ElementTable};
 use crate::capture;
@@ -38,7 +43,8 @@ const APP_DIRS: &[&str] = &[
 fn resolve(app: &str) -> Result<Resolved> {
     let path = Path::new(app);
     if path.exists() {
-        if path.extension().is_some_and(|e| e == "app") || path.join("Contents/Info.plist").exists() {
+        if path.extension().is_some_and(|e| e == "app") || path.join("Contents/Info.plist").exists()
+        {
             return Ok(Resolved::Bundle(path.to_path_buf()));
         }
         return Ok(Resolved::Binary(path.to_path_buf()));
@@ -46,7 +52,8 @@ fn resolve(app: &str) -> Result<Resolved> {
     let workspace = NSWorkspace::sharedWorkspace();
     // A bundle id: com.apple.TextEdit.
     if app.contains('.') && !app.contains(' ') && !app.contains('/') {
-        if let Some(url) = workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(app)) {
+        if let Some(url) = workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(app))
+        {
             if let Some(p) = url.path() {
                 return Ok(Resolved::Bundle(PathBuf::from(p.to_string())));
             }
@@ -59,7 +66,9 @@ fn resolve(app: &str) -> Result<Resolved> {
         dirs.insert(0, Path::new(&home).join("Applications"));
     }
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let file = entry.file_name();
             let file = file.to_string_lossy();
@@ -89,7 +98,9 @@ fn bundle_id(bundle: &Path) -> Option<String> {
 }
 
 fn frontmost_pid() -> Option<i32> {
-    NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| a.processIdentifier())
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|a| a.processIdentifier())
 }
 
 const CHROMIUM_FLAGS: &[&str] = &[
@@ -102,7 +113,12 @@ const CHROMIUM_FLAGS: &[&str] = &[
 /// Whether an app is built on Chromium: its bundle carries a Chromium-based
 /// framework (Google Chrome Framework, Electron Framework, …).
 fn is_chromium(pid: i32) -> bool {
-    let Some(bundle) = running(pid).and_then(|a| a.bundleURL()).and_then(|u| u.path()) else { return false };
+    let Some(bundle) = running(pid)
+        .and_then(|a| a.bundleURL())
+        .and_then(|u| u.path())
+    else {
+        return false;
+    };
     is_chromium_bundle(Path::new(&bundle.to_string()))
 }
 
@@ -114,7 +130,9 @@ fn is_gecko_bundle(bundle: &Path) -> bool {
 
 fn is_chromium_bundle(bundle: &Path) -> bool {
     let frameworks = bundle.join("Contents/Frameworks");
-    let marks = ["Chrome", "Chromium", "Electron", "Edge", "Brave", "Vivaldi", "Opera", "Arc", "Helium"];
+    let marks = [
+        "Chrome", "Chromium", "Electron", "Edge", "Brave", "Vivaldi", "Opera", "Arc", "Helium",
+    ];
     std::fs::read_dir(&frameworks)
         .map(|entries| {
             entries.flatten().any(|e| {
@@ -128,7 +146,9 @@ fn is_chromium_bundle(bundle: &Path) -> bool {
 /// The user's frontmost app and its key window.
 fn user_focus() -> Option<(i32, u32)> {
     let pid = frontmost_pid()?;
-    let window = Element::application(pid).element("AXFocusedWindow")?.window_id()?;
+    let window = Element::application(pid)
+        .element("AXFocusedWindow")?
+        .window_id()?;
     Some((pid, window))
 }
 
@@ -147,12 +167,15 @@ fn open_bundle(bundle: &Path, spec: &LaunchSpec) -> Result<i32> {
     config.setAddsToRecentItems(false);
     config.setCreatesNewApplicationInstance(spec.new_instance);
     if !spec.args.is_empty() {
-        let args: Vec<Retained<NSString>> = spec.args.iter().map(|a| NSString::from_str(a)).collect();
+        let args: Vec<Retained<NSString>> =
+            spec.args.iter().map(|a| NSString::from_str(a)).collect();
         config.setArguments(&NSArray::from_retained_slice(&args));
     }
     if !spec.env.is_empty() {
-        let keys: Vec<Retained<NSString>> = spec.env.keys().map(|k| NSString::from_str(k)).collect();
-        let values: Vec<Retained<NSString>> = spec.env.values().map(|v| NSString::from_str(v)).collect();
+        let keys: Vec<Retained<NSString>> =
+            spec.env.keys().map(|k| NSString::from_str(k)).collect();
+        let values: Vec<Retained<NSString>> =
+            spec.env.values().map(|v| NSString::from_str(v)).collect();
         let keys: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
         config.setEnvironment(&NSDictionary::from_retained_objects(&keys, &values));
     }
@@ -183,10 +206,12 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         Resolved::Bundle(bundle) => {
             let already: Vec<i32> = bundle_id(&bundle)
                 .map(|id| {
-                    NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(&id))
-                        .iter()
-                        .map(|a| a.processIdentifier())
-                        .collect()
+                    NSRunningApplication::runningApplicationsWithBundleIdentifier(
+                        &NSString::from_str(&id),
+                    )
+                    .iter()
+                    .map(|a| a.processIdentifier())
+                    .collect()
                 })
                 .unwrap_or_default();
             // Chromium builds its web pages' accessibility trees only for an
@@ -205,7 +230,10 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
             // relaunches itself, so the process we start may be gone already.
             gecko = is_gecko_bundle(&bundle);
             let pid = open_bundle(&bundle, &spec)?;
-            let name = bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = bundle
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if let Some(id) = bundle_id(&bundle) {
                 let mut known = already.clone();
                 known.push(pid);
@@ -221,8 +249,13 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
             }
             use std::os::unix::process::CommandExt as _;
             cmd.process_group(0);
-            let child = cmd.spawn().with_context(|| format!("starting {}", path.display()))?;
-            let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let child = cmd
+                .spawn()
+                .with_context(|| format!("starting {}", path.display()))?;
+            let name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             (child.id() as i32, true, Some(child), name)
         }
     };
@@ -279,18 +312,27 @@ fn app_windows(pid: i32) -> Vec<WindowInfo> {
             0
         } else if Some(id) == focused {
             1
-        } else if matches!(subrole.as_str(), "AXStandardWindow" | "AXDialog" | "AXSystemDialog" | "AXFloatingWindow") {
+        } else if matches!(
+            subrole.as_str(),
+            "AXStandardWindow" | "AXDialog" | "AXSystemDialog" | "AXFloatingWindow"
+        ) {
             2
         } else {
             3
         };
         ax_rank.insert(id as u64, rank);
-        if let Some(w) = windows.iter_mut().find(|w| w.id == id as u64 && w.title.is_empty()) {
+        if let Some(w) = windows
+            .iter_mut()
+            .find(|w| w.id == id as u64 && w.title.is_empty())
+        {
             w.title = el.string("AXTitle").unwrap_or_default();
         }
     }
     if !ax_rank.is_empty() {
-        windows.retain(|w| ax_rank.contains_key(&w.id) || (w.on_screen && w.frame.width >= 100.0 && w.frame.height >= 60.0));
+        windows.retain(|w| {
+            ax_rank.contains_key(&w.id)
+                || (w.on_screen && w.frame.width >= 100.0 && w.frame.height >= 60.0)
+        });
     }
     windows.sort_by_key(|w| (ax_rank.get(&w.id).copied().unwrap_or(4), !w.on_screen));
     windows
@@ -326,7 +368,9 @@ impl MacSession {
     /// Gives focus back to whatever had it before the launch, so the session
     /// stays in the background.
     fn restore_front(&self) {
-        let (Some(before), Some(now)) = (self.front_before, frontmost_pid()) else { return };
+        let (Some(before), Some(now)) = (self.front_before, frontmost_pid()) else {
+            return;
+        };
         if now == self.pid && before != self.pid {
             self.raise_user_app(before);
         }
@@ -349,17 +393,24 @@ impl MacSession {
     /// Follows an app that replaced its first process early on: adopts a
     /// process of the same app that appeared after our launch.
     fn adopt_successor(&mut self) -> bool {
-        let Some((id, known)) = &self.successor_of else { return false };
+        let Some((id, known)) = &self.successor_of else {
+            return false;
+        };
         if self.launched_at.elapsed() > Duration::from_secs(60) {
             return false;
         }
-        let next = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(id))
-            .iter()
-            .map(|a| a.processIdentifier())
-            .find(|p| !known.contains(p));
+        let next =
+            NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(id))
+                .iter()
+                .map(|a| a.processIdentifier())
+                .find(|p| !known.contains(p));
         match next {
             Some(pid) => {
-                log::info!("{} relaunched itself: following pid {} to {pid}", self.name, self.pid);
+                log::info!(
+                    "{} relaunched itself: following pid {} to {pid}",
+                    self.name,
+                    self.pid
+                );
                 self.pid = pid;
                 if let Some((_, known)) = &mut self.successor_of {
                     known.push(pid);
@@ -376,11 +427,21 @@ impl MacSession {
     }
 
     fn target(&self, w: &WindowInfo) -> Target {
-        Target { pid: self.pid, window_id: w.id as u32, origin: CGPoint { x: w.frame.x, y: w.frame.y } }
+        Target {
+            pid: self.pid,
+            window_id: w.id as u32,
+            origin: CGPoint {
+                x: w.frame.x,
+                y: w.frame.y,
+            },
+        }
     }
 
     fn point(w: &WindowInfo, x: f64, y: f64) -> CGPoint {
-        CGPoint { x: w.frame.x + x, y: w.frame.y + y }
+        CGPoint {
+            x: w.frame.x + x,
+            y: w.frame.y + y,
+        }
     }
 
     /// Picks an option of a pop-up button (a web page's <select>) by its
@@ -391,7 +452,10 @@ impl MacSession {
     /// background click marks the menu open without showing it, and the
     /// hidden menu then swallows every key until the next click.
     fn choose(&mut self, window: Option<u64>, el: &Element, value: &str) -> Result<()> {
-        let matches = |el: &Element| el.string("AXValue").is_some_and(|v| v.trim().eq_ignore_ascii_case(value.trim()));
+        let matches = |el: &Element| {
+            el.string("AXValue")
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(value.trim()))
+        };
         if matches(el) {
             return Ok(());
         }
@@ -424,14 +488,21 @@ impl Session for MacSession {
     fn describe(&self) -> Description {
         let mut details = BTreeMap::new();
         if !self.launched {
-            details.insert("attached".into(), "already running; it is left open when the session ends".into());
+            details.insert(
+                "attached".into(),
+                "already running; it is left open when the session ends".into(),
+            );
         }
         if let Some(app) = running(self.pid) {
             if let Some(id) = app.bundleIdentifier() {
                 details.insert("bundle_id".into(), id.to_string());
             }
         }
-        Description { app: self.name.clone(), pid: Some(self.pid as u32), details }
+        Description {
+            app: self.name.clone(),
+            pid: Some(self.pid as u32),
+            details,
+        }
     }
 
     fn windows(&mut self) -> Result<Vec<WindowInfo>> {
@@ -483,7 +554,10 @@ impl Session for MacSession {
         let w = self.window(window)?;
         let root = ax::window_element(self.pid, Some(w.id as u32))
             .or_else(|_| ax::window_element(self.pid, None))?;
-        let origin = CGPoint { x: w.frame.x, y: w.frame.y };
+        let origin = CGPoint {
+            x: w.frame.x,
+            y: w.frame.y,
+        };
         if first_read {
             // Firefox's first read of a page builds its tree, and gives some
             // elements frames from before layout (a button at -43,-75 that
@@ -504,7 +578,9 @@ impl Session for MacSession {
             }
             Action::SetValue { element, value } => {
                 let el = self.elements.get(element)?.clone();
-                if (self.chromium || self.gecko) && el.string("AXRole").as_deref() == Some("AXPopUpButton") {
+                if (self.chromium || self.gecko)
+                    && el.string("AXRole").as_deref() == Some("AXPopUpButton")
+                {
                     return self.choose(window, &el, value);
                 }
                 if el.settable("AXFocused") {
@@ -531,7 +607,13 @@ impl Session for MacSession {
         let t = self.target(&w);
         let _focus = t.prepare(user_focus());
         match action {
-            Action::Click { x, y, button, count, modifiers } => {
+            Action::Click {
+                x,
+                y,
+                button,
+                count,
+                modifiers,
+            } => {
                 let m = match modifiers.as_deref().filter(|s| !s.is_empty()) {
                     Some(s) => parse_chord(s)?.modifiers,
                     None => Default::default(),
@@ -543,9 +625,18 @@ impl Session for MacSession {
                 }
             }
             Action::MoveMouse { x, y } => input::move_to(&t, Self::point(&w, *x, *y)),
-            Action::Drag { from_x, from_y, to_x, to_y, button } => {
-                input::drag(&t, Self::point(&w, *from_x, *from_y), Self::point(&w, *to_x, *to_y), *button)
-            }
+            Action::Drag {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                button,
+            } => input::drag(
+                &t,
+                Self::point(&w, *from_x, *from_y),
+                Self::point(&w, *to_x, *to_y),
+                *button,
+            ),
             Action::Scroll { x, y, dx, dy } => input::scroll(&t, Self::point(&w, *x, *y), *dx, *dy),
             Action::TypeText { text } => input::type_text(&t, text),
             Action::PressKey { keys } => {
@@ -555,7 +646,10 @@ impl Session for MacSession {
                 }
                 Ok(())
             }
-            Action::ElementAction { .. } | Action::SetValue { .. } | Action::Focus { .. } | Action::Wait { .. } => {
+            Action::ElementAction { .. }
+            | Action::SetValue { .. }
+            | Action::Focus { .. }
+            | Action::Wait { .. } => {
                 unreachable!()
             }
         }

@@ -8,7 +8,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventType, CGMouseButton, CGScrollEventUnit,
+    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventType,
+    CGMouseButton, CGScrollEventUnit,
 };
 
 use ocu_core::keys::{Chord, Key, Modifiers, NamedKey};
@@ -68,7 +69,12 @@ fn source() -> Option<CFRetained<CGEventSource>> {
     CGEventSource::new(CGEventSourceStateID::HIDSystemState)
 }
 
-fn mouse_event(target: &Target, ty: CGEventType, at: CGPoint, button: CGMouseButton) -> Result<CFRetained<CGEvent>> {
+fn mouse_event(
+    target: &Target,
+    ty: CGEventType,
+    at: CGPoint,
+    button: CGMouseButton,
+) -> Result<CFRetained<CGEvent>> {
     mouse_event_in(target, ty, at, button, 0, 0)
 }
 
@@ -86,7 +92,13 @@ fn mouse_event_in(
 ) -> Result<CFRetained<CGEvent>> {
     let e = CGEvent::new_mouse_event(source().as_deref(), ty, at, button)
         .ok_or_else(|| anyhow!("could not make a mouse event"))?;
-    sky::set_window_location(&e, CGPoint { x: at.x - target.origin.x, y: at.y - target.origin.y });
+    sky::set_window_location(
+        &e,
+        CGPoint {
+            x: at.x - target.origin.x,
+            y: at.y - target.origin.y,
+        },
+    );
     let wid = target.window_id as i64;
     sky::set_field(&e, 1, click_state); // click state
     sky::set_field(&e, 3, button.0 as i64); // button number
@@ -96,15 +108,34 @@ fn mouse_event_in(
         sky::set_field(&e, 58, gesture);
     }
     sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointer.0, wid);
-    sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent.0, wid);
+    sky::set_field(
+        &e,
+        CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent.0,
+        wid,
+    );
     Ok(e)
 }
 
 fn button_types(button: MouseButton) -> (CGEventType, CGEventType, CGEventType, CGMouseButton) {
     match button {
-        MouseButton::Left => (CGEventType::LeftMouseDown, CGEventType::LeftMouseUp, CGEventType::LeftMouseDragged, CGMouseButton::Left),
-        MouseButton::Right => (CGEventType::RightMouseDown, CGEventType::RightMouseUp, CGEventType::RightMouseDragged, CGMouseButton::Right),
-        MouseButton::Middle => (CGEventType::OtherMouseDown, CGEventType::OtherMouseUp, CGEventType::OtherMouseDragged, CGMouseButton::Center),
+        MouseButton::Left => (
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseUp,
+            CGEventType::LeftMouseDragged,
+            CGMouseButton::Left,
+        ),
+        MouseButton::Right => (
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseUp,
+            CGEventType::RightMouseDragged,
+            CGMouseButton::Right,
+        ),
+        MouseButton::Middle => (
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+            CGEventType::OtherMouseDragged,
+            CGMouseButton::Center,
+        ),
     }
 }
 
@@ -114,12 +145,28 @@ pub fn move_to(target: &Target, at: CGPoint) -> Result<()> {
     Ok(())
 }
 
-pub fn click(target: &Target, at: CGPoint, button: MouseButton, count: u32, modifiers: Modifiers) -> Result<()> {
+pub fn click(
+    target: &Target,
+    at: CGPoint,
+    button: MouseButton,
+    count: u32,
+    modifiers: Modifiers,
+) -> Result<()> {
     let (down, up, _, b) = button_types(button);
     let gesture = gesture_id();
     // A move first: AppKit hit-tests a click against where it last saw the
     // pointer, and a background window has seen nothing.
-    post(target, &*mouse_event_in(target, CGEventType::MouseMoved, at, CGMouseButton::Left, 0, gesture)?);
+    post(
+        target,
+        &*mouse_event_in(
+            target,
+            CGEventType::MouseMoved,
+            at,
+            CGMouseButton::Left,
+            0,
+            gesture,
+        )?,
+    );
     sleep(Duration::from_millis(12));
     for n in 1..=count.max(1) {
         for (i, ty) in [down, up].into_iter().enumerate() {
@@ -144,7 +191,12 @@ pub fn click(target: &Target, at: CGPoint, button: MouseButton, count: u32, modi
 /// user-activation gate, then the real press. Every event carries a gesture
 /// phase in field 0, and its "window location" is the screen point, which
 /// is how Chromium reads it on this path.
-pub fn click_chromium(target: &Target, at: CGPoint, count: u32, modifiers: Modifiers) -> Result<()> {
+pub fn click_chromium(
+    target: &Target,
+    at: CGPoint,
+    count: u32,
+    modifiers: Modifiers,
+) -> Result<()> {
     let gesture = gesture_id();
     let off = CGPoint { x: -1.0, y: -1.0 };
     let wid = target.window_id as i64;
@@ -157,7 +209,11 @@ pub fn click_chromium(target: &Target, at: CGPoint, count: u32, modifiers: Modif
         sky::set_field(&e, 7, 3);
         sky::set_field(&e, 51, wid);
         sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointer.0, wid);
-        sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent.0, wid);
+        sky::set_field(
+            &e,
+            CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent.0,
+            wid,
+        );
         sky::set_field(&e, 58, gesture);
         sky::set_window_location(&e, p);
         if !modifiers.is_empty() {
@@ -194,7 +250,10 @@ pub fn drag(target: &Target, from: CGPoint, to: CGPoint, button: MouseButton) ->
     const STEPS: u32 = 12;
     for i in 1..=STEPS {
         let t = i as f64 / STEPS as f64;
-        let p = CGPoint { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
+        let p = CGPoint {
+            x: from.x + (to.x - from.x) * t,
+            y: from.y + (to.y - from.y) * t,
+        };
         sleep(Duration::from_millis(12));
         post(target, &*mouse_event(target, dragged, p, b)?);
     }
@@ -209,7 +268,17 @@ pub fn drag(target: &Target, from: CGPoint, to: CGPoint, button: MouseButton) ->
 /// arrives: a single large pixel delta is ignored by some background windows.
 pub fn scroll(target: &Target, at: CGPoint, dx: f64, dy: f64) -> Result<()> {
     // A move first, so the window hit-tests the wheel at the right place.
-    post(target, &*mouse_event_in(target, CGEventType::MouseMoved, at, CGMouseButton::Left, 0, gesture_id())?);
+    post(
+        target,
+        &*mouse_event_in(
+            target,
+            CGEventType::MouseMoved,
+            at,
+            CGMouseButton::Left,
+            0,
+            gesture_id(),
+        )?,
+    );
     sleep(Duration::from_millis(12));
     // About 40 points a line and 3 lines a notch.
     const LINES_PER_NOTCH: f64 = 3.0;
@@ -220,18 +289,38 @@ pub fn scroll(target: &Target, at: CGPoint, dx: f64, dy: f64) -> Result<()> {
     for i in 0..notches {
         // Spread the lines over the notches; positive dy means "scroll down",
         // and wheel deltas point the other way.
-        let share = |l: f64| ((l * (i + 1) as f64 / notches as f64).round() - (l * i as f64 / notches as f64).round()) as i32;
+        let share = |l: f64| {
+            ((l * (i + 1) as f64 / notches as f64).round()
+                - (l * i as f64 / notches as f64).round()) as i32
+        };
         let (wy, wx) = (-share(ly), -share(lx));
         if wy == 0 && wx == 0 {
             continue;
         }
-        let e = CGEvent::new_scroll_wheel_event2(source().as_deref(), CGScrollEventUnit::Line, 2, wy, wx, 0)
-            .ok_or_else(|| anyhow!("could not make a scroll event"))?;
+        let e = CGEvent::new_scroll_wheel_event2(
+            source().as_deref(),
+            CGScrollEventUnit::Line,
+            2,
+            wy,
+            wx,
+            0,
+        )
+        .ok_or_else(|| anyhow!("could not make a scroll event"))?;
         CGEvent::set_location(Some(&e), at);
-        sky::set_window_location(&e, CGPoint { x: at.x - target.origin.x, y: at.y - target.origin.y });
+        sky::set_window_location(
+            &e,
+            CGPoint {
+                x: at.x - target.origin.x,
+                y: at.y - target.origin.y,
+            },
+        );
         sky::set_field(&e, 51, wid);
         sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointer.0, wid);
-        sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent.0, wid);
+        sky::set_field(
+            &e,
+            CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent.0,
+            wid,
+        );
         // Both routes: SkyLight reaches background Chromium-style apps, the
         // public one AppKit views that ignore the other.
         post(target, &e);
@@ -241,8 +330,14 @@ pub fn scroll(target: &Target, at: CGPoint, dx: f64, dy: f64) -> Result<()> {
     Ok(())
 }
 
-fn key_event(code: u16, down: bool, m: Modifiers, text: Option<char>) -> Result<CFRetained<CGEvent>> {
-    let e = CGEvent::new_keyboard_event(None, code, down).ok_or_else(|| anyhow!("could not make a key event"))?;
+fn key_event(
+    code: u16,
+    down: bool,
+    m: Modifiers,
+    text: Option<char>,
+) -> Result<CFRetained<CGEvent>> {
+    let e = CGEvent::new_keyboard_event(None, code, down)
+        .ok_or_else(|| anyhow!("could not make a key event"))?;
     CGEvent::set_flags(Some(&e), flags(m));
     if let Some(c) = text {
         let mut buf = [0u16; 2];
@@ -282,8 +377,20 @@ pub fn press(target: &Target, chord: &Chord) -> Result<()> {
 pub fn type_text(target: &Target, text: &str) -> Result<()> {
     for c in text.chars() {
         match c {
-            '\n' | '\r' => press(target, &Chord { modifiers: Modifiers::default(), key: Some(Key::Named(NamedKey::Enter)) })?,
-            '\t' => press(target, &Chord { modifiers: Modifiers::default(), key: Some(Key::Named(NamedKey::Tab)) })?,
+            '\n' | '\r' => press(
+                target,
+                &Chord {
+                    modifiers: Modifiers::default(),
+                    key: Some(Key::Named(NamedKey::Enter)),
+                },
+            )?,
+            '\t' => press(
+                target,
+                &Chord {
+                    modifiers: Modifiers::default(),
+                    key: Some(Key::Named(NamedKey::Tab)),
+                },
+            )?,
             _ => {
                 // The real key code where there is one (apps that read key
                 // codes, like games and terminals, see a real key), and the
@@ -292,7 +399,10 @@ pub fn type_text(target: &Target, text: &str) -> Result<()> {
                     .filter(|_| c.is_ascii())
                     .map(|(code, s)| (code, s || c.is_ascii_uppercase()))
                     .unwrap_or((0, false));
-                let m = Modifiers { shift, ..Default::default() };
+                let m = Modifiers {
+                    shift,
+                    ..Default::default()
+                };
                 post(target, &*key_event(code, true, m, Some(c))?);
                 post(target, &*key_event(code, false, m, Some(c))?);
             }
@@ -338,7 +448,10 @@ fn named_code(k: NamedKey) -> u16 {
         NamedKey::CapsLock => 57,
         NamedKey::Insert => 114,
         NamedKey::F(n) => {
-            const F: [u16; 20] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90];
+            const F: [u16; 20] = [
+                122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79,
+                80, 90,
+            ];
             F.get(n as usize - 1).copied().unwrap_or(122)
         }
     }
@@ -347,21 +460,84 @@ fn named_code(k: NamedKey) -> u16 {
 /// The US-layout key code for a character, and whether it needs shift.
 fn char_code(c: char) -> Option<(u16, bool)> {
     const PLAIN: &[(char, u16)] = &[
-        ('a', 0), ('s', 1), ('d', 2), ('f', 3), ('h', 4), ('g', 5), ('z', 6), ('x', 7), ('c', 8), ('v', 9),
-        ('b', 11), ('q', 12), ('w', 13), ('e', 14), ('r', 15), ('y', 16), ('t', 17), ('1', 18), ('2', 19),
-        ('3', 20), ('4', 21), ('6', 22), ('5', 23), ('=', 24), ('9', 25), ('7', 26), ('-', 27), ('8', 28),
-        ('0', 29), (']', 30), ('o', 31), ('u', 32), ('[', 33), ('i', 34), ('p', 35), ('l', 37), ('j', 38),
-        ('\'', 39), ('k', 40), (';', 41), ('\\', 42), (',', 43), ('/', 44), ('n', 45), ('m', 46), ('.', 47),
-        ('`', 50), (' ', 49),
+        ('a', 0),
+        ('s', 1),
+        ('d', 2),
+        ('f', 3),
+        ('h', 4),
+        ('g', 5),
+        ('z', 6),
+        ('x', 7),
+        ('c', 8),
+        ('v', 9),
+        ('b', 11),
+        ('q', 12),
+        ('w', 13),
+        ('e', 14),
+        ('r', 15),
+        ('y', 16),
+        ('t', 17),
+        ('1', 18),
+        ('2', 19),
+        ('3', 20),
+        ('4', 21),
+        ('6', 22),
+        ('5', 23),
+        ('=', 24),
+        ('9', 25),
+        ('7', 26),
+        ('-', 27),
+        ('8', 28),
+        ('0', 29),
+        (']', 30),
+        ('o', 31),
+        ('u', 32),
+        ('[', 33),
+        ('i', 34),
+        ('p', 35),
+        ('l', 37),
+        ('j', 38),
+        ('\'', 39),
+        ('k', 40),
+        (';', 41),
+        ('\\', 42),
+        (',', 43),
+        ('/', 44),
+        ('n', 45),
+        ('m', 46),
+        ('.', 47),
+        ('`', 50),
+        (' ', 49),
     ];
     const SHIFTED: &[(char, char)] = &[
-        ('!', '1'), ('@', '2'), ('#', '3'), ('$', '4'), ('%', '5'), ('^', '6'), ('&', '7'), ('*', '8'),
-        ('(', '9'), (')', '0'), ('_', '-'), ('+', '='), ('{', '['), ('}', ']'), ('|', '\\'), (':', ';'),
-        ('"', '\''), ('<', ','), ('>', '.'), ('?', '/'), ('~', '`'),
+        ('!', '1'),
+        ('@', '2'),
+        ('#', '3'),
+        ('$', '4'),
+        ('%', '5'),
+        ('^', '6'),
+        ('&', '7'),
+        ('*', '8'),
+        ('(', '9'),
+        (')', '0'),
+        ('_', '-'),
+        ('+', '='),
+        ('{', '['),
+        ('}', ']'),
+        ('|', '\\'),
+        (':', ';'),
+        ('"', '\''),
+        ('<', ','),
+        ('>', '.'),
+        ('?', '/'),
+        ('~', '`'),
     ];
     if let Some(&(_, code)) = PLAIN.iter().find(|(p, _)| *p == c) {
         return Some((code, false));
     }
     let base = SHIFTED.iter().find(|(s, _)| *s == c)?.1;
-    PLAIN.iter().find(|(p, _)| *p == base).map(|&(_, code)| (code, true))
+    PLAIN
+        .iter()
+        .find(|(p, _)| *p == base)
+        .map(|&(_, code)| (code, true))
 }

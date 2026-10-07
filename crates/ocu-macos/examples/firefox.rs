@@ -24,11 +24,20 @@ document.getElementById('i').addEventListener('focus',()=>t('FOCUS'));
     let page = std::env::temp_dir().join("ocu-firefox-test.html");
     std::fs::write(&page, PAGE)?;
     let p = ocu_macos::MacPlatform;
-    let mut s = p.launch(&LaunchSpec { app: "Firefox".into(), args: vec![format!("file://{}", page.display())], ..Default::default() })?;
+    let mut s = p.launch(&LaunchSpec {
+        app: "Firefox".into(),
+        args: vec![format!("file://{}", page.display())],
+        ..Default::default()
+    })?;
     std::thread::sleep(std::time::Duration::from_secs(4));
     let tree = s.ui_tree(None, &TreeOptions::default())?;
     println!("tree: {} nodes", count(&tree));
-    let title = |s: &mut Box<dyn ocu_core::Session>| s.windows().ok().and_then(|w| w.first().map(|w| w.title.clone())).unwrap_or_default();
+    let title = |s: &mut Box<dyn ocu_core::Session>| {
+        s.windows()
+            .ok()
+            .and_then(|w| w.first().map(|w| w.title.clone()))
+            .unwrap_or_default()
+    };
     for role in ["Button", "TextField"] {
         // The window's own close button comes after the page in the tree.
         let Some(el) = find(&tree, "WebArea").and_then(|web| find(web, role)) else {
@@ -36,7 +45,16 @@ document.getElementById('i').addEventListener('focus',()=>t('FOCUS'));
             continue;
         };
         let (x, y) = el.frame.unwrap().center();
-        s.perform(None, &Action::Click { x, y, button: MouseButton::Left, count: 1, modifiers: None })?;
+        s.perform(
+            None,
+            &Action::Click {
+                x,
+                y,
+                button: MouseButton::Left,
+                count: 1,
+                modifiers: None,
+            },
+        )?;
         std::thread::sleep(std::time::Duration::from_millis(500));
         println!("after clicking the {role}: {}", title(&mut s));
     }

@@ -44,13 +44,15 @@ struct Worker {
 impl Worker {
     fn spawn(service: Arc<Service>, name: String) -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
-        let _ = std::thread::Builder::new().name(format!("http-{name}")).spawn(move || {
-            let mut client = service.client();
-            while let Ok(job) = rx.recv() {
-                job(&mut client);
-            }
-            // The client drops here, ending the device's sessions.
-        });
+        let _ = std::thread::Builder::new()
+            .name(format!("http-{name}"))
+            .spawn(move || {
+                let mut client = service.client();
+                while let Ok(job) = rx.recv() {
+                    job(&mut client);
+                }
+                // The client drops here, ending the device's sessions.
+            });
         Self { tx }
     }
 }
@@ -67,15 +69,27 @@ impl State {
     /// The device a key belongs to, rereading devices.json when it changed
     /// and retiring workers whose device or key is gone.
     fn authenticate(&self, key: &str) -> Option<(String, String, String)> {
-        let mtime = std::fs::metadata(super::devices::path()).and_then(|m| m.modified()).ok();
+        let mtime = std::fs::metadata(super::devices::path())
+            .and_then(|m| m.modified())
+            .ok();
         let mut devices = self.devices.lock().unwrap();
         if devices.1 != mtime || mtime.is_none() {
             *devices = (Devices::load(), mtime);
-            let valid: Vec<(String, String)> =
-                devices.0.devices.iter().map(|d| (d.id.clone(), d.key_hash.clone())).collect();
-            self.workers.lock().unwrap().retain(|k, _| valid.contains(k));
+            let valid: Vec<(String, String)> = devices
+                .0
+                .devices
+                .iter()
+                .map(|d| (d.id.clone(), d.key_hash.clone()))
+                .collect();
+            self.workers
+                .lock()
+                .unwrap()
+                .retain(|k, _| valid.contains(k));
         }
-        devices.0.authenticate(key).map(|d| (d.id.clone(), d.key_hash.clone(), d.name.clone()))
+        devices
+            .0
+            .authenticate(key)
+            .map(|d| (d.id.clone(), d.key_hash.clone(), d.name.clone()))
     }
 
     fn worker_run<R: Send + 'static>(
@@ -97,7 +111,8 @@ impl State {
             }))
             .map_err(|_| anyhow!("the device's worker stopped"))?;
         drop(workers);
-        rx.recv().map_err(|_| anyhow!("the device's worker stopped"))
+        rx.recv()
+            .map_err(|_| anyhow!("the device's worker stopped"))
     }
 }
 
@@ -110,23 +125,32 @@ pub struct HttpServer {
 impl HttpServer {
     pub fn start(service: Arc<Service>, bind: &str, port: u16) -> Result<Self> {
         let addr = format!("{bind}:{port}");
-        let server = Arc::new(Server::http(&addr).map_err(|e| anyhow!("can't listen on {addr}: {e}"))?);
+        let server =
+            Arc::new(Server::http(&addr).map_err(|e| anyhow!("can't listen on {addr}: {e}"))?);
         let state = Arc::new(State {
             service,
             devices: Mutex::new((Devices::default(), None)),
             workers: Mutex::new(HashMap::new()),
         });
         let s = server.clone();
-        let thread = std::thread::Builder::new().name("http".into()).spawn(move || {
-            for request in s.incoming_requests() {
-                let state = state.clone();
-                let _ = std::thread::Builder::new().name("http-request".into()).spawn(move || handle(&state, request));
-            }
-            // Unblocked: drop the workers, ending every device's sessions.
-            state.workers.lock().unwrap().clear();
-        })?;
+        let thread = std::thread::Builder::new()
+            .name("http".into())
+            .spawn(move || {
+                for request in s.incoming_requests() {
+                    let state = state.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("http-request".into())
+                        .spawn(move || handle(&state, request));
+                }
+                // Unblocked: drop the workers, ending every device's sessions.
+                state.workers.lock().unwrap().clear();
+            })?;
         log::info!("HTTP server listening on {addr}");
-        Ok(Self { server, thread: Some(thread), addr })
+        Ok(Self {
+            server,
+            thread: Some(thread),
+            addr,
+        })
     }
 
     /// Serves until the process ends (`opencomputeruse serve`).
@@ -158,13 +182,24 @@ fn bearer(request: &Request) -> Option<String> {
         .headers()
         .iter()
         .find(|h| h.field.equiv("Authorization"))
-        .and_then(|h| h.value.as_str().strip_prefix("Bearer ").map(|k| k.trim().to_string()))
+        .and_then(|h| {
+            h.value
+                .as_str()
+                .strip_prefix("Bearer ")
+                .map(|k| k.trim().to_string())
+        })
 }
 
 fn read_json(request: &mut Request) -> Result<Value> {
     let mut body = Vec::new();
-    request.as_reader().take(MAX_BODY + 1).read_to_end(&mut body)?;
-    anyhow::ensure!(body.len() as u64 <= MAX_BODY, "the request body is too large");
+    request
+        .as_reader()
+        .take(MAX_BODY + 1)
+        .read_to_end(&mut body)?;
+    anyhow::ensure!(
+        body.len() as u64 <= MAX_BODY,
+        "the request body is too large"
+    );
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(json!({}));
     }
@@ -180,8 +215,11 @@ fn handle(state: &State, mut request: Request) {
         return;
     }
     let Some(device) = bearer(&request).and_then(|k| state.authenticate(&k)) else {
-        let resp = json_response(401, &json!({ "error": "missing or unknown key; send Authorization: Bearer <key>" }))
-            .with_header(Header::from_bytes("WWW-Authenticate", "Bearer").unwrap());
+        let resp = json_response(
+            401,
+            &json!({ "error": "missing or unknown key; send Authorization: Bearer <key>" }),
+        )
+        .with_header(Header::from_bytes("WWW-Authenticate", "Bearer").unwrap());
         let _ = request.respond(resp);
         return;
     };
@@ -192,7 +230,9 @@ fn handle(state: &State, mut request: Request) {
             let name = p.trim_start_matches("/v1/tools/").to_string();
             match read_json(&mut request) {
                 Err(e) => json_response(400, &json!({ "error": format!("{e:#}") })),
-                Ok(args) => match state.worker_run(device, move |client| crate::mcp::call_tool(client, &name, &args)) {
+                Ok(args) => match state.worker_run(device, move |client| {
+                    crate::mcp::call_tool(client, &name, &args)
+                }) {
                     Ok(result) => json_response(200, &result),
                     Err(e) => json_response(500, &json!({ "error": format!("{e:#}") })),
                 },
@@ -203,15 +243,23 @@ fn handle(state: &State, mut request: Request) {
                 400,
                 &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": format!("{e:#}") } }),
             ),
-            Ok(msg) => match state.worker_run(device, move |client| crate::mcp::dispatch_value(client, &msg, false)) {
+            Ok(msg) => match state.worker_run(device, move |client| {
+                crate::mcp::dispatch_value(client, &msg, false)
+            }) {
                 Ok(Some(reply)) => json_response(200, &reply),
                 // Notifications and responses get no body.
                 Ok(None) => Response::from_data(Vec::new()).with_status_code(202),
                 Err(e) => json_response(500, &json!({ "error": format!("{e:#}") })),
             },
         },
-        (Method::Get, "/mcp") => json_response(405, &json!({ "error": "this server does not stream; POST JSON-RPC to /mcp" })),
-        _ => json_response(404, &json!({ "error": format!("no route {method} {path}") })),
+        (Method::Get, "/mcp") => json_response(
+            405,
+            &json!({ "error": "this server does not stream; POST JSON-RPC to /mcp" }),
+        ),
+        _ => json_response(
+            404,
+            &json!({ "error": format!("no route {method} {path}") }),
+        ),
     };
     let _ = request.respond(response);
 }

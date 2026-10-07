@@ -19,7 +19,7 @@ struct Envelope<T> {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Reply {
-    Ok(Response),
+    Ok(Box<Response>),
     Error(String),
 }
 
@@ -51,7 +51,10 @@ impl Remote {
     pub fn connect(path: &std::path::Path) -> Result<Self> {
         let stream = std::os::unix::net::UnixStream::connect(path)
             .with_context(|| format!("connecting to {}", path.display()))?;
-        Ok(Self { reader: BufReader::new(Box::new(stream)), next: 1 })
+        Ok(Self {
+            reader: BufReader::new(Box::new(stream)),
+            next: 1,
+        })
     }
 }
 
@@ -62,16 +65,27 @@ impl Handler for Remote {
         let mut line = serde_json::to_vec(&Envelope { id, body: req })?;
         line.push(b'\n');
         let stream = self.reader.get_mut();
-        if stream.write_all(&line).and_then(|_| stream.flush()).is_err() {
-            return Err(Disconnected { before_sending: true }.into());
+        if stream
+            .write_all(&line)
+            .and_then(|_| stream.flush())
+            .is_err()
+        {
+            return Err(Disconnected {
+                before_sending: true,
+            }
+            .into());
         }
         let mut line = String::new();
         if self.reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return Err(Disconnected { before_sending: false }.into());
+            return Err(Disconnected {
+                before_sending: false,
+            }
+            .into());
         }
-        let reply: Envelope<Reply> = serde_json::from_str(&line).context("reading the agent's reply")?;
+        let reply: Envelope<Reply> =
+            serde_json::from_str(&line).context("reading the agent's reply")?;
         match reply.body {
-            Reply::Ok(r) => Ok(r),
+            Reply::Ok(r) => Ok(*r),
             Reply::Error(e) => Err(anyhow!(e)),
         }
     }
@@ -90,10 +104,13 @@ fn serve_connection(service: Arc<Service>, stream: Box<dyn Stream>) {
             Ok(_) => {}
         }
         let (id, reply) = match serde_json::from_str::<Envelope<Request>>(&line) {
-            Ok(env) => (env.id, match client.handle(env.body) {
-                Ok(r) => Reply::Ok(r),
-                Err(e) => Reply::Error(format!("{e:#}")),
-            }),
+            Ok(env) => (
+                env.id,
+                match client.handle(env.body) {
+                    Ok(r) => Reply::Ok(Box::new(r)),
+                    Err(e) => Reply::Error(format!("{e:#}")),
+                },
+            ),
             Err(e) => (0, Reply::Error(format!("bad request: {e}"))),
         };
         let stream = reader.get_mut();
@@ -121,15 +138,18 @@ pub fn listen(service: Arc<Service>, path: &std::path::Path) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let listener = UnixListener::bind(path).with_context(|| format!("listening on {}", path.display()))?;
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("listening on {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    std::thread::Builder::new().name("ipc-listener".into()).spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let service = service.clone();
-            let _ = std::thread::Builder::new()
-                .name("ipc-client".into())
-                .spawn(move || serve_connection(service, Box::new(stream)));
-        }
-    })?;
+    std::thread::Builder::new()
+        .name("ipc-listener".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let service = service.clone();
+                let _ = std::thread::Builder::new()
+                    .name("ipc-client".into())
+                    .spawn(move || serve_connection(service, Box::new(stream)));
+            }
+        })?;
     Ok(())
 }

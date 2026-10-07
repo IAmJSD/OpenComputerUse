@@ -44,7 +44,11 @@ impl Overlay {
     /// Glide the cursor to (`x`, `y`) in target-window points.
     pub fn point_at(&mut self, x: f64, y: f64, click: bool) {
         let to = point(x as f32 + MARGIN as f32, y as f32 + MARGIN as f32);
-        self.from = if self.has_cursor { self.position(Instant::now()) } else { to };
+        self.from = if self.has_cursor {
+            self.position(Instant::now())
+        } else {
+            to
+        };
         self.to = to;
         self.moved_at = Instant::now();
         self.has_cursor = true;
@@ -59,10 +63,14 @@ impl Overlay {
     }
 
     fn position(&self, now: Instant) -> Point<f32> {
-        let t = (now.duration_since(self.moved_at).as_secs_f32() / GLIDE.as_secs_f32()).clamp(0.0, 1.0);
+        let t =
+            (now.duration_since(self.moved_at).as_secs_f32() / GLIDE.as_secs_f32()).clamp(0.0, 1.0);
         // Ease out: quick start, gentle landing.
         let e = 1.0 - (1.0 - t).powi(3);
-        point(self.from.x + (self.to.x - self.from.x) * e, self.from.y + (self.to.y - self.from.y) * e)
+        point(
+            self.from.x + (self.to.x - self.from.x) * e,
+            self.from.y + (self.to.y - self.from.y) * e,
+        )
     }
 
     /// The halo's strength, 0 to 1, with a slow breath while lit.
@@ -87,7 +95,8 @@ impl Overlay {
 /// Seconds on a clock every overlay shares, so their halos breathe together.
 fn seconds(now: Instant) -> f32 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    now.duration_since(*START.get_or_init(Instant::now)).as_secs_f32()
+    now.duration_since(*START.get_or_init(Instant::now))
+        .as_secs_f32()
 }
 
 /// Rings in the halo: the edge, then the glow fading outwards.

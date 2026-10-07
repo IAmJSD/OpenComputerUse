@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use gpui::{
-    point, px, size, App, AppContext as _, Application, Bounds, Context, Entity, WindowBackgroundAppearance,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    point, px, size, App, AppContext as _, Application, Bounds, Context, Entity,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 
 use ocu_core::{Observer, Service, SessionInfo, WindowInfo};
@@ -37,8 +37,17 @@ pub fn socket_path() -> std::path::PathBuf {
 enum UiEvent {
     Started,
     Ended(String),
-    Pointer { session: String, window: WindowInfo, x: f64, y: f64, click: bool },
-    Acted { session: String, window: WindowInfo },
+    Pointer {
+        session: String,
+        window: WindowInfo,
+        x: f64,
+        y: f64,
+        click: bool,
+    },
+    Acted {
+        session: String,
+        window: WindowInfo,
+    },
     /// The background check found a release it hasn't shown yet.
     UpdateAvailable(crate::update::UpdateStatus),
 }
@@ -54,13 +63,22 @@ impl Observer for Bus {
         let _ = self.0.try_send(UiEvent::Ended(id.to_string()));
     }
     fn pointer(&self, session: &str, window: &WindowInfo, x: f64, y: f64, click: bool) {
-        let _ = self.0.try_send(UiEvent::Pointer { session: session.into(), window: window.clone(), x, y, click });
+        let _ = self.0.try_send(UiEvent::Pointer {
+            session: session.into(),
+            window: window.clone(),
+            x,
+            y,
+            click,
+        });
         // Let the cursor arrive before the click lands, so what the user
         // sees matches what happens.
         std::thread::sleep(Duration::from_millis(if click { 260 } else { 120 }));
     }
     fn acted(&self, session: &str, window: &WindowInfo) {
-        let _ = self.0.try_send(UiEvent::Acted { session: session.into(), window: window.clone() });
+        let _ = self.0.try_send(UiEvent::Acted {
+            session: session.into(),
+            window: window.clone(),
+        });
     }
 }
 
@@ -84,7 +102,9 @@ struct Agent {
 impl Agent {
     fn show_status(&mut self, cx: &mut Context<Self>) {
         if let Some(h) = self.status {
-            if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
+            if h.update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
                 cx.activate(true);
                 return;
             }
@@ -97,11 +117,19 @@ impl Agent {
             UiEvent::Started => self.refresh_status(cx),
             UiEvent::Ended(id) => {
                 if let Some(entry) = self.overlays.remove(&id) {
-                    let _ = entry.handle.update(cx, |_, window, _| window.remove_window());
+                    let _ = entry
+                        .handle
+                        .update(cx, |_, window, _| window.remove_window());
                 }
                 self.refresh_status(cx);
             }
-            UiEvent::Pointer { session, window, x, y, click } => {
+            UiEvent::Pointer {
+                session,
+                window,
+                x,
+                y,
+                click,
+            } => {
                 if let Some(h) = self.overlay(&session, &window, cx) {
                     let _ = h.update(cx, |o, _, cx| {
                         o.point_at(x, y, click);
@@ -141,7 +169,12 @@ impl Agent {
     }
 
     /// The session's overlay over `window`, made or moved as needed.
-    fn overlay(&mut self, session: &str, window: &WindowInfo, cx: &mut Context<Self>) -> Option<WindowHandle<Overlay>> {
+    fn overlay(
+        &mut self,
+        session: &str,
+        window: &WindowInfo,
+        cx: &mut Context<Self>,
+    ) -> Option<WindowHandle<Overlay>> {
         if !Config::load().show_overlay() {
             return None;
         }
@@ -163,7 +196,10 @@ impl Agent {
         let f = window.frame;
         let bounds = Bounds {
             origin: point(px((f.x - MARGIN) as f32), px((f.y - MARGIN) as f32)),
-            size: size(px((f.width + MARGIN * 2.0) as f32), px((f.height + MARGIN * 2.0) as f32)),
+            size: size(
+                px((f.width + MARGIN * 2.0) as f32),
+                px((f.height + MARGIN * 2.0) as f32),
+            ),
         };
         let handle = cx
             .open_window(
@@ -192,7 +228,12 @@ impl Agent {
         });
         self.overlays.insert(
             session.to_string(),
-            OverlayEntry { handle, target, last_active: Instant::now(), shown: true },
+            OverlayEntry {
+                handle,
+                target,
+                last_active: Instant::now(),
+                shown: true,
+            },
         );
         Some(handle)
     }
@@ -202,14 +243,17 @@ impl Agent {
     fn track(&mut self, cx: &mut Context<Self>) {
         for entry in self.overlays.values_mut() {
             let info = ocu_macos::window_info(entry.target);
-            let visible = entry.last_active.elapsed() < OVERLAY_IDLE && info.as_ref().is_some_and(|w| w.on_screen);
+            let visible = entry.last_active.elapsed() < OVERLAY_IDLE
+                && info.as_ref().is_some_and(|w| w.on_screen);
             let target = entry.target;
             if !visible && !entry.shown {
                 continue;
             }
             entry.shown = visible;
             let _ = entry.handle.update(cx, |_, w, _| {
-                let Some(ns) = native::ns_window(w) else { return };
+                let Some(ns) = native::ns_window(w) else {
+                    return;
+                };
                 match (&info, visible) {
                     (Some(info), true) => native::cover(&ns, info.frame, target, MARGIN),
                     _ => native::hide(&ns),
@@ -236,7 +280,10 @@ fn background_update_checks(tx: async_channel::Sender<UiEvent>) {
                     let seen = std::fs::read_to_string(&announced).unwrap_or_default();
                     if seen.trim() != up.version {
                         let _ = std::fs::write(&announced, &up.version);
-                        if tx.send_blocking(UiEvent::UpdateAvailable(status.clone())).is_err() {
+                        if tx
+                            .send_blocking(UiEvent::UpdateAvailable(status.clone()))
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -252,8 +299,12 @@ fn background_update_checks(tx: async_channel::Sender<UiEvent>) {
 fn log_to_file() {
     let path = crate::config::config_dir().join("agent.log");
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let target = std::fs::OpenOptions::new().create(true).append(true).open(&path);
-    let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    let target = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path);
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     if let Ok(file) = target {
         builder.target(env_logger::Target::Pipe(Box::new(file)));
     }
@@ -281,7 +332,9 @@ pub fn run(show: bool) -> Result<()> {
         });
     }
 
-    std::thread::Builder::new().name("update-check".into()).spawn(move || background_update_checks(updates_tx))?;
+    std::thread::Builder::new()
+        .name("update-check".into())
+        .spawn(move || background_update_checks(updates_tx))?;
 
     let app = Application::new().with_assets(assets::Assets);
     let agent_slot: std::rc::Rc<std::cell::RefCell<Option<Entity<Agent>>>> = Default::default();
@@ -301,14 +354,21 @@ pub fn run(show: bool) -> Result<()> {
             gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight
         ));
         let missing = service.platform().permissions().iter().any(|p| !p.granted);
-        let agent = cx.new(|_| Agent { service: service.clone(), overlays: HashMap::new(), status: None, http: Default::default() });
+        let agent = cx.new(|_| Agent {
+            service: service.clone(),
+            overlays: HashMap::new(),
+            status: None,
+            http: Default::default(),
+        });
         *agent_slot.borrow_mut() = Some(agent.clone());
         if show || missing {
             agent.update(cx, |a, cx| a.show_status(cx));
         }
         {
             let agent = agent.clone();
-            cx.on_action(move |_: &menu::CheckForUpdates, cx| agent.update(cx, |a, cx| a.check_for_updates(cx)));
+            cx.on_action(move |_: &menu::CheckForUpdates, cx| {
+                agent.update(cx, |a, cx| a.check_for_updates(cx))
+            });
         }
         cx.on_window_closed({
             let agent = agent.clone();
@@ -317,7 +377,10 @@ pub fn run(show: bool) -> Result<()> {
             move |cx| {
                 let agent = agent.clone();
                 cx.defer(move |cx| {
-                    let open = agent.read(cx).status.is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
+                    let open = agent
+                        .read(cx)
+                        .status
+                        .is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
                     if !open {
                         agent.update(cx, |a, _| a.status = None);
                         native::set_regular(false);
@@ -346,7 +409,9 @@ pub fn run(show: bool) -> Result<()> {
         .detach();
         let tracker = agent.clone();
         cx.spawn(async move |cx| loop {
-            cx.background_executor().timer(Duration::from_millis(120)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(120))
+                .await;
             if tracker.update(cx, |a, cx| a.track(cx)).is_err() {
                 break;
             }
