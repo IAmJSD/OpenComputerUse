@@ -77,7 +77,7 @@ permissions, one-click install into Claude Code or Codex, live sessions, and
 recipe settings.
 
 ```sh
-CODESIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh
+CODESIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh   # universal (arm64 + x86_64)
 cp -R dist/OpenComputerUse.app /Applications/ && open /Applications/OpenComputerUse.app
 ```
 
