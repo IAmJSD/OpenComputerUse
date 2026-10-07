@@ -75,7 +75,7 @@ draws a halo and a gliding cursor over the window being driven. It is built
 with GPUI (the `IAmJSD/gpui` fork). The MCP server starts the app through
 LaunchServices when needed, so the app keeps its own permissions whichever
 client started the server. Opening the app shows its window:
-permissions, one-click install into Claude Code or Codex, live sessions, and
+permissions, one-click install into Claude Code, Claude Desktop, Codex or OpenCode, live sessions, and
 recipe settings.
 
 ```sh
@@ -123,13 +123,15 @@ docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm ocu-l
 From the app's window, or:
 
 ```sh
-opencomputeruse install claude     # claude mcp add --scope user opencomputeruse -- <path> mcp
-opencomputeruse install codex      # codex mcp add opencomputeruse -- <path> mcp
-opencomputeruse install opencode   # an "mcp" entry in ~/.config/opencode/opencode.json(c)
-opencomputeruse clients            # which clients run this copy
+opencomputeruse install claude          # claude mcp add --scope user opencomputeruse -- <path> mcp
+opencomputeruse install claude-desktop  # an "mcpServers" entry in claude_desktop_config.json
+opencomputeruse install codex           # codex mcp add opencomputeruse -- <path> mcp
+opencomputeruse install opencode        # an "mcp" entry in ~/.config/opencode/opencode.json(c)
+opencomputeruse clients                 # which clients run this copy
 ```
 
-A client whose entry runs another copy (an old build, or the app before it
+Claude Desktop reads its config when it starts, so quit and reopen it after
+installing. A client whose entry runs another copy (an old build, or the app before it
 moved) shows as "points elsewhere"; installing again points it here.
 
 For other clients, use `{ "command": "<path to opencomputeruse>", "args": ["mcp"] }`.

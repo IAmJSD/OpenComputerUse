@@ -1,5 +1,6 @@
-//! Registering this server with the MCP clients that have a CLI for it,
-//! through their own `mcp add` commands so their config stays theirs.
+//! Registering this server with MCP clients: through their own `mcp add`
+//! commands where they have one, so their config stays theirs, and in
+//! their config file where they do not (OpenCode, Claude Desktop).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,16 +14,18 @@ pub const SERVER_NAME: &str = "opencomputeruse";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Client {
     ClaudeCode,
+    ClaudeDesktop,
     Codex,
     OpenCode,
 }
 
 impl Client {
-    pub const ALL: [Client; 3] = [Client::ClaudeCode, Client::Codex, Client::OpenCode];
+    pub const ALL: [Client; 4] = [Client::ClaudeCode, Client::ClaudeDesktop, Client::Codex, Client::OpenCode];
 
     pub fn label(self) -> &'static str {
         match self {
             Client::ClaudeCode => "Claude Code",
+            Client::ClaudeDesktop => "Claude Desktop",
             Client::Codex => "Codex",
             Client::OpenCode => "OpenCode",
         }
@@ -31,6 +34,7 @@ impl Client {
     fn binary(self) -> &'static str {
         match self {
             Client::ClaudeCode => "claude",
+            Client::ClaudeDesktop => "claude-desktop",
             Client::Codex => "codex",
             Client::OpenCode => "opencode",
         }
@@ -39,9 +43,19 @@ impl Client {
     pub fn parse(s: &str) -> Result<Self> {
         match s.to_ascii_lowercase().as_str() {
             "claude" | "claude-code" | "claudecode" => Ok(Client::ClaudeCode),
+            "claude-desktop" | "claudedesktop" | "desktop" => Ok(Client::ClaudeDesktop),
             "codex" => Ok(Client::Codex),
             "opencode" => Ok(Client::OpenCode),
-            _ => bail!("unknown client \"{s}\" (claude, codex or opencode)"),
+            _ => bail!("unknown client \"{s}\" (claude, claude-desktop, codex or opencode)"),
+        }
+    }
+
+    /// What to do after installing for the server to show up.
+    pub fn next_step(self) -> String {
+        match self {
+            // It reads its config once, at launch.
+            Client::ClaudeDesktop => "Quit and reopen Claude Desktop to use it.".into(),
+            _ => format!("Start a new {} session to use it.", self.label()),
         }
     }
 }
@@ -54,9 +68,13 @@ fn home() -> PathBuf {
 }
 
 /// Finds a client: its CLI (an app opened from Finder has a bare PATH, so
-/// the usual install locations are searched too), or for OpenCode, whose
-/// MCP servers live in its config file, any sign it is installed.
+/// the usual install locations are searched too), or for OpenCode and
+/// Claude Desktop, whose MCP servers live in their config files, any sign
+/// they are installed.
 pub fn find(client: Client) -> Option<PathBuf> {
+    if client == Client::ClaudeDesktop {
+        return desktop::find();
+    }
     if client == Client::OpenCode {
         return opencode::config_dir()
             .is_dir()
@@ -94,6 +112,7 @@ pub fn registered_command(client: Client) -> Option<String> {
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
             .and_then(|v| v.get("mcpServers")?.get(SERVER_NAME)?.get("command")?.as_str().map(str::to_string)),
         Client::OpenCode => opencode::registered_command(),
+        Client::ClaudeDesktop => desktop::registered_command(),
         Client::Codex => {
             let text = std::fs::read_to_string(home().join(".codex/config.toml")).ok()?;
             let header = [format!("[mcp_servers.{SERVER_NAME}]"), format!("[mcp_servers.\"{SERVER_NAME}\"]")];
@@ -170,8 +189,10 @@ fn run(cli: &Path, args: &[&str]) -> Result<String> {
 /// Registers (or re-registers, pointing at this build) the server for the
 /// user across all their projects.
 pub fn install(client: Client) -> Result<()> {
-    if client == Client::OpenCode {
-        return opencode::set(Some(&server_command()?.to_string_lossy()));
+    match client {
+        Client::OpenCode => return opencode::set(Some(&server_command()?.to_string_lossy())),
+        Client::ClaudeDesktop => return desktop::set(Some(&server_command()?.to_string_lossy())),
+        _ => {}
     }
     let cli = find(client).ok_or_else(|| anyhow!("{} is not installed (no `{}` command found)", client.label(), client.binary()))?;
     let exe = server_command()?;
@@ -189,7 +210,7 @@ pub fn install(client: Client) -> Result<()> {
             }
             run(&cli, &["mcp", "add", SERVER_NAME, "--", &exe, "mcp"])?;
         }
-        Client::OpenCode => unreachable!(),
+        Client::OpenCode | Client::ClaudeDesktop => unreachable!(),
     }
     Ok(())
 }
@@ -198,25 +219,114 @@ pub fn uninstall(client: Client) -> Result<()> {
     if !installed(client) {
         bail!("{} has no {SERVER_NAME} server of ours to remove", client.label());
     }
-    if client == Client::OpenCode {
-        return opencode::set(None);
+    match client {
+        Client::OpenCode => return opencode::set(None),
+        Client::ClaudeDesktop => return desktop::set(None),
+        _ => {}
     }
     let cli = find(client).ok_or_else(|| anyhow!("{} is not installed", client.label()))?;
     match client {
         Client::ClaudeCode => run(&cli, &["mcp", "remove", "--scope", "user", SERVER_NAME])?,
         Client::Codex => run(&cli, &["mcp", "remove", SERVER_NAME])?,
-        Client::OpenCode => unreachable!(),
+        Client::OpenCode | Client::ClaudeDesktop => unreachable!(),
     };
     Ok(())
 }
 
-/// A JSON snippet for clients without a CLI (Claude Desktop, Cursor, …).
+/// A JSON snippet for clients set up by hand (Cursor, Windsurf, …).
 pub fn json_snippet() -> String {
     let exe = server_command().map(|p| p.display().to_string()).unwrap_or_else(|_| "opencomputeruse".into());
     serde_json::to_string_pretty(&serde_json::json!({
         "mcpServers": { SERVER_NAME: { "command": exe, "args": ["mcp"] } }
     }))
     .unwrap_or_default()
+}
+
+/// Writes a client's JSON config back: a copy of what was there beside it,
+/// then the new text through a temporary file, so a failure midway never
+/// leaves half a config.
+fn write_config(path: &Path, original: &str, config: &serde_json::Value) -> Result<()> {
+    use anyhow::Context as _;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if !original.is_empty() {
+        std::fs::write(path.with_extension("opencomputeruse-backup"), original)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(config)? + "\n")?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+}
+
+mod desktop {
+    //! Claude Desktop keeps MCP servers in `claude_desktop_config.json`,
+    //! under `mcpServers`, beside the app's own preferences, and reads it
+    //! when it starts.
+
+    use std::path::PathBuf;
+
+    use anyhow::{Context as _, Result};
+    use serde_json::{json, Map, Value};
+
+    use super::{home, write_config, SERVER_NAME};
+
+    fn config_dir() -> PathBuf {
+        if cfg!(target_os = "macos") {
+            home().join("Library/Application Support/Claude")
+        } else if cfg!(windows) {
+            std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData/Roaming")).join("Claude")
+        } else {
+            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config")).join("Claude")
+        }
+    }
+
+    fn path() -> PathBuf {
+        config_dir().join("claude_desktop_config.json")
+    }
+
+    /// The app, or its config folder once it has run.
+    pub fn find() -> Option<PathBuf> {
+        let mut apps = vec![PathBuf::from("/Applications/Claude.app"), home().join("Applications/Claude.app")];
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            apps.push(PathBuf::from(local).join("AnthropicClaude"));
+        }
+        apps.into_iter().find(|p| p.exists()).or_else(|| Some(config_dir()).filter(|d| d.is_dir()))
+    }
+
+    fn load() -> Result<(String, Value)> {
+        let text = std::fs::read_to_string(path()).unwrap_or_default();
+        if text.trim().is_empty() {
+            return Ok((text, json!({})));
+        }
+        let value = serde_json::from_str(&text).with_context(|| format!("reading {}", path().display()))?;
+        Ok((text, value))
+    }
+
+    pub fn registered_command() -> Option<String> {
+        let (_, config) = load().ok()?;
+        config.get("mcpServers")?.get(SERVER_NAME)?.get("command")?.as_str().map(str::to_string)
+    }
+
+    /// Adds (with `exe`) or removes the server's entry, keeping the app's
+    /// preferences and other servers as they were.
+    pub fn set(exe: Option<&str>) -> Result<()> {
+        let (original, mut config) = load()?;
+        let root = config.as_object_mut().context("Claude Desktop's config is not a JSON object")?;
+        let servers = root.entry("mcpServers").or_insert_with(|| Value::Object(Map::new()));
+        let servers = servers.as_object_mut().context("Claude Desktop's \"mcpServers\" setting is not an object")?;
+        match exe {
+            Some(exe) => {
+                servers.insert(SERVER_NAME.into(), json!({ "command": exe, "args": ["mcp"] }));
+            }
+            None => {
+                servers.remove(SERVER_NAME);
+                if servers.is_empty() {
+                    root.remove("mcpServers");
+                }
+            }
+        }
+        write_config(&path(), &original, &config)
+    }
 }
 
 mod opencode {
@@ -228,7 +338,7 @@ mod opencode {
     use anyhow::{bail, Context as _, Result};
     use serde_json::{json, Map, Value};
 
-    use super::{home, SERVER_NAME};
+    use super::{home, write_config, SERVER_NAME};
 
     pub fn config_dir() -> PathBuf {
         std::env::var_os("XDG_CONFIG_HOME")
@@ -309,13 +419,7 @@ mod opencode {
                 }
             }
         }
-        std::fs::create_dir_all(config_dir())?;
-        if !original.is_empty() {
-            std::fs::write(path.with_extension("opencomputeruse-backup"), &original)?;
-        }
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&config)? + "\n")?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))
+        write_config(&path, &original, &config)
     }
 
     #[cfg(test)]

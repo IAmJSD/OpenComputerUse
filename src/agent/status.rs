@@ -86,7 +86,7 @@ pub struct Status {
     fields: Vec<(Field, LineEdit)>,
     saved: bool,
     error: Option<String>,
-    clients: [ClientState; 3],
+    clients: [ClientState; 4],
     busy: Option<Client>,
     client_message: Option<String>,
     updates: Updates,
@@ -172,7 +172,7 @@ fn status(label: &str, good: bool) -> gpui::Div {
         )
 }
 
-fn client_states() -> [ClientState; 3] {
+fn client_states() -> [ClientState; 4] {
     Client::ALL.map(|c| ClientState { found: clients::find(c).is_some(), registration: clients::registration(c) })
 }
 
@@ -678,7 +678,7 @@ impl Status {
             let _ = this.update(cx, |s, cx| {
                 s.busy = None;
                 s.client_message = Some(match result {
-                    Ok(()) if install => format!("Installed in {}. Start a new {} session to use it.", client.label(), client.label()),
+                    Ok(()) if install => format!("Installed in {}. {}", client.label(), client.next_step()),
                     Ok(()) => format!("Removed from {}.", client.label()),
                     Err(e) => format!("{e:#}"),
                 });
@@ -968,7 +968,7 @@ impl Render for Status {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().flex_1().min_w_0().text_color(rgb(p.text_dim)).child("Other clients (Claude Desktop, Cursor, …)"))
+                            .child(div().flex_1().min_w_0().text_color(rgb(p.text_dim)).child("Other clients (Cursor, Windsurf, …)"))
                             .child(Button::new("copy-json", "Copy JSON config").flex_none().on_click(cx.listener(move |s, _, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(clients::json_snippet()));
                                 s.client_message = Some("Copied the JSON config.".into());

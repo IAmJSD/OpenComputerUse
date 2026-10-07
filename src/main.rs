@@ -26,7 +26,7 @@ opencomputeruse — background computer use for agents, over MCP
 
 USAGE:
     opencomputeruse mcp                   Run the MCP server on stdio (what clients launch)
-    opencomputeruse install <client>      Register the MCP server with claude, codex or opencode
+    opencomputeruse install <client>      Register the MCP server with claude, claude-desktop, codex or opencode
     opencomputeruse uninstall <client>    Remove it again
     opencomputeruse clients               Show which clients run this copy
     opencomputeruse serve [--port N]      Run the HTTP server for other devices (the app does this on macOS)
@@ -49,11 +49,11 @@ fn run() -> Result<()> {
     match first {
         Some("mcp") => run_mcp(),
         Some("install") | Some("uninstall") => {
-            let Some(client) = args.get(1) else { bail!("name a client: claude, codex or opencode") };
+            let Some(client) = args.get(1) else { bail!("name a client: claude, claude-desktop, codex or opencode") };
             let client = clients::Client::parse(client)?;
             if first == Some("install") {
                 clients::install(client)?;
-                println!("Installed as \"{}\" in {}.", clients::SERVER_NAME, client.label());
+                println!("Installed as \"{}\" in {}. {}", clients::SERVER_NAME, client.label(), client.next_step());
             } else {
                 clients::uninstall(client)?;
                 println!("Removed from {}.", client.label());
@@ -71,7 +71,7 @@ fn run() -> Result<()> {
                     (true, clients::Registration::Elsewhere(path)) => format!("points elsewhere ({path}); `install` fixes it"),
                     (true, clients::Registration::Absent) => "not installed".to_string(),
                 };
-                println!("{:<12} {state}", client.label());
+                println!("{:<15} {state}", client.label());
             }
             Ok(())
         }
