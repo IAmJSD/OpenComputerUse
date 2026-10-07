@@ -81,6 +81,8 @@ CODESIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh
 cp -R dist/OpenComputerUse.app /Applications/ && open /Applications/OpenComputerUse.app
 ```
 
+The icon is `assets/icon.svg`; `packaging/macos/icon.sh` rebuilds the `.icns` from it.
+
 Sign the bundle with a real identity. An ad hoc signature changes on every
 build, and macOS then asks for the permissions again.
 

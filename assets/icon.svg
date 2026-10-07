@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- OpenComputerUse's app icon, on Apple's macOS grid: an 824 px rounded
+       square centred in 1024, with room left for its shadow. A window with
+       the halo the app draws round windows it drives, and its cursor. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#25335C"/>
+      <stop offset="0.6" stop-color="#141C36"/>
+      <stop offset="1" stop-color="#0A0F20"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.3" cy="0.12" r="0.85">
+      <stop offset="0" stop-color="#8FB4FF" stop-opacity="0.28"/>
+      <stop offset="0.65" stop-color="#8FB4FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="window" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A3350"/>
+      <stop offset="1" stop-color="#1A2138"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7DB0FF"/>
+      <stop offset="1" stop-color="#3E7BF5"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#030612" flood-opacity="0.5"/>
+    </filter>
+    <filter id="halo" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+    <filter id="lift" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="6" dy="14" stdDeviation="12" flood-color="#02040C" flood-opacity="0.55"/>
+    </filter>
+    <clipPath id="tile">
+      <rect x="100" y="100" width="824" height="824" rx="185"/>
+    </clipPath>
+  </defs>
+
+  <!-- The tile. -->
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
+
+  <g clip-path="url(#tile)">
+    <!-- The halo: a blurred glow and a crisp ring. -->
+    <rect x="214" y="262" width="560" height="440" rx="54" fill="none" stroke="#4F8CFF" stroke-width="34" opacity="0.75" filter="url(#halo)"/>
+    <rect x="214" y="262" width="560" height="440" rx="54" fill="none" stroke="#6FA2FF" stroke-width="9"/>
+
+    <!-- The window it surrounds. -->
+    <rect x="228" y="276" width="532" height="412" rx="40" fill="url(#window)"/>
+    <path d="M228 316 a40 40 0 0 1 40 -40 h452 a40 40 0 0 1 40 40 v34 h-532 z" fill="#323C5C"/>
+    <circle cx="276" cy="313" r="11" fill="#FF6159"/>
+    <circle cx="312" cy="313" r="11" fill="#FFBD2E"/>
+    <circle cx="348" cy="313" r="11" fill="#28C840"/>
+    <!-- Content, and the button the cursor is pressing. -->
+    <rect x="272" y="392" width="260" height="22" rx="11" fill="#FFFFFF" opacity="0.22"/>
+    <rect x="272" y="436" width="372" height="22" rx="11" fill="#FFFFFF" opacity="0.13"/>
+    <rect x="272" y="480" width="318" height="22" rx="11" fill="#FFFFFF" opacity="0.13"/>
+    <rect x="272" y="560" width="176" height="64" rx="20" fill="#3E7BF5" opacity="0.9"/>
+  </g>
+
+  <!-- The click ripple and the cursor. -->
+  <circle cx="420" cy="590" r="58" fill="none" stroke="#9CC2FF" stroke-width="7" opacity="0.55"/>
+  <circle cx="420" cy="590" r="30" fill="none" stroke="#BFD7FF" stroke-width="6" opacity="0.8"/>
+  <g filter="url(#lift)">
+    <path transform="translate(420 590) scale(15)" d="M0 0 L0 17 L4.2 13.2 L7 19.5 L9.8 18.3 L7.1 12.2 L12.4 12.2 Z"
+          fill="url(#arrow)" stroke="#FFFFFF" stroke-width="1.15" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -20,6 +20,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 target_dir=$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 cp "$target_dir/$profile/opencomputeruse" "$app/Contents/MacOS/opencomputeruse"
 sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+cp packaging/macos/OpenComputerUse.icns "$app/Contents/Resources/"
 
 codesign --force --options runtime --timestamp=none \
     --sign "${CODESIGN_IDENTITY:--}" "$app"

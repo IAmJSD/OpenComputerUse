@@ -8,6 +8,8 @@
 	<string>OpenComputerUse</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.infrawrench.opencomputeruse</string>
+	<key>CFBundleIconFile</key>
+	<string>OpenComputerUse</string>
 	<key>CFBundleExecutable</key>
 	<string>opencomputeruse</string>
 	<key>CFBundlePackageType</key>
