@@ -382,6 +382,42 @@ impl MacSession {
     fn point(w: &WindowInfo, x: f64, y: f64) -> CGPoint {
         CGPoint { x: w.frame.x + x, y: w.frame.y + y }
     }
+
+    /// Picks an option of a pop-up button (a web page's <select>) by its
+    /// text. Firefox says its AXValue was set and ignores it, and neither
+    /// it nor Chrome opens the menu in the background, so the option is
+    /// typed to the focused button, which selects the first option starting
+    /// with what was typed. Focus comes through AXFocused, not a click: a
+    /// background click marks the menu open without showing it, and the
+    /// hidden menu then swallows every key until the next click.
+    fn choose(&mut self, window: Option<u64>, el: &Element, value: &str) -> Result<()> {
+        let matches = |el: &Element| el.string("AXValue").is_some_and(|v| v.trim().eq_ignore_ascii_case(value.trim()));
+        if matches(el) {
+            return Ok(());
+        }
+        let w = self.window(window)?;
+        let t = self.target(&w);
+        let _focus = t.prepare(user_focus());
+        let _ = el.set("AXFocused", CFBoolean::new(true));
+        sleep(Duration::from_millis(100));
+        for attempt in 0..2 {
+            if attempt > 0 {
+                // What was typed within the last second still counts, so a
+                // second pick soon after the first searches for both: wait
+                // that out and type again.
+                sleep(Duration::from_millis(1100));
+            }
+            input::type_text(&t, value)?;
+            sleep(Duration::from_millis(150));
+            if matches(el) {
+                return Ok(());
+            }
+        }
+        bail!(
+            "{value:?} did not select: the pop-up button shows {:?}. Pass an option's text exactly as the page shows it",
+            el.string("AXValue").unwrap_or_default()
+        )
+    }
 }
 
 impl Session for MacSession {
@@ -467,7 +503,10 @@ impl Session for MacSession {
                 return el.perform(&action);
             }
             Action::SetValue { element, value } => {
-                let el = self.elements.get(element)?;
+                let el = self.elements.get(element)?.clone();
+                if (self.chromium || self.gecko) && el.string("AXRole").as_deref() == Some("AXPopUpButton") {
+                    return self.choose(window, &el, value);
+                }
                 if el.settable("AXFocused") {
                     let _ = el.set("AXFocused", CFBoolean::new(true));
                 }

@@ -179,7 +179,7 @@ fn base_tools() -> Vec<Value> {
         ),
         tool(
             "set_value",
-            "Set an element's value directly (a text field's contents, a slider's position) through accessibility.",
+            "Set an element's value directly (a text field's contents, a slider's position) through accessibility. On a web page's dropdown (a PopUpButton) the value is the option's text, picked without opening the menu.",
             action_props(json!({
                 "element": { "type": "string", "description": "Element id from get_ui_tree." },
                 "value": { "type": "string" },
