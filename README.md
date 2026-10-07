@@ -137,6 +137,20 @@ edited from the app. Elsewhere, edit it by hand or set `TYPESAFE_API_KEY`,
 Set `OCU_LOG=debug` for logs on stderr. The macOS agent logs to
 `~/Library/Application Support/OpenComputerUse/agent.log`.
 
+## Releasing
+
+Bump `version` in `Cargo.toml`, commit, and push a matching tag (`v0.2.0`).
+`.github/workflows/release.yml` builds the signed universal app
+(`OpenComputerUse.zip` for the updater, `OpenComputerUse.dmg` for first
+installs) and plain Linux and Windows binaries of the MCP server, then
+publishes them as a GitHub release. The app checks for releases daily and from
+its menu, and installs them in place when they are signed by the same team.
+
+The macOS job signs and notarizes with these repository secrets, and builds
+unsigned without them: `MACOS_CERT_P12_BASE64`, `MACOS_CERT_P12_PASSWORD`
+(a Developer ID Application certificate), `APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID`.
+
 ## Development
 
 ```sh

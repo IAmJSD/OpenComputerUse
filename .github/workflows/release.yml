@@ -1,0 +1,135 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both halves of the universal binary.
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: The tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml's version $version." >&2
+            exit 1
+          fi
+
+      - name: Set up the signing keychain
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_P12_PASSWORD: ${{ secrets.MACOS_CERT_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -eo pipefail
+          if [ -z "${MACOS_CERT_P12_BASE64}" ]; then
+            echo "No MACOS_CERT_P12_BASE64 secret; this build will be signed ad hoc."
+            exit 0
+          fi
+          CERT_PATH="$RUNNER_TEMP/developer_id_application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          # The keychain goes with the runner, so its password only has to be
+          # unguessable for the length of this job.
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -base64 24)}"
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$MACOS_CERT_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$CERT_PATH"
+          # Prepend rather than replace: notarytool still wants the login
+          # keychain on the search list.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | awk -F'"' '/Developer ID Application/ { print $2; exit }')
+          if [ -z "$IDENTITY" ]; then
+            echo "The certificate imported but holds no Developer ID Application identity." >&2
+            exit 1
+          fi
+          echo "MACOS_CERT_NAME=$IDENTITY" >> "$GITHUB_ENV"
+          echo "MACOS_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Package
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ./scripts/bundle-macos.sh
+          # Upload the zip and image alone: upload-artifact does not keep the
+          # bundle's permissions or symlinks, which would void the signature.
+          rm -rf dist/OpenComputerUse.app
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: opencomputeruse-macos
+          path: dist/*
+
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: |
+          cargo build --release
+          mkdir -p dist
+          # Arch-suffixed: both Linux jobs publish into one release.
+          cp target/release/opencomputeruse "dist/opencomputeruse-linux-$(uname -m)"
+          strip --strip-unneeded "dist/opencomputeruse-linux-$(uname -m)"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: opencomputeruse-linux-${{ matrix.os }}
+          path: dist/*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        shell: pwsh
+        run: |
+          cargo build --release
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/opencomputeruse.exe dist/opencomputeruse-windows-x86_64.exe
+      - uses: actions/upload-artifact@v5
+        with:
+          name: opencomputeruse-windows-x86_64
+          path: dist/*
+
+  publish:
+    needs: [macos, linux, windows]
+    # The macOS app is what the updater needs; a failed Linux or Windows
+    # build leaves its binary out of the release rather than holding it up.
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.macos.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
