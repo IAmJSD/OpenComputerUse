@@ -71,10 +71,28 @@ impl RecipeConfig {
     }
 }
 
+/// The optional HTTP server for other devices. Off unless turned on.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HttpConfig {
+    pub enabled: bool,
+    pub port: u16,
+    /// Every interface by default, so devices on the network (or the
+    /// tailnet) can reach it; every request still needs a device's key.
+    pub bind: String,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self { enabled: false, port: 8642, bind: "0.0.0.0".into() }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub recipe: RecipeConfig,
+    pub http: HttpConfig,
     /// Show the cursor and halo over windows being driven (macOS).
     pub show_overlay: Option<bool>,
 }

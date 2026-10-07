@@ -53,7 +53,7 @@ pub fn serve(mut handler: Box<dyn Handler>) -> Result<()> {
             single => vec![single],
         };
         for msg in messages {
-            if let Some(reply) = dispatch(&mut *handler, &msg) {
+            if let Some(reply) = dispatch(&mut *handler, &msg, true) {
                 write(&mut stdout, &reply)?;
             }
         }
@@ -92,7 +92,40 @@ fn watch_recipe_availability() {
     });
 }
 
-fn dispatch(handler: &mut dyn Handler, msg: &Value) -> Option<Value> {
+/// One JSON-RPC message (or a batch of them), for the HTTP server's `/mcp`.
+/// `None` when nothing needs sending back (only notifications).
+pub fn dispatch_value(handler: &mut dyn Handler, msg: &Value, local: bool) -> Option<Value> {
+    match msg {
+        Value::Array(items) => {
+            let replies: Vec<Value> = items.iter().filter_map(|m| dispatch(handler, m, local)).collect();
+            (!replies.is_empty()).then_some(Value::Array(replies))
+        }
+        single => dispatch(handler, single, local),
+    }
+}
+
+/// A tool call's result, as MCP shapes it: text, and an image when there
+/// is one. Failures are results the model can read, not protocol errors.
+pub fn call_tool(handler: &mut dyn Handler, name: &str, args: &Value) -> Value {
+    result_json(tools::call(handler, name, args))
+}
+
+fn result_json(result: Result<tools::Output>) -> Value {
+    match result {
+        Ok(out) => {
+            let mut content = vec![json!({ "type": "text", "text": out.text })];
+            if let Some(img) = out.image {
+                content.push(json!({ "type": "image", "data": img.base64(), "mimeType": "image/png" }));
+            }
+            json!({ "content": content, "isError": false })
+        }
+        Err(e) => json!({ "content": [{ "type": "text", "text": format!("Error: {e:#}") }], "isError": true }),
+    }
+}
+
+/// `local`: the stdio server on this computer, which also manages the
+/// devices allowed in over HTTP. Remote callers never see those tools.
+fn dispatch(handler: &mut dyn Handler, msg: &Value, local: bool) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or_default();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -110,21 +143,21 @@ fn dispatch(handler: &mut dyn Handler, msg: &Value) -> Option<Value> {
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::list() })),
+        "tools/list" => {
+            let mut list = tools::list();
+            if local {
+                list.extend(crate::remote::tool_definitions());
+            }
+            Ok(json!({ "tools": list }))
+        }
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             log::debug!("tools/call {name} {args}");
-            Ok(match tools::call(handler, name, &args) {
-                Ok(out) => {
-                    let mut content = vec![json!({ "type": "text", "text": out.text })];
-                    if let Some(img) = out.image {
-                        content.push(json!({ "type": "image", "data": img.base64(), "mimeType": "image/png" }));
-                    }
-                    json!({ "content": content, "isError": false })
-                }
-                // Tool failures are results the model can read, not protocol errors.
-                Err(e) => json!({ "content": [{ "type": "text", "text": format!("Error: {e:#}") }], "isError": true }),
+            Ok(if local && crate::remote::is_tool(name) {
+                result_json(crate::remote::call(name, &args))
+            } else {
+                call_tool(handler, name, &args)
             })
         }
         "resources/list" => Ok(json!({ "resources": [] })),

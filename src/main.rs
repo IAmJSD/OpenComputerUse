@@ -9,6 +9,7 @@ mod clients;
 mod config;
 mod mcp;
 mod recipe;
+mod remote;
 mod tools;
 mod update;
 mod vision;
@@ -27,6 +28,8 @@ USAGE:
     opencomputeruse mcp                   Run the MCP server on stdio (what clients launch)
     opencomputeruse install <client>      Register the MCP server with claude or codex
     opencomputeruse uninstall <client>    Remove it again
+    opencomputeruse serve [--port N]      Run the HTTP server for other devices (the app does this on macOS)
+    opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse agent [--background]  Run the macOS agent app (opening the app does this)
 
@@ -56,6 +59,7 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some("serve") => run_serve(&args[1..]),
         Some("update") => run_update(args.iter().any(|a| a == "--check")),
         Some("config-path") => {
             println!("{}", config::Config::path().display());
@@ -80,6 +84,38 @@ fn run() -> Result<()> {
         None => run_mcp(),
         Some(other) => bail!("unknown command \"{other}\"\n\n{USAGE}"),
     }
+}
+
+/// The HTTP server without the app: Linux and Windows, or a headless Mac.
+fn run_serve(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "--install" || a == "--uninstall") {
+        #[cfg(target_os = "macos")]
+        bail!("on macOS the app serves HTTP and starts at login itself: turn the server on in its settings");
+        #[cfg(not(target_os = "macos"))]
+        {
+            let on = args.iter().any(|a| a == "--install");
+            remote::autostart::set(on)?;
+            println!("{}", if on { "The HTTP server now starts at login." } else { "The HTTP server no longer starts at login." });
+            return Ok(());
+        }
+    }
+    init_stderr_log();
+    let config = config::Config::load();
+    let port = match args.iter().position(|a| a == "--port") {
+        Some(i) => args.get(i + 1).and_then(|p| p.parse().ok()).ok_or_else(|| anyhow::anyhow!("--port takes a number"))?,
+        None => config.http.port,
+    };
+    #[cfg(target_os = "macos")]
+    let platform = std::sync::Arc::new(ocu_macos::MacPlatform);
+    #[cfg(target_os = "linux")]
+    let platform = std::sync::Arc::new(ocu_linux::LinuxPlatform::new());
+    #[cfg(windows)]
+    let platform = std::sync::Arc::new(ocu_windows::WindowsPlatform::new());
+    let service = ocu_core::Service::new(platform, None);
+    let server = remote::server::HttpServer::start(service, &config.http.bind, port)?;
+    eprintln!("Serving on {} for the devices in {}.", server.addr, remote::devices::path().display());
+    server.wait();
+    Ok(())
 }
 
 /// The command-line update: report, and on macOS install over this bundle.
