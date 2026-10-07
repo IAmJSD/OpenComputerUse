@@ -10,6 +10,7 @@ mod config;
 mod mcp;
 mod recipe;
 mod tools;
+mod update;
 mod vision;
 
 #[cfg(target_os = "macos")]

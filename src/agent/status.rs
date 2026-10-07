@@ -14,7 +14,10 @@ use gpui::{
 use ocu_core::{Permission, Service, SessionInfo};
 
 use super::ui::{palette, Badge, Button, Checkbox, Divider, Heading, LineEdit, LineEditKey, TextInput, TextPress};
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::clients::{self, Client};
+use crate::update::{self, Installer, Progress, UpdateStatus};
 use crate::config::{Config, Provider};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -65,6 +68,19 @@ pub struct Status {
     clients: [ClientState; 2],
     busy: Option<Client>,
     client_message: Option<String>,
+    updates: Updates,
+}
+
+/// The Updates section's state.
+#[derive(Default)]
+struct Updates {
+    checking: bool,
+    status: Option<UpdateStatus>,
+    /// Bytes received of an update being downloaded, shared with the
+    /// download thread.
+    received: Arc<AtomicU64>,
+    progress: Option<Progress>,
+    error: Option<String>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -159,6 +175,7 @@ impl Status {
             saved: false,
             error: None,
             clients: client_states(),
+            updates: Updates::default(),
             busy: None,
             client_message: None,
         };
@@ -179,6 +196,142 @@ impl Status {
         if changed {
             cx.notify();
         }
+    }
+
+    /// Asks GitHub for the latest release, off the main thread.
+    pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if self.updates.checking || self.updates.progress.is_some() {
+            return;
+        }
+        self.updates.checking = true;
+        self.updates.error = None;
+        cx.notify();
+        let task = cx.background_executor().spawn(async { update::check() });
+        cx.spawn(async move |this, cx| {
+            let status = task.await;
+            update::mark_checked();
+            let _ = this.update(cx, |s, cx| s.show_update(status, cx));
+        })
+        .detach();
+    }
+
+    /// Shows the result of a check, made here or by the background check.
+    pub fn show_update(&mut self, status: UpdateStatus, cx: &mut Context<Self>) {
+        self.updates.checking = false;
+        self.updates.status = Some(status);
+        cx.notify();
+    }
+
+    /// Downloads the update, then swaps it in and relaunches.
+    fn install_update(&mut self, installer: Installer, cx: &mut Context<Self>) {
+        let received = self.updates.received.clone();
+        received.store(0, Ordering::Relaxed);
+        self.updates.progress = Some(Progress::Downloading { received: 0, total: installer.size });
+        self.updates.error = None;
+        cx.notify();
+        let total = installer.size;
+        let task = cx.background_executor().spawn(async move {
+            let file = update::download(&installer, &received)?;
+            update::install_and_restart(&file)
+        });
+        // Progress, while the download runs.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_millis(150)).await;
+            let alive = this.update(cx, |s, cx| {
+                if let Some(Progress::Downloading { .. }) = s.updates.progress {
+                    let got = s.updates.received.load(Ordering::Relaxed);
+                    s.updates.progress = Some(if got >= total && total > 0 {
+                        Progress::Installing
+                    } else {
+                        Progress::Downloading { received: got, total }
+                    });
+                    cx.notify();
+                    true
+                } else {
+                    false
+                }
+            });
+            if !matches!(alive, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |s, cx| match result {
+                // The relauncher opens the new copy once this one is gone.
+                Ok(()) => cx.quit(),
+                Err(e) => {
+                    update::clean_downloads();
+                    s.updates.progress = None;
+                    s.updates.error = Some(format!("{e:#}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn updates_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        let u = &self.updates;
+        let line = |text: String| div().text_color(rgb(p.text_dim)).child(text);
+        let mut row = div().flex().items_center().gap_3();
+        row = row.child(div().flex_1().min_w_0().child(match (&u.progress, &u.status, u.checking) {
+            (Some(Progress::Downloading { received, total }), _, _) if *total > 0 => {
+                line(format!("Downloading… {}%", received * 100 / total))
+            }
+            (Some(Progress::Downloading { .. }), _, _) => line("Downloading…".into()),
+            (Some(Progress::Installing), _, _) => line("Installing; OpenComputerUse will reopen.".into()),
+            (_, _, true) => line("Checking…".into()),
+            (_, Some(UpdateStatus::UpToDate), _) => {
+                line(format!("OpenComputerUse {} is the latest version.", update::current_version()))
+            }
+            (_, Some(UpdateStatus::Available(up)), _) => {
+                line(format!("Version {} is available (you have {}).", up.version, update::current_version()))
+            }
+            (_, Some(UpdateStatus::Failed(e)), _) => line(format!("Couldn't check: {e}")),
+            (_, None, _) => line(format!("Version {}", update::current_version())),
+        }));
+        let busy = u.checking || u.progress.is_some();
+        row = match &u.status {
+            Some(UpdateStatus::Available(up)) if u.progress.is_none() => match up.install.clone() {
+                Some(installer) => row.child(
+                    Button::new("install-update", format!("Update to {}", up.version))
+                        .primary()
+                        .flex_none()
+                        .on_click(cx.listener(move |s, _, _, cx| s.install_update(installer.clone(), cx))),
+                ),
+                None => {
+                    let page = up.page.clone();
+                    row.child(Button::new("release-page", "Open Release Page").flex_none().on_click(move |_, _, _| {
+                        let _ = std::process::Command::new("/usr/bin/open").arg(&page).spawn();
+                    }))
+                }
+            },
+            _ => row.child(
+                Button::new("check-updates", "Check for Updates")
+                    .flex_none()
+                    .disabled(busy)
+                    .on_click(cx.listener(|s, _, _, cx| s.check_for_updates(cx))),
+            ),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(row)
+            .when(!self.sessions.is_empty() && matches!(u.status, Some(UpdateStatus::Available(_))), |d| {
+                d.child(line("Updating restarts the app, which ends the sessions running now.".into()).text_size(px(11.5)))
+            })
+            .when_some(u.error.clone(), |d, e| d.child(div().text_color(rgb(p.warning)).child(e)))
+            .child(
+                Checkbox::new("auto-update", "Check for updates automatically", update::check_automatically())
+                    .on_change(cx.listener(|_, on: &bool, _, cx| {
+                        update::set_check_automatically(*on);
+                        cx.notify();
+                    })),
+            )
     }
 
     /// Installs into (or removes from) a client off the main thread: the
@@ -512,6 +665,9 @@ impl Render for Status {
                                 cx.notify();
                             })),
                     )
+                    // Updates.
+                    .child(Self::section("Updates"))
+                    .child(self.updates_section(cx))
                     // Recipes.
                     .child(Self::section("Recipes"))
                     .child(div().text_color(rgb(p.text_dim)).child(

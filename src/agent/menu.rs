@@ -1,9 +1,10 @@
 //! The app menu and the shortcuts it shows: ⌘Q quits (ending any sessions;
 //! the next MCP request starts the app again), ⌘W closes the window.
+//! Check for Updates is handled by the agent, which owns the window.
 
 use gpui::{actions, App, KeyBinding, Menu, MenuItem};
 
-actions!(opencomputeruse, [Quit, Hide, HideOthers, ShowAll, CloseWindow]);
+actions!(opencomputeruse, [Quit, Hide, HideOthers, ShowAll, CloseWindow, CheckForUpdates]);
 
 pub fn install(cx: &mut App) {
     cx.bind_keys([
@@ -24,6 +25,8 @@ pub fn install(cx: &mut App) {
         Menu {
             name: "OpenComputerUse".into(),
             items: vec![
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
                 MenuItem::action("Hide OpenComputerUse", Hide),
                 MenuItem::action("Hide Others", HideOthers),
                 MenuItem::action("Show All", ShowAll),

@@ -38,6 +38,8 @@ enum UiEvent {
     Ended(String),
     Pointer { session: String, window: WindowInfo, x: f64, y: f64, click: bool },
     Acted { session: String, window: WindowInfo },
+    /// The background check found a release it hasn't shown yet.
+    UpdateAvailable(crate::update::UpdateStatus),
 }
 
 /// Carries session events from request threads to the UI thread.
@@ -105,6 +107,12 @@ impl Agent {
                     });
                 }
             }
+            UiEvent::UpdateAvailable(status) => {
+                self.show_status(cx);
+                if let Some(h) = self.status {
+                    let _ = h.update(cx, |s, _, cx| s.show_update(status, cx));
+                }
+            }
             UiEvent::Acted { session, window } => {
                 if let Some(h) = self.overlay(&session, &window, cx) {
                     let _ = h.update(cx, |o, _, cx| {
@@ -113,6 +121,14 @@ impl Agent {
                     });
                 }
             }
+        }
+    }
+
+    /// The menu's Check for Updates: the window, checking.
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        self.show_status(cx);
+        if let Some(h) = self.status {
+            let _ = h.update(cx, |s, _, cx| s.check_for_updates(cx));
         }
     }
 
@@ -201,6 +217,36 @@ impl Agent {
     }
 }
 
+/// Checks for a release once a day while the agent runs, when the setting
+/// allows. A release is announced (the window opens on it) once; after
+/// that it waits in the window's Updates section.
+fn background_update_checks(tx: async_channel::Sender<UiEvent>) {
+    use crate::update;
+    let announced = crate::config::config_dir().join("update-announced");
+    // Not in the way of whatever launched the agent.
+    std::thread::sleep(Duration::from_secs(30));
+    loop {
+        if update::check_automatically() && update::check_due() {
+            let status = update::check();
+            update::mark_checked();
+            match &status {
+                update::UpdateStatus::Available(up) => {
+                    let seen = std::fs::read_to_string(&announced).unwrap_or_default();
+                    if seen.trim() != up.version {
+                        let _ = std::fs::write(&announced, &up.version);
+                        if tx.send_blocking(UiEvent::UpdateAvailable(status.clone())).is_err() {
+                            return;
+                        }
+                    }
+                }
+                update::UpdateStatus::Failed(e) => log::info!("update check: {e}"),
+                update::UpdateStatus::UpToDate => {}
+            }
+        }
+        std::thread::sleep(Duration::from_secs(60 * 60));
+    }
+}
+
 fn log_to_file() {
     let path = crate::config::config_dir().join("agent.log");
     let _ = std::fs::create_dir_all(path.parent().unwrap());
@@ -217,6 +263,7 @@ fn log_to_file() {
 pub fn run(show: bool) -> Result<()> {
     log_to_file();
     let (tx, rx) = async_channel::unbounded();
+    let updates_tx = tx.clone();
     let service = Service::new(Arc::new(ocu_macos::MacPlatform), Some(Arc::new(Bus(tx))));
     if let Err(e) = crate::ipc::listen(service.clone(), &socket_path()) {
         // Another copy already serves; it will show itself if reopened.
@@ -231,6 +278,8 @@ pub fn run(show: bool) -> Result<()> {
             service.reap();
         });
     }
+
+    std::thread::Builder::new().name("update-check".into()).spawn(move || background_update_checks(updates_tx))?;
 
     let app = Application::new().with_assets(assets::Assets);
     let agent_slot: std::rc::Rc<std::cell::RefCell<Option<Entity<Agent>>>> = Default::default();
@@ -254,6 +303,10 @@ pub fn run(show: bool) -> Result<()> {
         *agent_slot.borrow_mut() = Some(agent.clone());
         if show || missing {
             agent.update(cx, |a, cx| a.show_status(cx));
+        }
+        {
+            let agent = agent.clone();
+            cx.on_action(move |_: &menu::CheckForUpdates, cx| agent.update(cx, |a, cx| a.check_for_updates(cx)));
         }
         cx.on_window_closed({
             let agent = agent.clone();
