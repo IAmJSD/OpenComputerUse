@@ -13,10 +13,11 @@ use gpui::{
 
 use ocu_core::{Permission, Service, SessionInfo};
 
-use super::ui::{palette, Badge, Button, Checkbox, Divider, Heading, LineEdit, LineEditKey, TextInput, TextPress};
+use super::ui::{icon, palette, Badge, Button, Checkbox, Divider, Heading, LineEdit, LineEditKey, TextInput, TextPress};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clients::{self, Client};
+use crate::remote::{self, devices::Device, devices::Devices, skill};
 use crate::update::{self, Installer, Progress, UpdateStatus};
 use crate::config::{Config, Provider};
 
@@ -28,10 +29,27 @@ enum Field {
     CloudflareToken,
     CloudflareModel,
     MinConfidence,
+    HttpPort,
+    DeviceName,
+    DeviceUrl,
 }
 
 impl Field {
-    const ALL: [Field; 6] = [
+    /// Every field, in tab order.
+    const ALL: [Field; 9] = [
+        Field::TypesafeKey,
+        Field::TypesafeModel,
+        Field::CloudflareAccount,
+        Field::CloudflareToken,
+        Field::CloudflareModel,
+        Field::MinConfidence,
+        Field::HttpPort,
+        Field::DeviceName,
+        Field::DeviceUrl,
+    ];
+
+    /// The fields Save writes to the recipe settings.
+    const RECIPE: [Field; 6] = [
         Field::TypesafeKey,
         Field::TypesafeModel,
         Field::CloudflareAccount,
@@ -52,6 +70,9 @@ impl Field {
             Field::CloudflareToken => "cf-token",
             Field::CloudflareModel => "cf-model",
             Field::MinConfidence => "min-confidence",
+            Field::HttpPort => "http-port",
+            Field::DeviceName => "device-name",
+            Field::DeviceUrl => "device-url",
         }
     }
 }
@@ -69,6 +90,26 @@ pub struct Status {
     busy: Option<Client>,
     client_message: Option<String>,
     updates: Updates,
+    remote: Remote,
+}
+
+/// The "Other devices" section's state.
+#[derive(Default)]
+struct Remote {
+    devices: Vec<Device>,
+    /// The Generate Skill form, or the skill it (or Regenerate Key) made.
+    panel: Option<Panel>,
+    /// A device whose Remove was pressed once and awaits the second press.
+    confirm_remove: Option<String>,
+    url_placeholder: String,
+    error: Option<String>,
+    /// The server's state as last drawn, to redraw when it changes.
+    server_seen: (Option<String>, Option<String>),
+}
+
+enum Panel {
+    Form,
+    Issued { device: String, skill: String, note: Option<String> },
 }
 
 /// The Updates section's state.
@@ -151,6 +192,8 @@ impl Status {
                     Field::CloudflareToken => r.cloudflare_api_token.clone(),
                     Field::CloudflareModel => r.cloudflare_model.clone(),
                     Field::MinConfidence => format!("{}", r.min_confidence),
+                    Field::HttpPort => config.http.port.to_string(),
+                    Field::DeviceName | Field::DeviceUrl => String::new(),
                 };
                 let mut edit = LineEdit::default();
                 edit.set_text(text);
@@ -176,6 +219,7 @@ impl Status {
             error: None,
             clients: client_states(),
             updates: Updates::default(),
+            remote: Remote { devices: Devices::load().devices, ..Default::default() },
             busy: None,
             client_message: None,
         };
@@ -186,8 +230,14 @@ impl Status {
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let permissions = self.service.platform().permissions();
         let sessions = self.service.sessions();
+        let http = super::http::state();
+        let server_changed = (http.listening.clone(), http.error.clone()) != self.remote.server_seen;
+        self.remote.server_seen = (http.listening, http.error);
+        let devices = Devices::load().devices;
+        let devices_changed = devices.iter().map(|d| (&d.id, &d.key_hash)).ne(self.remote.devices.iter().map(|d| (&d.id, &d.key_hash)));
+        self.remote.devices = devices;
         let clients = client_states();
-        let changed = permissions.iter().map(|p| p.granted).ne(self.permissions.iter().map(|p| p.granted))
+        let changed = devices_changed || server_changed || permissions.iter().map(|p| p.granted).ne(self.permissions.iter().map(|p| p.granted))
             || sessions.iter().map(|s| &s.id).ne(self.sessions.iter().map(|s| &s.id))
             || clients != self.clients;
         self.permissions = permissions;
@@ -196,6 +246,282 @@ impl Status {
         if changed {
             cx.notify();
         }
+    }
+
+    fn set_http(&mut self, on: bool) {
+        match remote::set_server(Some(on), None) {
+            Ok(config) => {
+                self.config.http = config.http;
+                self.remote.error = None;
+            }
+            Err(e) => self.remote.error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn apply_port(&mut self) {
+        match self.text(Field::HttpPort).parse::<u16>() {
+            Ok(port) => match remote::set_server(None, Some(port)) {
+                Ok(config) => {
+                    self.config.http = config.http;
+                    self.remote.error = None;
+                    self.field(Field::HttpPort).active = false;
+                }
+                Err(e) => self.remote.error = Some(format!("{e:#}")),
+            },
+            Err(_) => self.remote.error = Some("The port is a number, like 8642.".into()),
+        }
+    }
+
+    fn open_form(&mut self) {
+        self.remote.panel = Some(Panel::Form);
+        self.remote.error = None;
+        // A Tailscale lookup is a subprocess; once per form is plenty.
+        self.remote.url_placeholder = remote::devices::suggested_url(self.config.http.port);
+        self.activate(Field::DeviceName);
+        self.field(Field::DeviceName).set_text(String::new());
+        self.field(Field::DeviceUrl).set_text(String::new());
+        self.field(Field::DeviceName).focus();
+    }
+
+    fn generate_skill(&mut self) {
+        let name = self.text(Field::DeviceName);
+        let url = Some(self.text(Field::DeviceUrl))
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| self.remote.url_placeholder.clone());
+        match remote::generate(&name, &url) {
+            Ok(issued) => self.show_issued(issued),
+            Err(e) => self.remote.error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn regenerate(&mut self, id: &str) {
+        match remote::regenerate(id, None) {
+            Ok(issued) => self.show_issued(issued),
+            Err(e) => self.remote.error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn show_issued(&mut self, issued: remote::Issued) {
+        self.remote.panel = Some(Panel::Issued { device: issued.device.name.clone(), skill: issued.skill, note: None });
+        self.remote.error = None;
+        self.remote.devices = Devices::load().devices;
+        for (_, e) in &mut self.fields {
+            e.active = false;
+        }
+    }
+
+    fn remove_device(&mut self, id: &str) {
+        if self.remote.confirm_remove.as_deref() != Some(id) {
+            self.remote.confirm_remove = Some(id.to_string());
+            return;
+        }
+        self.remote.confirm_remove = None;
+        match Devices::load().remove(id) {
+            Ok(_) => self.remote.devices = Devices::load().devices,
+            Err(e) => self.remote.error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        let http = &self.config.http;
+        let state = super::http::state();
+        let dim = |t: String| div().text_color(rgb(p.text_dim)).child(t);
+        let status_line = match (http.enabled, &state.listening, &state.error) {
+            (false, _, _) => status("Off", false),
+            (true, _, Some(e)) => div().text_color(rgb(p.warning)).child(e.clone()),
+            (true, Some(addr), _) => status(
+                &if remote::autostart::is_set() {
+                    format!("Listening on {addr}; starts at login")
+                } else {
+                    format!("Listening on {addr}")
+                },
+                true,
+            ),
+            (true, None, None) => status("Starting…", false),
+        };
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(dim(
+                "Let other devices, on your network or over Tailscale, drive apps on this computer through an HTTP API. Each device gets its own key, inside a skill you install on it.".into(),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Checkbox::new("http-on", "Serve over HTTP", http.enabled)
+                                .on_change(cx.listener(|s, on: &bool, _, cx| {
+                                    s.set_http(*on);
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                    .child(div().text_color(rgb(p.text_dim)).child("Port"))
+                    .child(div().w(px(80.0)).flex_none().child(self.input(Field::HttpPort, "8642", cx))),
+            )
+            .child(status_line);
+
+        // The devices.
+        for d in &self.remote.devices {
+            let (rid, xid) = (d.id.clone(), d.id.clone());
+            let confirming = self.remote.confirm_remove.as_deref() == Some(d.id.as_str());
+            section = section.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .p_2()
+                    .rounded(px(6.0))
+                    .bg(rgb(p.deep_bg))
+                    .child(div().flex_none().child(icon("computer", 18.0, p.text_dim)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().font_weight(gpui::FontWeight::MEDIUM).child(d.name.clone()))
+                            .child(div().text_color(rgb(p.text_dim)).text_size(px(11.0)).child(d.url.clone())),
+                    )
+                    .child(
+                        Button::new(ElementId::Name(SharedString::from(format!("regen-{}", d.id))), "Regenerate Key")
+                            .flex_none()
+                            .on_click(cx.listener(move |s, _, _, cx| {
+                                s.regenerate(&rid);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new(
+                            ElementId::Name(SharedString::from(format!("remove-{}", d.id))),
+                            if confirming { "Confirm Remove" } else { "Remove" },
+                        )
+                        .flex_none()
+                        .when(!confirming, |b| b.ghost())
+                        .on_click(cx.listener(move |s, _, _, cx| {
+                            s.remove_device(&xid);
+                            cx.notify();
+                        })),
+                    ),
+            );
+        }
+
+        // The form, or the skill it made.
+        section = match &self.remote.panel {
+            None => section.child(
+                div().flex().child(
+                    Button::new("generate-skill", "Generate Skill…")
+                        .primary()
+                        .on_click(cx.listener(|s, _, _, cx| {
+                            s.open_form();
+                            cx.notify();
+                        })),
+                ),
+            ),
+            Some(Panel::Form) => section.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(rgb(p.edge))
+                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child("New device"))
+                    .child(Self::row("Device name", self.input(Field::DeviceName, "Work laptop", cx)))
+                    .child(Self::row("URL", self.input(Field::DeviceUrl, &self.remote.url_placeholder, cx)))
+                    .child(dim("The device that connects in, and the address it reaches this computer at.".into()).text_size(px(11.5)))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("do-generate", "Generate Skill").primary().on_click(cx.listener(|s, _, _, cx| {
+                                s.generate_skill();
+                                cx.notify();
+                            })))
+                            .child(Button::new("cancel-generate", "Cancel").ghost().on_click(cx.listener(|s, _, _, cx| {
+                                s.remote.panel = None;
+                                s.remote.error = None;
+                                cx.notify();
+                            }))),
+                    ),
+            ),
+            Some(Panel::Issued { device, skill, note }) => {
+                let (copy, save) = (skill.clone(), skill.clone());
+                section.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(rgb(p.edge))
+                        .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("Skill for {device}")))
+                        .child(dim(format!(
+                            "Install it on {device} as ~/.claude/skills/{}/SKILL.md. It holds the device's key, which isn't shown anywhere else.",
+                            skill::skill_name()
+                        )).text_size(px(11.5)))
+                        .child(
+                            div()
+                                .id("skill-text")
+                                .max_h(px(220.0))
+                                .overflow_y_scroll()
+                                .p_2()
+                                .rounded(px(6.0))
+                                .bg(rgb(p.deep_bg))
+                                .font_family("Menlo")
+                                .text_size(px(11.0))
+                                .child(skill.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(Button::new("copy-skill", "Copy").primary().on_click(cx.listener(move |s, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                                    if let Some(Panel::Issued { note, .. }) = &mut s.remote.panel {
+                                        *note = Some("Copied.".into());
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(Button::new("save-skill", "Save to Downloads").on_click(cx.listener(move |s, _, _, cx| {
+                                    let msg = match remote::save_skill(&save) {
+                                        Ok(path) => {
+                                            let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
+                                            format!("Saved {}.", path.display())
+                                        }
+                                        Err(e) => format!("Couldn't save: {e:#}"),
+                                    };
+                                    if let Some(Panel::Issued { note, .. }) = &mut s.remote.panel {
+                                        *note = Some(msg);
+                                    }
+                                    cx.notify();
+                                })))
+                                .child(Button::new("done-skill", "Done").ghost().on_click(cx.listener(|s, _, _, cx| {
+                                    s.remote.panel = None;
+                                    cx.notify();
+                                })))
+                                .when_some(note.clone(), |d, n| d.child(dim(n).text_size(px(11.5)))),
+                        )
+                        .when(!http.enabled, |d| {
+                            d.child(
+                                div()
+                                    .text_color(rgb(p.warning))
+                                    .text_size(px(11.5))
+                                    .child("The HTTP server is off; turn on Serve over HTTP before the device connects."),
+                            )
+                        }),
+                )
+            }
+        };
+        section.when_some(self.remote.error.clone(), |d, e| d.child(div().text_color(rgb(p.warning)).child(e)))
     }
 
     /// Asks GitHub for the latest release, off the main thread.
@@ -382,7 +708,7 @@ impl Status {
     }
 
     fn save(&mut self) {
-        let [key, model, account, token, cf_model, confidence] = Field::ALL.map(|f| self.text(f));
+        let [key, model, account, token, cf_model, confidence] = Field::RECIPE.map(|f| self.text(f));
         let r = &mut self.config.recipe;
         r.typesafe_api_key = key;
         r.typesafe_model = model;
@@ -426,12 +752,18 @@ impl Status {
         match self.field(f).key(ev, cx) {
             LineEditKey::Ignored => {}
             LineEditKey::Submitted => {
-                self.save();
+                match f {
+                    Field::HttpPort => self.apply_port(),
+                    Field::DeviceName | Field::DeviceUrl => self.generate_skill(),
+                    _ => self.save(),
+                }
                 cx.notify();
                 cx.stop_propagation();
             }
             LineEditKey::Changed => {
-                self.saved = false;
+                if Field::RECIPE.contains(&f) {
+                    self.saved = false;
+                }
                 cx.notify();
                 cx.stop_propagation();
             }
@@ -665,6 +997,9 @@ impl Render for Status {
                                 cx.notify();
                             })),
                     )
+                    // Other devices.
+                    .child(Self::section("Other devices"))
+                    .child(self.remote_section(cx))
                     // Updates.
                     .child(Self::section("Updates"))
                     .child(self.updates_section(cx))

@@ -4,6 +4,7 @@
 //! window is open; while sessions work it draws their overlays.
 
 mod assets;
+mod http;
 mod menu;
 mod native;
 mod overlay;
@@ -77,6 +78,7 @@ struct Agent {
     service: Arc<Service>,
     overlays: HashMap<String, OverlayEntry>,
     status: Option<WindowHandle<status::Status>>,
+    http: http::HttpHost,
 }
 
 impl Agent {
@@ -299,7 +301,7 @@ pub fn run(show: bool) -> Result<()> {
             gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight
         ));
         let missing = service.platform().permissions().iter().any(|p| !p.granted);
-        let agent = cx.new(|_| Agent { service: service.clone(), overlays: HashMap::new(), status: None });
+        let agent = cx.new(|_| Agent { service: service.clone(), overlays: HashMap::new(), status: None, http: Default::default() });
         *agent_slot.borrow_mut() = Some(agent.clone());
         if show || missing {
             agent.update(cx, |a, cx| a.show_status(cx));
@@ -331,6 +333,15 @@ pub fn run(show: bool) -> Result<()> {
                     break;
                 }
             }
+        })
+        .detach();
+        // The HTTP server follows the settings, wherever they are changed.
+        let http = agent.clone();
+        cx.spawn(async move |cx| loop {
+            if http.update(cx, |a, _| a.http.sync(&a.service)).is_err() {
+                break;
+            }
+            cx.background_executor().timer(Duration::from_secs(2)).await;
         })
         .detach();
         let tracker = agent.clone();

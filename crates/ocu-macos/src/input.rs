@@ -158,21 +158,39 @@ pub fn drag(target: &Target, from: CGPoint, to: CGPoint, button: MouseButton) ->
     Ok(())
 }
 
+/// Scrolls as a run of wheel notches (line units), the way a real wheel
+/// arrives: a single large pixel delta is ignored by some background windows.
 pub fn scroll(target: &Target, at: CGPoint, dx: f64, dy: f64) -> Result<()> {
-    move_to(target, at)?;
-    // Positive dy means "scroll down" to the caller; wheel deltas point the
-    // other way.
-    let e = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Pixel, 2, -dy.round() as i32, -dx.round() as i32, 0)
-        .ok_or_else(|| anyhow!("could not make a scroll event"))?;
-    CGEvent::set_location(Some(&e), at);
-    sky::set_window_location(&e, CGPoint { x: at.x - target.origin.x, y: at.y - target.origin.y });
-    CGEvent::set_integer_value_field(Some(&e), CGEventField::MouseEventWindowUnderMousePointer, target.window_id as i64);
-    CGEvent::set_integer_value_field(
-        Some(&e),
-        CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent,
-        target.window_id as i64,
-    );
-    post(target, &e);
+    // A move first, so the window hit-tests the wheel at the right place.
+    post(target, &*mouse_event_in(target, CGEventType::MouseMoved, at, CGMouseButton::Left, 0, gesture_id())?);
+    sleep(Duration::from_millis(12));
+    // About 40 points a line and 3 lines a notch.
+    const LINES_PER_NOTCH: f64 = 3.0;
+    let lines = |d: f64| (d / 40.0).round();
+    let (ly, lx) = (lines(dy), lines(dx));
+    let notches = (ly.abs().max(lx.abs()) / LINES_PER_NOTCH).ceil().max(1.0) as i32;
+    let wid = target.window_id as i64;
+    for i in 0..notches {
+        // Spread the lines over the notches; positive dy means "scroll down",
+        // and wheel deltas point the other way.
+        let share = |l: f64| ((l * (i + 1) as f64 / notches as f64).round() - (l * i as f64 / notches as f64).round()) as i32;
+        let (wy, wx) = (-share(ly), -share(lx));
+        if wy == 0 && wx == 0 {
+            continue;
+        }
+        let e = CGEvent::new_scroll_wheel_event2(source().as_deref(), CGScrollEventUnit::Line, 2, wy, wx, 0)
+            .ok_or_else(|| anyhow!("could not make a scroll event"))?;
+        CGEvent::set_location(Some(&e), at);
+        sky::set_window_location(&e, CGPoint { x: at.x - target.origin.x, y: at.y - target.origin.y });
+        sky::set_field(&e, 51, wid);
+        sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointer.0, wid);
+        sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent.0, wid);
+        // Both routes: SkyLight reaches background Chromium-style apps, the
+        // public one AppKit views that ignore the other.
+        post(target, &e);
+        CGEvent::post_to_pid(target.pid, Some(&e));
+        sleep(Duration::from_millis(30));
+    }
     Ok(())
 }
 
