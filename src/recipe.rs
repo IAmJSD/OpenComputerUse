@@ -222,12 +222,29 @@ fn visible(f: &ocu_core::Rect, _window: Option<&ocu_core::Rect>) -> bool {
     f.width > 2.0 && f.height > 2.0
 }
 
+/// The window's own buttons: close, minimise, zoom, full screen. macOS
+/// names them only by subrole ("CloseButton"); Windows puts them in the
+/// title bar.
+fn window_control(node: &UiNode, parent_role: &str) -> bool {
+    matches!(node.name.as_deref(), Some("CloseButton" | "MinimizeButton" | "ZoomButton" | "FullScreenButton"))
+        || (parent_role == "TitleBar" && node.role == "Button")
+}
+
+/// Whether a step is about the window itself, and so may mean its buttons.
+fn names_window(target: &str) -> bool {
+    target.to_lowercase().contains("window")
+}
+
 /// `title` is the window's, so containers named after it can be left out
-/// of candidates' paths.
+/// of candidates' paths. The window's own buttons are offered only when
+/// `controls`: a step about the page never means them, and a wrong pick
+/// closes the window (Clef took "CloseButton" for a cookie banner's
+/// "Reject non-essential cookies" at 0.71).
 fn collect<'a>(
     node: &'a UiNode,
     window: Option<&ocu_core::Rect>,
     title: Option<&str>,
+    controls: bool,
     parent_role: &str,
     path: &mut Vec<String>,
     out: &mut Vec<Candidate<'a>>,
@@ -238,7 +255,8 @@ fn collect<'a>(
     let option = matches!(parent_role, "List" | "ListBox" | "Menu") && label.is_some();
     let passive = PASSIVE.iter().any(|r| r.eq_ignore_ascii_case(&node.role)) && !option;
     let targetable = TARGETABLE.iter().any(|r| r.eq_ignore_ascii_case(&node.role)) || (!node.actions.is_empty() && !passive);
-    if targetable && node.frame.is_some_and(|f| visible(&f, window)) && node.enabled {
+    let excluded = !controls && window_control(node, parent_role);
+    if targetable && !excluded && node.frame.is_some_and(|f| visible(&f, window)) && node.enabled {
         let mut d = if option && node.role == "StaticText" { "Option".to_string() } else { node.role.clone() };
         if let Some(l) = &label {
             d.push_str(&format!(" \"{l}\""));
@@ -273,7 +291,7 @@ fn collect<'a>(
         path.push(format!("{} \"{}\"", node.role, l.chars().take(40).collect::<String>()));
     });
     for c in &node.children {
-        collect(c, window, title, &node.role, path, out);
+        collect(c, window, title, controls, &node.role, path, out);
     }
     if pushed.is_some() {
         path.pop();
@@ -526,7 +544,7 @@ fn locate(
         let root = tree(handler, session, window).ok();
         let mut candidates = Vec::new();
         if let Some(root) = &root {
-            collect(root, root.frame.as_ref(), root.name.as_deref(), "", &mut Vec::new(), &mut candidates);
+            collect(root, root.frame.as_ref(), root.name.as_deref(), names_window(target), "", &mut Vec::new(), &mut candidates);
         }
         let shot = (vision && (config.cloudflare_screenshots || candidates.is_empty()))
             .then(|| screenshot(handler, session, window))
@@ -805,5 +823,32 @@ mod tests {
         assert!(matches!(parse_text("scroll down in the results list").unwrap(), Step::Scroll { within: Some(_), .. }));
         assert!(parse_text("think about it").is_err());
         assert!(matches!(parse_step(&json!({"type": "a", "into": "b"})).unwrap(), Step::Type { .. }));
+    }
+
+    #[test]
+    fn window_buttons_only_for_window_steps() {
+        let button = |name: &str| UiNode {
+            role: "Button".into(),
+            name: Some(name.into()),
+            frame: Some(ocu_core::Rect { x: 0.0, y: 0.0, width: 14.0, height: 14.0 }),
+            actions: vec!["press".into()],
+            enabled: true,
+            ..Default::default()
+        };
+        let root = UiNode {
+            role: "Window".into(),
+            name: Some("Mozilla Firefox".into()),
+            children: vec![button("CloseButton"), button("Reject non-essential cookies")],
+            ..Default::default()
+        };
+        let names = |target: &str| {
+            let mut out = Vec::new();
+            collect(&root, None, root.name.as_deref(), names_window(target), "", &mut Vec::new(), &mut out);
+            out.iter().map(|c| c.node.name.clone().unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(names("Reject non-essential cookies button"), ["Reject non-essential cookies"]);
+        assert_eq!(names("the window's close button"), ["CloseButton", "Reject non-essential cookies"]);
+        let title_bar = UiNode { role: "TitleBar".into(), children: vec![button("Close")], ..Default::default() };
+        assert!(window_control(&title_bar.children[0], "TitleBar"));
     }
 }
