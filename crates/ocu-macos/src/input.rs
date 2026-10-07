@@ -138,7 +138,8 @@ pub fn click(target: &Target, at: CGPoint, button: MouseButton, count: u32, modi
 }
 
 /// A left click the way Chromium (Chrome, Electron apps) accepts one in a
-/// background window, after trycua/cua's driver: a move to the target, a
+/// background window, after trycua/cua's driver. Firefox takes this one too,
+/// and ignores the AppKit-style click altogether: a move to the target, a
 /// primer press at (-1, -1) outside every window to satisfy Chromium's
 /// user-activation gate, then the real press. Every event carries a gesture
 /// phase in field 0, and its "window location" is the screen point, which

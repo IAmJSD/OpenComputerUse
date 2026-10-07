@@ -106,6 +106,12 @@ fn is_chromium(pid: i32) -> bool {
     is_chromium_bundle(Path::new(&bundle.to_string()))
 }
 
+/// Whether an app is built on Gecko (Firefox, and kin like LibreWolf, Zen
+/// and Thunderbird): its bundle carries Gecko's XUL library.
+fn is_gecko_bundle(bundle: &Path) -> bool {
+    bundle.join("Contents/MacOS/XUL").exists()
+}
+
 fn is_chromium_bundle(bundle: &Path) -> bool {
     let frameworks = bundle.join("Contents/Frameworks");
     let marks = ["Chrome", "Chromium", "Electron", "Edge", "Brave", "Vivaldi", "Opera", "Arc", "Helium"];
@@ -172,6 +178,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
     let front_before = frontmost_pid();
     let resolved = resolve(&spec.app)?;
     let mut successor_of: Option<(String, Vec<i32>)> = None;
+    let mut gecko = false;
     let (pid, launched, child, name) = match resolved {
         Resolved::Bundle(bundle) => {
             let already: Vec<i32> = bundle_id(&bundle)
@@ -194,6 +201,9 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
                     }
                 }
             }
+            // Known from the bundle rather than the process: Firefox
+            // relaunches itself, so the process we start may be gone already.
+            gecko = is_gecko_bundle(&bundle);
             let pid = open_bundle(&bundle, &spec)?;
             let name = bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             if let Some(id) = bundle_id(&bundle) {
@@ -225,6 +235,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         elements: ElementTable::default(),
         closed: false,
         chromium: false,
+        gecko,
         asked_for_tree: false,
         successor_of,
         launched_at: Instant::now(),
@@ -297,6 +308,10 @@ pub struct MacSession {
     /// click sequence and has to be asked to build its web accessibility
     /// tree.
     chromium: bool,
+    /// Built on Gecko (Firefox and kin), which builds no accessibility tree
+    /// at all until asked, and drops a background click unless it comes the
+    /// way Chromium wants one.
+    gecko: bool,
     /// Whether that request has been made.
     asked_for_tree: bool,
     /// The bundle id, and the processes of it that are not ours, for
@@ -413,22 +428,34 @@ impl Session for MacSession {
     fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
         // Chromium and Electron build their web content's accessibility tree
         // only once an assistive app asks; other apps ignore the attribute.
+        let mut first_read = false;
         if !self.asked_for_tree {
             self.asked_for_tree = true;
             // Electron honours AXManualAccessibility; a Chromium browser
             // we did not start (so without the flag) sometimes answers to
-            // AXEnhancedUserInterface. Both report errors even when they work.
+            // AXEnhancedUserInterface, and Firefox only to that one: without
+            // it its windows show nothing but their close and zoom buttons.
+            // Both report errors even when they work.
             let app = Element::application(self.pid);
             let _ = app.set("AXManualAccessibility", CFBoolean::new(true));
-            if self.chromium {
+            if self.chromium || self.gecko {
                 let _ = app.set("AXEnhancedUserInterface", CFBoolean::new(true));
                 sleep(Duration::from_millis(500));
+                first_read = self.gecko;
             }
         }
         let w = self.window(window)?;
         let root = ax::window_element(self.pid, Some(w.id as u32))
             .or_else(|_| ax::window_element(self.pid, None))?;
         let origin = CGPoint { x: w.frame.x, y: w.frame.y };
+        if first_read {
+            // Firefox's first read of a page builds its tree, and gives some
+            // elements frames from before layout (a button at -43,-75 that
+            // sits at 100,185): clicked there, they miss. A read after that
+            // one has them right.
+            let _ = ax::read_tree(&root, origin, opts, &mut self.elements);
+            sleep(Duration::from_millis(250));
+        }
         Ok(ax::read_tree(&root, origin, opts, &mut self.elements))
     }
 
@@ -470,7 +497,7 @@ impl Session for MacSession {
                     Some(s) => parse_chord(s)?.modifiers,
                     None => Default::default(),
                 };
-                if self.chromium && *button == MouseButton::Left {
+                if (self.chromium || self.gecko) && *button == MouseButton::Left {
                     input::click_chromium(&t, Self::point(&w, *x, *y), *count, m)
                 } else {
                     input::click(&t, Self::point(&w, *x, *y), *button, *count, m)
