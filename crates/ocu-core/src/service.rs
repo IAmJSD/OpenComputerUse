@@ -46,6 +46,8 @@ pub enum Request {
         #[serde(default)]
         observe: Observe,
     },
+    /// Unlock the Mac if it is locked, so sessions can be driven.
+    Unlock,
 }
 
 /// What to look at after an action.
@@ -104,6 +106,8 @@ pub enum Response {
         screenshot: Option<Screenshot>,
         ui_tree: Option<UiNode>,
     },
+    /// Whether the screen ended up unlocked.
+    Unlocked(bool),
 }
 
 /// Anything that answers requests: the in-process service, or the socket
@@ -218,6 +222,7 @@ impl Service {
     fn handle(&self, client: &Client, req: Request) -> Result<Response> {
         match req {
             Request::Permissions => Ok(Response::Permissions(self.platform.permissions())),
+            Request::Unlock => Ok(Response::Unlocked(self.platform.unlock()?)),
             Request::StartSession(spec) => {
                 let mut session = self.platform.launch(&spec)?;
                 let d = session.describe();

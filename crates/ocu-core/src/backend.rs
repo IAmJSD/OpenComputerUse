@@ -20,6 +20,12 @@ pub trait Platform: Send + Sync {
     /// Starts (or on macOS, possibly attaches to) an app, returning once it
     /// has a window or has had a fair chance to make one.
     fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>>;
+
+    /// Unlocks the machine if it is locked, returning whether it ended up
+    /// unlocked. The default backend has no lock to work behind.
+    fn unlock(&self) -> Result<bool> {
+        bail!("this backend cannot work while the screen is locked")
+    }
 }
 
 /// What a session tells the registry about itself.

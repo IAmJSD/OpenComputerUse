@@ -57,6 +57,13 @@ const COORDS: &str =
 
 pub fn list() -> Vec<Value> {
     let mut tools = base_tools();
+    #[cfg(target_os = "macos")]
+    tools.push(tool(
+        "unlock_screen",
+        "Unlock the Mac if its screen is locked, so sessions can keep working. Does nothing when already unlocked. Needs \"Work while the Mac is locked\" turned on in settings.",
+        json!({}),
+        &[],
+    ));
     if recipe::available() {
         tools.push(recipe::tool_definition());
     }
@@ -469,6 +476,23 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
                 return text("This platform needs no special permissions.".into());
             }
             text(serde_json::to_string_pretty(&p)?)
+        }
+        "unlock_screen" => {
+            if !crate::config::Config::load().allow_unlock {
+                return text(
+                    "Unlocking is turned off. Turn on \"Work while the Mac is locked\" in \
+                     the OpenComputerUse settings."
+                        .into(),
+                );
+            }
+            let Response::Unlocked(ok) = handler.handle(Request::Unlock)? else {
+                bail!("unexpected reply")
+            };
+            text(if ok {
+                "The screen is unlocked.".into()
+            } else {
+                "The screen is still locked: the unlock did not complete.".into()
+            })
         }
         _ => bail!("unknown tool \"{name}\""),
     }

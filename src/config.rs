@@ -100,6 +100,10 @@ pub struct Config {
     pub http: HttpConfig,
     /// Show the cursor and halo over windows being driven (macOS).
     pub show_overlay: Option<bool>,
+    /// Allow `unlock_screen` to unlock the Mac while it is locked (macOS).
+    /// Off unless turned on; also needs the one-time `install-lock` setup.
+    #[serde(default)]
+    pub allow_unlock: bool,
 }
 
 impl Config {

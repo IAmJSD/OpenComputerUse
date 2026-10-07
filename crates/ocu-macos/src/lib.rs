@@ -10,6 +10,7 @@
 mod ax;
 mod capture;
 mod input;
+pub mod lock;
 mod session;
 mod sky;
 
@@ -52,6 +53,10 @@ impl Platform for MacPlatform {
             );
         }
         Ok(Box::new(session::launch(spec)?))
+    }
+
+    fn unlock(&self) -> Result<bool> {
+        lock::unlock(std::time::Duration::from_secs(20))
     }
 }
 

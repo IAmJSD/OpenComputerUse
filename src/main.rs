@@ -22,7 +22,7 @@ mod ipc;
 use anyhow::{bail, Result};
 
 const USAGE: &str = "\
-opencomputeruse — background computer use for agents, over MCP
+opencomputeruse: background computer use for agents, over MCP
 
 USAGE:
     opencomputeruse mcp                   Run the MCP server on stdio (what clients launch)
@@ -33,6 +33,8 @@ USAGE:
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse agent [--background]  Run the macOS agent app (opening the app does this)
+    sudo opencomputeruse install-lock     Enable working while the Mac is locked (macOS; one-time)
+    sudo opencomputeruse uninstall-lock   Undo install-lock, restoring the normal unlock
 
 Settings live in the config file printed by `opencomputeruse config-path`.";
 
@@ -68,6 +70,14 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some("serve") => run_serve(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("install-lock") => run_install_lock(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("uninstall-lock") => {
+            ocu_macos::lock::uninstall()?;
+            println!("Lock-screen support removed. Unlocking needs your password again.");
+            Ok(())
+        }
         Some("update") => run_update(args.iter().any(|a| a == "--check")),
         Some("clients") => {
             for client in clients::Client::ALL {
@@ -107,6 +117,55 @@ fn run() -> Result<()> {
         None => run_mcp(),
         Some(other) => bail!("unknown command \"{other}\"\n\n{USAGE}"),
     }
+}
+
+/// Enables working while the Mac is locked: installs the authorization
+/// plugin, socket directory and unlock rule. Must run as root.
+#[cfg(target_os = "macos")]
+fn run_install_lock(args: &[String]) -> Result<()> {
+    use std::path::{Path, PathBuf};
+    // The user to own the socket directory: `--uid N` or `OCU_OWNER_UID` (the
+    // app's admin prompt, where root has no SUDO_UID), else sudo's SUDO_UID.
+    let uid_arg = args
+        .iter()
+        .position(|a| a == "--uid")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<u32>().ok());
+    let owner_uid: u32 = uid_arg
+        .or_else(|| {
+            std::env::var("OCU_OWNER_UID")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .or_else(|| std::env::var("SUDO_UID").ok().and_then(|v| v.parse().ok()))
+        .unwrap_or_else(|| unsafe { libc::getuid() });
+    if owner_uid == 0 {
+        bail!("run this with sudo from your own account, not as root, so you own the socket");
+    }
+    // Find the signed plugin bundle: an override, then next to the app or exe,
+    // then the build output.
+    let exe = std::env::current_exe().unwrap_or_default();
+    let dir = exe.parent().unwrap_or(Path::new("."));
+    let bundle = "OcuLockAuthorizationPlugin.bundle";
+    let candidates = [
+        std::env::var_os("OCU_LOCK_PLUGIN").map(PathBuf::from),
+        Some(dir.join(format!("../Resources/{bundle}"))), // inside the .app
+        Some(dir.join(bundle)),
+        Some(PathBuf::from("dist").join(bundle)),
+    ];
+    let plugin = candidates
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_dir())
+        .ok_or_else(|| anyhow::anyhow!(
+            "cannot find {bundle}; build it with packaging/macos/lockplugin/build.sh or set OCU_LOCK_PLUGIN"
+        ))?;
+    ocu_macos::lock::install(&plugin, owner_uid)?;
+    println!(
+        "Lock-screen support installed. Turn it on in the app's settings to let \
+         `unlock_screen` work. Undo with `sudo opencomputeruse uninstall-lock`."
+    );
+    Ok(())
 }
 
 /// The HTTP server without the app: Linux and Windows, or a headless Mac.

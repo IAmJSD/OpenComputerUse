@@ -95,6 +95,11 @@ pub struct Status {
     client_message: Option<String>,
     updates: Updates,
     remote: Remote,
+    /// "Work while the Mac is locked": whether the privileged pieces are in
+    /// place, whether a change is running, and the last message.
+    lock_installed: bool,
+    lock_busy: bool,
+    lock_message: Option<String>,
 }
 
 /// The "Other devices" section's state.
@@ -155,6 +160,57 @@ fn reveal_app() {
             .arg(b)
             .spawn();
     }
+}
+
+/// Runs `install-lock` / `uninstall-lock` as root behind the macOS admin
+/// prompt, passing the owner uid and the bundled plugin.
+fn run_privileged_lock(
+    enable: bool,
+    exe: &std::path::Path,
+    plugin: Option<&std::path::Path>,
+    uid: u32,
+) -> anyhow::Result<()> {
+    use anyhow::{anyhow, bail};
+    // Values go in as argv and `quoted form of` shell-quotes them, so no path
+    // can break out of the root command line.
+    let mut cmd = std::process::Command::new("/usr/bin/osascript");
+    cmd.args(["-e", "on run argv"]);
+    if enable {
+        let plugin = plugin.ok_or_else(|| anyhow!("the plugin is missing from the app bundle"))?;
+        cmd.args([
+            "-e",
+            "do shell script \"OCU_OWNER_UID=\" & quoted form of item 1 of argv & \
+             \" OCU_LOCK_PLUGIN=\" & quoted form of item 2 of argv & \
+             \" \" & quoted form of item 3 of argv & \" install-lock\" \
+             with administrator privileges",
+            "-e",
+            "end run",
+        ]);
+        cmd.arg(uid.to_string()).arg(plugin).arg(exe);
+    } else {
+        cmd.args([
+            "-e",
+            "do shell script quoted form of item 1 of argv & \" uninstall-lock\" \
+             with administrator privileges",
+            "-e",
+            "end run",
+        ]);
+        cmd.arg(exe);
+    }
+    let out = cmd.output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        // -128 is the user cancelling the prompt.
+        if err.contains("-128") {
+            bail!("Cancelled.");
+        }
+        // osascript wraps the command's stderr as "7:217: execution error: ... (1)".
+        let err = err.trim();
+        let err = err.split_once("execution error: ").map_or(err, |(_, e)| e);
+        let err = err.rsplit_once(" (").map_or(err, |(e, _)| e);
+        bail!("{err}");
+    }
+    Ok(())
 }
 
 /// Quits and opens again, which is when macOS applies a new Screen
@@ -249,6 +305,9 @@ impl Status {
             },
             busy: None,
             client_message: None,
+            lock_installed: ocu_macos::lock::installed(),
+            lock_busy: false,
+            lock_message: None,
         };
         s.saved = true;
         s
@@ -760,6 +819,42 @@ impl Status {
             )
     }
 
+    /// Turns "work while locked" on or off. Both need root, so this runs the
+    /// CLI behind the admin prompt, then flips the config flag.
+    fn set_locked_use(&mut self, enable: bool, cx: &mut Context<Self>) {
+        self.lock_busy = true;
+        self.lock_message = None;
+        cx.notify();
+        let exe = std::env::current_exe().unwrap_or_default();
+        let plugin =
+            bundle().map(|b| b.join("Contents/Resources/OcuLockAuthorizationPlugin.bundle"));
+        let uid = unsafe { libc::getuid() };
+        let task = cx
+            .background_executor()
+            .spawn(async move { run_privileged_lock(enable, &exe, plugin.as_deref(), uid) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |s, cx| {
+                s.lock_busy = false;
+                match result {
+                    Ok(()) => {
+                        s.config.allow_unlock = enable;
+                        let _ = s.config.save();
+                        s.lock_installed = ocu_macos::lock::installed();
+                        s.lock_message = Some(if enable {
+                            "On. Agents can now unlock the Mac to keep working.".into()
+                        } else {
+                            "Off. Unlocking needs your password again.".into()
+                        });
+                    }
+                    Err(e) => s.lock_message = Some(format!("{e:#}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Installs into (or removes from) a client off the main thread: the
     /// CLIs take a moment.
     fn install(&mut self, client: Client, install: bool, cx: &mut Context<Self>) {
@@ -1140,6 +1235,41 @@ impl Render for Status {
                                 cx.notify();
                             })),
                     )
+                    // Work while locked.
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Work while the Mac is locked"))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(p.text_dim))
+                                            .text_size(px(11.5))
+                                            .child(
+                                                "Lets agents unlock the Mac to keep working. Asks for \
+                                                 your password to set up. A key press or click relocks it.",
+                                            ),
+                                    ),
+                            )
+                            .child(if self.lock_busy {
+                                status("Working…", false).into_any_element()
+                            } else {
+                                Checkbox::new("locked-use", "", self.config.allow_unlock && self.lock_installed)
+                                    .on_change(cx.listener(|s, on: &bool, _, cx| s.set_locked_use(*on, cx)))
+                                    .into_any_element()
+                            }),
+                    )
+                    .when_some(self.lock_message.clone(), |d, m| {
+                        d.child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(m))
+                    })
                     // Other devices.
                     .child(Self::section("Other devices"))
                     .child(self.remote_section(cx))

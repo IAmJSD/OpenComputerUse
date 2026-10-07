@@ -63,6 +63,34 @@ keychain=()
 if [ -n "${MACOS_KEYCHAIN:-}" ]; then
     keychain=(--keychain "$MACOS_KEYCHAIN")
 fi
+
+# The lock-screen authorization plugin, nested in Resources. `install-lock`
+# copies it into /Library/Security/SecurityAgentPlugins and checks its
+# signature, so it is signed on its own, before the app seals it.
+plugin_app="$app/Contents/Resources/OcuLockAuthorizationPlugin.bundle"
+mkdir -p "$plugin_app/Contents/MacOS"
+cp packaging/macos/lockplugin/Info.plist "$plugin_app/Contents/Info.plist"
+pslices=()
+for target in $archs; do
+    case "$target" in
+        aarch64-*) a=arm64 ;;
+        x86_64-*) a=x86_64 ;;
+        *) continue ;;
+    esac
+    slice="$target_dir/ocu-lockplugin.$a"
+    clang -bundle -arch "$a" -framework Foundation -framework Security -fobjc-arc \
+        -mmacosx-version-min=14.0 -o "$slice" packaging/macos/lockplugin/plugin.m
+    pslices+=("$slice")
+done
+lipo -create "${pslices[@]}" -output "$plugin_app/Contents/MacOS/OcuLockAuthorizationPlugin"
+rm -f "${pslices[@]}"
+if [ -n "$identity" ]; then
+    codesign --force --options runtime --timestamp \
+        ${keychain[@]+"${keychain[@]}"} --sign "$identity" "$plugin_app"
+else
+    codesign --force --options runtime --timestamp=none --sign - "$plugin_app"
+fi
+
 signed=false
 if [ -n "$identity" ]; then
     echo "signing with $identity"
