@@ -16,7 +16,7 @@ use objc2_core_foundation::{CFBoolean, CGPoint};
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSString, NSURL};
 
 use ocu_core::keys::{parse_chord, parse_chords};
-use ocu_core::{pick_window, Action, Description, LaunchSpec, Screenshot, Session, TreeOptions, UiNode, WindowInfo};
+use ocu_core::{pick_window, Action, MouseButton, Description, LaunchSpec, Screenshot, Session, TreeOptions, UiNode, WindowInfo};
 
 use crate::ax::{self, Element, ElementTable};
 use crate::capture;
@@ -92,6 +92,26 @@ fn frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| a.processIdentifier())
 }
 
+/// Whether an app is built on Chromium: its bundle carries a Chromium-based
+/// framework (Google Chrome Framework, Electron Framework, …).
+fn is_chromium(pid: i32) -> bool {
+    let Some(bundle) = running(pid).and_then(|a| a.bundleURL()).and_then(|u| u.path()) else { return false };
+    is_chromium_bundle(Path::new(&bundle.to_string()))
+}
+
+fn is_chromium_bundle(bundle: &Path) -> bool {
+    let frameworks = bundle.join("Contents/Frameworks");
+    let marks = ["Chrome", "Chromium", "Electron", "Edge", "Brave", "Vivaldi", "Opera", "Arc", "Helium"];
+    std::fs::read_dir(&frameworks)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.ends_with(" Framework.framework") && marks.iter().any(|m| name.contains(m))
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// The user's frontmost app and its key window.
 fn user_focus() -> Option<(i32, u32)> {
     let pid = frontmost_pid()?;
@@ -154,7 +174,13 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let pid = open_bundle(&bundle, spec)?;
+            // Chromium builds its web pages' accessibility trees only for an
+            // assistive app it recognises; this flag makes it always do so.
+            let mut spec = spec.clone();
+            if is_chromium_bundle(&bundle) && !spec.args.iter().any(|a| a == "--force-renderer-accessibility") {
+                spec.args.insert(0, "--force-renderer-accessibility".into());
+            }
+            let pid = open_bundle(&bundle, &spec)?;
             let name = bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             (pid, !already.contains(&pid), None, name)
         }
@@ -179,7 +205,10 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         front_before,
         elements: ElementTable::default(),
         closed: false,
+        chromium: false,
+        asked_for_tree: false,
     };
+    session.chromium = is_chromium(session.pid);
     // Wait for a window, putting the user's app back in front if this one
     // grabbed focus while starting.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -240,6 +269,12 @@ pub struct MacSession {
     front_before: Option<i32>,
     elements: ElementTable,
     closed: bool,
+    /// Built on Chromium (Chrome, Electron and kin), which needs its own
+    /// click sequence and has to be asked to build its web accessibility
+    /// tree.
+    chromium: bool,
+    /// Whether that request has been made.
+    asked_for_tree: bool,
 }
 
 impl MacSession {
@@ -322,6 +357,20 @@ impl Session for MacSession {
     }
 
     fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
+        // Chromium and Electron build their web content's accessibility tree
+        // only once an assistive app asks; other apps ignore the attribute.
+        if !self.asked_for_tree {
+            self.asked_for_tree = true;
+            // Electron honours AXManualAccessibility; a Chromium browser
+            // we did not start (so without the flag) sometimes answers to
+            // AXEnhancedUserInterface. Both report errors even when they work.
+            let app = Element::application(self.pid);
+            let _ = app.set("AXManualAccessibility", CFBoolean::new(true));
+            if self.chromium {
+                let _ = app.set("AXEnhancedUserInterface", CFBoolean::new(true));
+                sleep(Duration::from_millis(500));
+            }
+        }
         let w = self.window(window)?;
         let root = ax::window_element(self.pid, Some(w.id as u32))
             .or_else(|_| ax::window_element(self.pid, None))?;
@@ -367,7 +416,11 @@ impl Session for MacSession {
                     Some(s) => parse_chord(s)?.modifiers,
                     None => Default::default(),
                 };
-                input::click(&t, Self::point(&w, *x, *y), *button, *count, m)
+                if self.chromium && *button == MouseButton::Left {
+                    input::click_chromium(&t, Self::point(&w, *x, *y), *count, m)
+                } else {
+                    input::click(&t, Self::point(&w, *x, *y), *button, *count, m)
+                }
             }
             Action::MoveMouse { x, y } => input::move_to(&t, Self::point(&w, *x, *y)),
             Action::Drag { from_x, from_y, to_x, to_y, button } => {

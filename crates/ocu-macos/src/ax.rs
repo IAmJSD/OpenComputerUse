@@ -210,7 +210,7 @@ fn walk(
     let value = if role == "AXStaticText" && name.is_none() {
         None
     } else {
-        el.string("AXValue")
+        el.string("AXValue").filter(|v| !v.is_empty())
     };
     // Static text carries its words in AXValue; show them as the name.
     let (name, value) = match (name, value) {
@@ -218,7 +218,8 @@ fn walk(
         (n, v) => (n, v),
     };
     // Window buttons and the like have only a subrole to go by.
-    let name = name.or(label).or_else(|| {
+    // A field's placeholder ("Departing from") is often all that names it.
+    let name = name.or(label).or_else(|| el.string("AXPlaceholderValue").filter(|s| !s.is_empty())).or_else(|| {
         (description.is_none())
             .then(|| el.string("AXSubrole"))
             .flatten()

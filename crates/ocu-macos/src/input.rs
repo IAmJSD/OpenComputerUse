@@ -137,6 +137,52 @@ pub fn click(target: &Target, at: CGPoint, button: MouseButton, count: u32, modi
     Ok(())
 }
 
+/// A left click the way Chromium (Chrome, Electron apps) accepts one in a
+/// background window, after trycua/cua's driver: a move to the target, a
+/// primer press at (-1, -1) outside every window to satisfy Chromium's
+/// user-activation gate, then the real press. Every event carries a gesture
+/// phase in field 0, and its "window location" is the screen point, which
+/// is how Chromium reads it on this path.
+pub fn click_chromium(target: &Target, at: CGPoint, count: u32, modifiers: Modifiers) -> Result<()> {
+    let gesture = gesture_id();
+    let off = CGPoint { x: -1.0, y: -1.0 };
+    let wid = target.window_id as i64;
+    let step = |ty: CGEventType, p: CGPoint, click_state: i64, phase: i64| -> Result<()> {
+        let e = CGEvent::new_mouse_event(source().as_deref(), ty, p, CGMouseButton::Left)
+            .ok_or_else(|| anyhow!("could not make a mouse event"))?;
+        sky::set_field(&e, 0, phase);
+        sky::set_field(&e, 1, click_state);
+        sky::set_field(&e, 3, 0);
+        sky::set_field(&e, 7, 3);
+        sky::set_field(&e, 51, wid);
+        sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointer.0, wid);
+        sky::set_field(&e, CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent.0, wid);
+        sky::set_field(&e, 58, gesture);
+        sky::set_window_location(&e, p);
+        if !modifiers.is_empty() {
+            CGEvent::set_flags(Some(&e), flags(modifiers));
+        }
+        post(target, &e);
+        Ok(())
+    };
+    step(CGEventType::MouseMoved, at, 0, 2)?;
+    sleep(Duration::from_millis(15));
+    step(CGEventType::LeftMouseDown, off, 1, 1)?;
+    sleep(Duration::from_millis(1));
+    step(CGEventType::LeftMouseUp, off, 1, 2)?;
+    sleep(Duration::from_millis(100));
+    let pairs = count.clamp(1, 2);
+    for n in 1..=pairs {
+        step(CGEventType::LeftMouseDown, at, n as i64, 3)?;
+        sleep(Duration::from_millis(1));
+        step(CGEventType::LeftMouseUp, at, n as i64, 3)?;
+        if n < pairs {
+            sleep(Duration::from_millis(80));
+        }
+    }
+    Ok(())
+}
+
 pub fn drag(target: &Target, from: CGPoint, to: CGPoint, button: MouseButton) -> Result<()> {
     let (down, up, dragged, b) = button_types(button);
     move_to(target, from)?;
