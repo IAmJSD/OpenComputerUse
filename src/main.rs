@@ -27,6 +27,7 @@ USAGE:
     opencomputeruse mcp                   Run the MCP server on stdio (what clients launch)
     opencomputeruse install <client>      Register the MCP server with claude or codex
     opencomputeruse uninstall <client>    Remove it again
+    opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse agent [--background]  Run the macOS agent app (opening the app does this)
 
 Settings live in the config file printed by `opencomputeruse config-path`.";
@@ -55,6 +56,7 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some("update") => run_update(args.iter().any(|a| a == "--check")),
         Some("config-path") => {
             println!("{}", config::Config::path().display());
             Ok(())
@@ -78,6 +80,33 @@ fn run() -> Result<()> {
         None => run_mcp(),
         Some(other) => bail!("unknown command \"{other}\"\n\n{USAGE}"),
     }
+}
+
+/// The command-line update: report, and on macOS install over this bundle.
+fn run_update(check_only: bool) -> Result<()> {
+    use std::sync::atomic::AtomicU64;
+    match update::check() {
+        update::UpdateStatus::UpToDate => println!("opencomputeruse {} is the latest version.", update::current_version()),
+        update::UpdateStatus::Failed(e) => bail!("couldn't check for updates: {e}"),
+        update::UpdateStatus::Available(up) => {
+            println!("Version {} is available (this is {}): {}", up.version, update::current_version(), up.page);
+            if check_only {
+                return Ok(());
+            }
+            let Some(installer) = up.install else {
+                println!("Download it from the release page.");
+                return Ok(());
+            };
+            println!("Downloading {} ({} bytes)…", installer.file_name, installer.size);
+            let file = update::download(&installer, &AtomicU64::new(0))?;
+            #[cfg(target_os = "macos")]
+            update::quit_running_app();
+            update::install_and_restart(&file)?;
+            println!("Installed {}; OpenComputerUse is reopening.", up.version);
+        }
+    }
+    update::mark_checked();
+    Ok(())
 }
 
 fn init_stderr_log() {

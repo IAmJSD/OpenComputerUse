@@ -154,7 +154,7 @@ unsigned without them: `MACOS_CERT_P12_BASE64`, `MACOS_CERT_P12_PASSWORD`
 ## Development
 
 ```sh
-cargo test                                     # core and recipe parsing
+cargo test                                     # core, recipes and the updater
 cargo run -p ocu-macos --example smoke         # drive TextEdit directly
 python3 scripts/mcp_smoke.py                   # drive it through the MCP server
 ```

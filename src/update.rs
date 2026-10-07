@@ -93,9 +93,15 @@ pub fn is_newer(current: &str, candidate: &str) -> bool {
     }
 }
 
+/// Where to ask; `OCU_RELEASES_API` points it elsewhere (a local stand-in
+/// for GitHub, when testing an update end to end).
+fn releases_api() -> String {
+    std::env::var("OCU_RELEASES_API").unwrap_or_else(|_| RELEASES_API.to_string())
+}
+
 /// Ask GitHub for the latest release. Blocking — call it off the UI thread.
 pub fn check() -> UpdateStatus {
-    let response = ureq::get(RELEASES_API)
+    let response = ureq::get(&releases_api())
         .header("User-Agent", "opencomputeruse-update-check")
         .header("Accept", "application/vnd.github+json")
         .call();
@@ -425,6 +431,26 @@ fn verify_signature(app: &Path, new_app: &Path) -> anyhow::Result<()> {
         "the update is signed by a different developer"
     );
     Ok(())
+}
+
+/// Quits the running agent app, so that the relauncher's `open` starts the
+/// new bundle rather than bringing the old process forward. For updates
+/// made from the command line; the app quits itself when it installs one.
+#[cfg(target_os = "macos")]
+pub fn quit_running_app() {
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", "quit app id \"com.infrawrench.opencomputeruse\""])
+        .output();
+    for _ in 0..50 {
+        let running = std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", "OpenComputerUse.app/Contents/MacOS/opencomputeruse agent"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !running {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// Start the new bundle once this process is gone.
