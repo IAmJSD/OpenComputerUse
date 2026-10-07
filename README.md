@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.svg" width="128" height="128" alt="OpenComputerUse icon"></p>
+
 # OpenComputerUse
 
 Computer use for agents that runs in the background, as an MCP server.
