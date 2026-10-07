@@ -200,15 +200,46 @@ struct Candidate<'a> {
 /// Roles worth targeting even without an action listed.
 const TARGETABLE: &[&str] = &[
     "TextField", "TextArea", "SearchField", "ComboBox", "Link", "Button", "CheckBox", "RadioButton", "PopUpButton",
-    "MenuItem", "MenuButton", "Tab", "Row", "Cell", "Slider", "Image", "Edit", "Hyperlink", "ListItem", "TreeItem",
-    "entry", "push button", "link", "text",
+    "MenuItem", "MenuButton", "Tab", "TabItem", "Row", "Cell", "Slider", "Edit", "Hyperlink", "ListItem", "TreeItem",
+    "Incrementor", "DisclosureTriangle", "ColorWell", "SplitButton", "DataItem",
+    "entry", "push button", "link",
 ];
 
-fn collect<'a>(node: &'a UiNode, path: &mut Vec<String>, out: &mut Vec<Candidate<'a>>) {
+/// Roles that are never what a step means, whatever actions they claim:
+/// web content offers "press" on every node, text and containers included,
+/// and offering hundreds of them spreads the model's probability so thin a
+/// right answer looks unsure.
+const PASSIVE: &[&str] = &[
+    "StaticText", "Text", "Heading", "Group", "Image", "ListMarker", "Splitter", "ScrollArea", "ScrollBar",
+    "WebArea", "Toolbar", "TabGroup", "Window", "RadioGroup", "List", "Pane", "Document", "Separator", "Unknown",
+    "LayoutArea", "LayoutItem", "Ruler", "RulerMarker", "Application", "Matte", "ValueIndicator", "TitleBar",
+];
+
+/// Whether a frame is on the window and big enough to click.
+fn visible(f: &ocu_core::Rect, window: Option<&ocu_core::Rect>) -> bool {
+    f.width > 2.0
+        && f.height > 2.0
+        && window.is_none_or(|w| f.x + f.width > 0.0 && f.y + f.height > 0.0 && f.x < w.width && f.y < w.height)
+}
+
+/// `title` is the window's, so containers named after it can be left out
+/// of candidates' paths.
+fn collect<'a>(
+    node: &'a UiNode,
+    window: Option<&ocu_core::Rect>,
+    title: Option<&str>,
+    parent_role: &str,
+    path: &mut Vec<String>,
+    out: &mut Vec<Candidate<'a>>,
+) {
     let label = node.name.clone().or_else(|| node.description.clone());
-    let targetable = !node.actions.is_empty() || TARGETABLE.iter().any(|r| r.eq_ignore_ascii_case(&node.role));
-    if targetable && node.frame.is_some_and(|f| f.width > 0.0 && f.height > 0.0) && node.enabled {
-        let mut d = node.role.clone();
+    // Chrome reports a listbox's options (autocomplete suggestions, say) as
+    // plain text inside a list; there they are choices, not prose.
+    let option = matches!(parent_role, "List" | "ListBox" | "Menu") && label.is_some();
+    let passive = PASSIVE.iter().any(|r| r.eq_ignore_ascii_case(&node.role)) && !option;
+    let targetable = TARGETABLE.iter().any(|r| r.eq_ignore_ascii_case(&node.role)) || (!node.actions.is_empty() && !passive);
+    if targetable && node.frame.is_some_and(|f| visible(&f, window)) && node.enabled {
+        let mut d = if option && node.role == "StaticText" { "Option".to_string() } else { node.role.clone() };
         if let Some(l) = &label {
             d.push_str(&format!(" \"{l}\""));
         }
@@ -227,29 +258,51 @@ fn collect<'a>(node: &'a UiNode, path: &mut Vec<String>, out: &mut Vec<Candidate
         }
         out.push(Candidate { node, description: d });
     }
-    let pushed = label.as_ref().map(|l| {
+    // Only containers that tell candidates apart go in the path: the window,
+    // the page and the groups titled like them are the same for everything.
+    let distinctive = !matches!(node.role.as_str(), "Window" | "WebArea" | "ScrollArea" | "Application")
+        && label.as_deref().is_some_and(|l| !title.is_some_and(|t| t.starts_with(l.trim_end_matches('…'))));
+    let pushed = label.as_ref().filter(|_| distinctive).map(|l| {
         path.push(format!("{} \"{}\"", node.role, l.chars().take(40).collect::<String>()));
     });
     for c in &node.children {
-        collect(c, path, out);
+        collect(c, window, title, &node.role, path, out);
     }
     if pushed.is_some() {
         path.pop();
     }
 }
 
-/// How Workers AI wants images: 0 for data URLs, 1 for bare base64. The
-/// docs do not say, so the first image request finds out and remembers.
-static IMAGE_FORMAT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Largest image sent to Clef. Workers AI estimates a request's tokens from
+/// its size before decoding the images, so a full-size screenshot (half a
+/// megabyte of base64) is refused as over the context window though the
+/// model would see it as a few hundred tokens.
+const MAX_IMAGE_BYTES: usize = 100 * 1024;
 
+/// A PNG small enough to send, shrinking it until it is.
+fn fit_image(png: &[u8]) -> Vec<u8> {
+    if png.len() <= MAX_IMAGE_BYTES {
+        return png.to_vec();
+    }
+    let Ok(img) = crate::vision::Image::decode(png) else { return png.to_vec() };
+    let mut side = img.width.max(img.height).min(1024);
+    loop {
+        side = side * 3 / 4;
+        let Ok(small) = img.shrink(side).encode() else { return png.to_vec() };
+        if small.len() <= MAX_IMAGE_BYTES || side <= 256 {
+            return small;
+        }
+    }
+}
+
+/// Images as Workers AI takes them: base64 data URIs.
 fn encode_images(images: &[Vec<u8>]) -> Vec<Value> {
     use base64::Engine as _;
-    let raw = IMAGE_FORMAT.load(std::sync::atomic::Ordering::Relaxed) == 1;
     images
         .iter()
         .map(|png| {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-            Value::String(if raw { b64 } else { format!("data:image/png;base64,{b64}") })
+            let b64 = base64::engine::general_purpose::STANDARD.encode(fit_image(png));
+            Value::String(format!("data:image/png;base64,{b64}"))
         })
         .collect()
 }
@@ -257,17 +310,6 @@ fn encode_images(images: &[Vec<u8>]) -> Vec<Value> {
 /// One decision-model call: questions in, `answers` out. `images` (PNG)
 /// go to Clef, which can look; Jev reads text only and never gets them.
 fn ask(config: &RecipeConfig, state: &Value, questions: &Map<String, Value>, images: &[Vec<u8>]) -> Result<Map<String, Value>> {
-    match ask_once(config, state, questions, images) {
-        Err(e) if !images.is_empty() && e.to_string().to_lowercase().contains("image") => {
-            // Try the other image encoding once before giving up.
-            IMAGE_FORMAT.fetch_xor(1, std::sync::atomic::Ordering::Relaxed);
-            ask_once(config, state, questions, images).map_err(|e2| e2.context(format!("(first attempt: {e:#})")))
-        }
-        r => r,
-    }
-}
-
-fn ask_once(config: &RecipeConfig, state: &Value, questions: &Map<String, Value>, images: &[Vec<u8>]) -> Result<Map<String, Value>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(30)))
@@ -331,13 +373,30 @@ struct Pick {
     index: usize,
     probability: f64,
     confidence: f64,
+    /// The next most likely option's probability.
+    runner_up: f64,
 }
 
-fn choice(answer: &Value) -> Option<(String, f64, f64)> {
+impl Pick {
+    /// Sure enough to act: likely enough outright, or a clear winner (twice
+    /// as likely as anything else), which a model spread over many similar
+    /// options often is without passing a fixed bar.
+    fn sure(&self, min: f64) -> bool {
+        self.probability >= min || (self.probability >= 0.3 && self.probability >= 2.0 * self.runner_up)
+    }
+}
+
+/// The chosen option, its probability, Clef's confidence, and the runner-up's
+/// probability.
+fn choice(answer: &Value) -> Option<(String, f64, f64, f64)> {
     let chosen = answer.get("choice")?.as_str()?.to_string();
-    let p = answer.get("probabilities").and_then(|p| p.get(&chosen)).and_then(Value::as_f64).unwrap_or(0.0);
+    let probs = answer.get("probabilities").and_then(Value::as_object);
+    let p = probs.and_then(|m| m.get(&chosen)).and_then(Value::as_f64).unwrap_or(0.0);
+    let runner_up = probs
+        .map(|m| m.iter().filter(|(k, _)| **k != chosen).filter_map(|(_, v)| v.as_f64()).fold(0.0, f64::max))
+        .unwrap_or(0.0);
     let c = answer.get("confidence").and_then(Value::as_f64).unwrap_or(p);
-    Some((chosen, p, c))
+    Some((chosen, p, c, runner_up))
 }
 
 /// Asks which candidate a step means. Past 255 candidates they are asked in
@@ -363,27 +422,27 @@ fn pick(config: &RecipeConfig, app: &str, instruction: &str, candidates: &[Candi
     let mut round: Vec<(usize, &Candidate)> = indexed;
     loop {
         if round.len() == 1 {
-            return Ok(Pick { index: round[0].0, probability: 1.0, confidence: 1.0 });
+            return Ok(Pick { index: round[0].0, probability: 1.0, confidence: 1.0, runner_up: 0.0 });
         }
         let groups: Vec<&[(usize, &Candidate)]> = round.chunks(MAX_OPTIONS).collect();
-        let mut winners: Vec<(usize, &Candidate, f64, f64)> = Vec::new();
+        let mut winners: Vec<(usize, &Candidate, f64, f64, f64)> = Vec::new();
         for batch in groups.chunks(MAX_QUESTIONS) {
             let questions: Map<String, Value> =
                 batch.iter().enumerate().map(|(g, opts)| (format!("g{g}"), question(opts))).collect();
             let answers = ask(config, &state, &questions, &images)?;
             for (g, _) in batch.iter().enumerate() {
-                let Some((chosen, p, c)) = answers.get(&format!("g{g}")).and_then(choice) else {
+                let Some((chosen, p, c, r)) = answers.get(&format!("g{g}")).and_then(choice) else {
                     bail!("the decision model gave no choice");
                 };
                 let i: usize = chosen.trim_start_matches('e').parse().context("the model chose an unknown option")?;
-                winners.push((i, &candidates[i], p, c));
+                winners.push((i, &candidates[i], p, c, r));
             }
         }
         if winners.len() == 1 || groups.len() == 1 {
-            let (index, _, probability, confidence) = winners[0];
-            return Ok(Pick { index, probability, confidence });
+            let (index, _, probability, confidence, runner_up) = winners[0];
+            return Ok(Pick { index, probability, confidence, runner_up });
         }
-        round = winners.into_iter().map(|(i, c, _, _)| (i, c)).collect();
+        round = winners.into_iter().map(|(i, c, _, _, _)| (i, c)).collect();
     }
 }
 
@@ -435,15 +494,27 @@ fn locate(
         let root = tree(handler, session, window).ok();
         let mut candidates = Vec::new();
         if let Some(root) = &root {
-            collect(root, &mut Vec::new(), &mut candidates);
+            collect(root, root.frame.as_ref(), root.name.as_deref(), "", &mut Vec::new(), &mut candidates);
         }
         let shot = (vision && (config.cloudflare_screenshots || candidates.is_empty()))
             .then(|| screenshot(handler, session, window))
             .flatten();
-        let (node, sure, how) = if !candidates.is_empty() {
+        let (node, sure, ok, how) = if !candidates.is_empty() {
             let pick = pick(config, app, target, &candidates, shot.as_ref())?;
             let c = &candidates[pick.index];
-            (c.node.clone(), pick.confidence.min(pick.probability), c.description.clone())
+            log::info!(
+                "recipe: \"{target}\" → {} (p {:.2}, confidence {:.2}) of {} candidates",
+                c.description, pick.probability, pick.confidence, candidates.len()
+            );
+            // The chosen option's probability is the direct "is it this one";
+            // Clef's confidence runs lower and stopped right picks.
+            let ok = pick.sure(min_confidence);
+            (
+                c.node.clone(),
+                pick.probability,
+                ok,
+                format!("{} (confidence {:.2}, next {:.2})", c.description, pick.confidence, pick.runner_up),
+            )
         } else if let Some(png) = &shot {
             let (x, y, sure) = look(config, app, target, png)?;
             let node = UiNode {
@@ -453,7 +524,7 @@ fn locate(
                 enabled: true,
                 ..Default::default()
             };
-            (node, sure, format!("the point ({x:.0}, {y:.0}) in the screenshot"))
+            (node, sure, sure >= min_confidence, format!("the point ({x:.0}, {y:.0}) in the screenshot"))
         } else if Instant::now() > deadline {
             bail!(
                 "the window has no accessibility tree to match \"{target}\" against{}",
@@ -463,7 +534,7 @@ fn locate(
             std::thread::sleep(Duration::from_millis(700));
             continue;
         };
-        if sure >= min_confidence {
+        if ok {
             return Ok((node, sure, how));
         }
         if Instant::now() > deadline {
@@ -513,7 +584,7 @@ fn look(config: &RecipeConfig, app: &str, target: &str, png: &[u8]) -> Result<(f
             }),
         );
         let answers = ask(config, &state, &questions, &images)?;
-        let (chosen, p, c) = answers.get("cell").and_then(choice).ok_or_else(|| anyhow!("the decision model gave no cell"))?;
+        let (chosen, p, c, _) = answers.get("cell").and_then(choice).ok_or_else(|| anyhow!("the decision model gave no cell"))?;
         let n: usize = chosen.trim_start_matches('c').parse().context("the model chose an unknown cell")?;
         let cell = grid.get(n.wrapping_sub(1)).ok_or_else(|| anyhow!("the model chose cell {n}"))?;
         sure = sure.min(c.min(p));

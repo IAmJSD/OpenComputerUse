@@ -99,6 +99,34 @@ impl Image {
         Image { width: w, height: h, rgb }
     }
 
+    /// The image shrunk (box-averaged) so its longer side is at most `max`.
+    pub fn shrink(&self, max: usize) -> Image {
+        let longest = self.width.max(self.height);
+        if longest <= max {
+            return self.clone();
+        }
+        let (w, h) = ((self.width * max / longest).max(1), (self.height * max / longest).max(1));
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            let (y0, y1) = (y * self.height / h, ((y + 1) * self.height / h).max(y * self.height / h + 1));
+            for x in 0..w {
+                let (x0, x1) = (x * self.width / w, ((x + 1) * self.width / w).max(x * self.width / w + 1));
+                let mut sum = [0u32; 3];
+                for sy in y0..y1 {
+                    for sx in x0..x1 {
+                        let i = (sy * self.width + sx) * 3;
+                        for c in 0..3 {
+                            sum[c] += self.rgb[i + c] as u32;
+                        }
+                    }
+                }
+                let n = ((y1 - y0) * (x1 - x0)) as u32;
+                rgb.extend(sum.iter().map(|v| (v / n) as u8));
+            }
+        }
+        Image { width: w, height: h, rgb }
+    }
+
     /// A rectangle outline, `thick` pixels wide.
     pub fn outline(&mut self, c: Cell, thick: usize, color: [u8; 3]) {
         for t in 0..thick {

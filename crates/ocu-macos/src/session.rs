@@ -92,6 +92,13 @@ fn frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| a.processIdentifier())
 }
 
+const CHROMIUM_FLAGS: &[&str] = &[
+    "--force-renderer-accessibility",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+];
+
 /// Whether an app is built on Chromium: its bundle carries a Chromium-based
 /// framework (Google Chrome Framework, Electron Framework, …).
 fn is_chromium(pid: i32) -> bool {
@@ -175,10 +182,16 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
                 })
                 .unwrap_or_default();
             // Chromium builds its web pages' accessibility trees only for an
-            // assistive app it recognises; this flag makes it always do so.
+            // assistive app it recognises, and stops rendering (and slows the
+            // timers of) pages in windows it thinks are hidden, which ours are
+            // as far as it can tell. These switches undo both.
             let mut spec = spec.clone();
-            if is_chromium_bundle(&bundle) && !spec.args.iter().any(|a| a == "--force-renderer-accessibility") {
-                spec.args.insert(0, "--force-renderer-accessibility".into());
+            if is_chromium_bundle(&bundle) {
+                for flag in CHROMIUM_FLAGS.iter().rev() {
+                    if !spec.args.iter().any(|a| a == flag) {
+                        spec.args.insert(0, flag.to_string());
+                    }
+                }
             }
             let pid = open_bundle(&bundle, &spec)?;
             let name = bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
