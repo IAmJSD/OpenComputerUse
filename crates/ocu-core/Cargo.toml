@@ -1,0 +1,14 @@
+[package]
+name = "ocu-core"
+description = "The platform-neutral half of opencomputeruse: the backend traits, the session registry and the wire types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+png.workspace = true
+log.workspace = true

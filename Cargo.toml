@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = ["crates/ocu-core", "crates/ocu-macos", "crates/ocu-linux", "crates/ocu-windows"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+png = "0.17"
+libc = "0.2"
+log = "0.4"
+ocu-core = { path = "crates/ocu-core" }
+
+[package]
+name = "opencomputeruse"
+description = "Background computer use for agents, as an MCP server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opencomputeruse"
+path = "src/main.rs"
+
+[dependencies]
+ocu-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+png.workspace = true
+log.workspace = true
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+# The recipe runner's OpenAI-compatible driver.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ocu-macos = { path = "crates/ocu-macos" }
+# The agent app's UI: the status window and the cursor overlay.
+gpui = { git = "https://github.com/IAmJSD/gpui", rev = "45a4fb3b7fa2a155368f34de09bfae59deda84ef" }
+async-channel = "2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication", "NSWindow", "NSView", "NSResponder", "NSGraphics", "NSWorkspace", "NSScreen"] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSArray"] }
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ocu-linux = { path = "crates/ocu-linux" }
+
+[target.'cfg(windows)'.dependencies]
+ocu-windows = { path = "crates/ocu-windows" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+# gpui's vendored crates, restated from the fork (Cargo only honours
+# `[patch]` in the top-level manifest).
+[patch.crates-io]
+gpui_util = { git = "https://github.com/IAmJSD/gpui", rev = "45a4fb3b7fa2a155368f34de09bfae59deda84ef" }
+gpui_http_client = { git = "https://github.com/IAmJSD/gpui", rev = "45a4fb3b7fa2a155368f34de09bfae59deda84ef" }
+blade-graphics = { git = "https://github.com/IAmJSD/gpui", rev = "45a4fb3b7fa2a155368f34de09bfae59deda84ef" }

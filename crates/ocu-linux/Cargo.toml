@@ -1,0 +1,13 @@
+[package]
+name = "ocu-linux"
+description = "The Linux backend: each session gets its own Xvfb display, driven through XTEST"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ocu-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+libc.workspace = true
+x11rb = { version = "0.13", features = ["xtest"] }

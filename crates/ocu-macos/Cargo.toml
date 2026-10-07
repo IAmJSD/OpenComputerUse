@@ -1,0 +1,24 @@
+[package]
+name = "ocu-macos"
+description = "The macOS backend: background windows through Accessibility, ScreenCaptureKit and per-process events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ocu-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+libc.workspace = true
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSString", "NSValue", "NSURL", "NSError", "NSEnumerator", "NSObject", "NSBundle", "block2"] }
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "block2", "objc2-core-foundation"] }
+objc2-core-foundation = { version = "0.3", features = ["CFArray", "CFString", "CFNumber", "CFDictionary", "CFCGTypes", "CFData"] }
+objc2-core-graphics = { version = "0.3", features = ["CGEvent", "CGEventTypes", "CGEventSource", "CGRemoteOperation", "CGWindow", "CGImage", "CGDataProvider", "CGDirectDisplay"] }
+objc2-screen-capture-kit = { version = "0.3", features = ["SCShareableContent", "SCScreenshotManager", "SCStream", "objc2-core-graphics", "block2"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "HIServices", "AXUIElement", "AXError", "AXValue", "AXAttributeConstants", "AXActionConstants", "AXRoleConstants", "libc"] }
+
+[dev-dependencies]
+anyhow.workspace = true
+ocu-core.workspace = true
