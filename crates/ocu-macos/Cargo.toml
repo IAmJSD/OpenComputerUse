@@ -4,6 +4,7 @@ description = "The macOS backend: background windows through Accessibility, Scre
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ocu-core.workspace = true

@@ -56,7 +56,7 @@ if [ "$profile" != "debug" ] && [ "$profile" != "dev" ]; then
 fi
 sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
 cp packaging/macos/OpenComputerUse.icns "$app/Contents/Resources/"
-cp src/agent/ui/LICENSE-SCHIST "$app/Contents/Resources/"
+cp LICENSE src/agent/ui/LICENSE-SCHIST "$app/Contents/Resources/"
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 
 keychain=()

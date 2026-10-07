@@ -6,6 +6,7 @@ members = ["crates/ocu-core", "crates/ocu-macos", "crates/ocu-linux", "crates/oc
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+authors = ["Astrid Gealer"]
 
 [workspace.dependencies]
 anyhow = "1"
@@ -23,6 +24,7 @@ description = "Background computer use for agents, as an MCP server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "opencomputeruse"

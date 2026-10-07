@@ -4,6 +4,7 @@ description = "The Windows backend: window messages, PrintWindow and UI Automati
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ocu-core.workspace = true

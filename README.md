@@ -195,3 +195,7 @@ python3 scripts/mcp_smoke.py                   # drive it through the MCP server
 
 The widget kit in `src/agent/ui` comes from Schist (MIT; see
 `LICENSE-SCHIST`).
+
+## License
+
+MIT, © 2026 Astrid Gealer. See [LICENSE](LICENSE).
