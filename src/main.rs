@@ -10,6 +10,7 @@ mod config;
 mod mcp;
 mod recipe;
 mod remote;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod tools;
 mod update;
 mod vision;
@@ -26,10 +27,13 @@ opencomputeruse: background computer use for agents, over MCP
 
 USAGE:
     opencomputeruse mcp                   Run the MCP server on stdio (what clients launch)
-    opencomputeruse install <client>      Register the MCP server with claude, claude-desktop, codex or opencode
+    opencomputeruse install <client>      Register the MCP server with claude, claude-desktop, codex, opencode or kimi
     opencomputeruse uninstall <client>    Remove it again
     opencomputeruse clients               Show which clients run this copy
-    opencomputeruse serve [--port N]      Run the HTTP server for other devices (the app does this on macOS)
+    opencomputeruse serve [--port N] [--listen-on LIST]
+                                          Run the HTTP server for other devices (the app does this on macOS).
+                                          LIST limits it to some network adapters, addresses or ranges,
+                                          like en0,tailscale,192.168.1.0/24
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse agent [--background]  Run the macOS agent app (opening the app does this)
@@ -52,7 +56,7 @@ fn run() -> Result<()> {
         Some("mcp") => run_mcp(),
         Some("install") | Some("uninstall") => {
             let Some(client) = args.get(1) else {
-                bail!("name a client: claude, claude-desktop, codex or opencode")
+                bail!("name a client: claude, claude-desktop, codex, opencode or kimi")
             };
             let client = clients::Client::parse(client)?;
             if first == Some("install") {
@@ -189,14 +193,7 @@ fn run_serve(args: &[String]) -> Result<()> {
         }
     }
     init_stderr_log();
-    let config = config::Config::load();
-    let port = match args.iter().position(|a| a == "--port") {
-        Some(i) => args
-            .get(i + 1)
-            .and_then(|p| p.parse().ok())
-            .ok_or_else(|| anyhow::anyhow!("--port takes a number"))?,
-        None => config.http.port,
-    };
+    let flags = ServeFlags::parse(args)?;
     #[cfg(target_os = "macos")]
     let platform = std::sync::Arc::new(ocu_macos::MacPlatform);
     #[cfg(target_os = "linux")]
@@ -204,14 +201,92 @@ fn run_serve(args: &[String]) -> Result<()> {
     #[cfg(windows)]
     let platform = std::sync::Arc::new(ocu_windows::WindowsPlatform::new());
     let service = ocu_core::Service::new(platform, None);
-    let server = remote::server::HttpServer::start(service, &config.http.bind, port)?;
-    eprintln!(
-        "Serving on {} for the devices in {}.",
-        server.addr,
-        remote::devices::path().display()
-    );
-    server.wait();
-    Ok(())
+    let mut server = remote::server::HttpServer::new(service);
+    let mut shown: Option<(Vec<_>, Vec<String>)> = None;
+    // Follow the settings and the network: adapters gain and lose addresses.
+    loop {
+        let http = flags.apply(config::Config::load().http);
+        let (addrs, mut errors) = match remote::interfaces::listen_addrs(&http) {
+            Ok(addrs) => (addrs, Vec::new()),
+            Err(e) => (Vec::new(), vec![format!("{e:#}")]),
+        };
+        errors.extend(server.listen_on(&addrs));
+        let listening = server.addrs();
+        // Nothing to wait for without listen_on: a bad bind or a port in use
+        // fails now, as it always has.
+        if shown.is_none() && listening.is_empty() && http.listen_on.is_empty() {
+            bail!("{}", errors.join("; "));
+        }
+        if shown.as_ref() != Some(&(listening.clone(), errors.clone())) {
+            for e in &errors {
+                eprintln!("{e}");
+            }
+            if listening.is_empty() && errors.is_empty() {
+                eprintln!(
+                    "Waiting: nothing in {} has an address now.",
+                    http.listen_on.join(", ")
+                );
+            } else if !listening.is_empty() {
+                let at: Vec<String> = listening.iter().map(ToString::to_string).collect();
+                eprintln!(
+                    "Serving on {} for the devices in {}.",
+                    at.join(", "),
+                    remote::devices::path().display()
+                );
+            }
+            shown = Some((listening, errors));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// `serve`'s `--port` and `--listen-on`, which win over the settings file.
+#[derive(Debug, Default, PartialEq)]
+struct ServeFlags {
+    port: Option<u16>,
+    listen_on: Option<Vec<String>>,
+}
+
+impl ServeFlags {
+    fn parse(args: &[String]) -> Result<Self> {
+        let mut flags = Self::default();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--port" => {
+                    flags.port = Some(
+                        it.next()
+                            .and_then(|p| p.parse().ok())
+                            .ok_or_else(|| anyhow::anyhow!("--port takes a number"))?,
+                    )
+                }
+                "--listen-on" => {
+                    let list = it.next().filter(|l| !l.starts_with("--")).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--listen-on takes adapters, addresses or ranges, like en0,tailscale"
+                        )
+                    })?;
+                    let entries: Vec<String> = list.split(',').map(str::to_string).collect();
+                    flags
+                        .listen_on
+                        .get_or_insert_with(Vec::new)
+                        .extend(remote::interfaces::clean(&entries)?);
+                }
+                _ => {}
+            }
+        }
+        Ok(flags)
+    }
+
+    fn apply(&self, mut http: config::HttpConfig) -> config::HttpConfig {
+        if let Some(port) = self.port {
+            http.port = port;
+        }
+        if let Some(l) = &self.listen_on {
+            http.listen_on = l.clone();
+        }
+        http
+    }
 }
 
 /// The command-line update: report, and on macOS install over this bundle.
@@ -384,5 +459,45 @@ mod macos {
             }
             unreachable!()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn serve_flags_override_the_settings() {
+        let flags = ServeFlags::parse(&args(&[
+            "serve",
+            "--listen-on",
+            "en0, tailscale",
+            "--port",
+            "9000",
+            "--listen-on",
+            "10.0.0.0/8",
+        ]))
+        .unwrap();
+        let http = flags.apply(config::HttpConfig::default());
+        assert_eq!(http.port, 9000);
+        assert_eq!(http.listen_on, ["en0", "tailscale", "10.0.0.0/8"]);
+        let none = ServeFlags::parse(&args(&["serve"])).unwrap();
+        let saved = config::HttpConfig {
+            listen_on: vec!["en1".into()],
+            ..Default::default()
+        };
+        assert_eq!(none.apply(saved).listen_on, ["en1"]);
+    }
+
+    #[test]
+    fn serve_flags_need_values() {
+        assert!(ServeFlags::parse(&args(&["serve", "--listen-on"])).is_err());
+        assert!(ServeFlags::parse(&args(&["serve", "--listen-on", "--port", "9000"])).is_err());
+        assert!(ServeFlags::parse(&args(&["serve", "--listen-on", "10.0.0.0/40"])).is_err());
+        assert!(ServeFlags::parse(&args(&["serve", "--port", "x"])).is_err());
     }
 }

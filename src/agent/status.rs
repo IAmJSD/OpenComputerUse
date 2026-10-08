@@ -15,8 +15,8 @@ use gpui::{
 use ocu_core::{Permission, Service, SessionInfo};
 
 use super::ui::{
-    icon, palette, Badge, Button, Checkbox, Divider, Heading, LineEdit, LineEditKey, TextInput,
-    TextPress,
+    icon, palette, Badge, Button, Checkbox, Chip, Divider, Heading, LineEdit, LineEditKey, Modal,
+    TextInput, TextInputColors, TextPress,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -34,13 +34,14 @@ enum Field {
     CloudflareModel,
     MinConfidence,
     HttpPort,
+    ListenOn,
     DeviceName,
     DeviceUrl,
 }
 
 impl Field {
     /// Every field, in tab order.
-    const ALL: [Field; 9] = [
+    const ALL: [Field; 10] = [
         Field::TypesafeKey,
         Field::TypesafeModel,
         Field::CloudflareAccount,
@@ -48,6 +49,7 @@ impl Field {
         Field::CloudflareModel,
         Field::MinConfidence,
         Field::HttpPort,
+        Field::ListenOn,
         Field::DeviceName,
         Field::DeviceUrl,
     ];
@@ -75,6 +77,7 @@ impl Field {
             Field::CloudflareModel => "cf-model",
             Field::MinConfidence => "min-confidence",
             Field::HttpPort => "http-port",
+            Field::ListenOn => "listen-on",
             Field::DeviceName => "device-name",
             Field::DeviceUrl => "device-url",
         }
@@ -90,7 +93,7 @@ pub struct Status {
     fields: Vec<(Field, LineEdit)>,
     saved: bool,
     error: Option<String>,
-    clients: [ClientState; 4],
+    clients: [ClientState; Client::ALL.len()],
     busy: Option<Client>,
     client_message: Option<String>,
     updates: Updates,
@@ -112,17 +115,58 @@ struct Remote {
     confirm_remove: Option<String>,
     url_placeholder: String,
     error: Option<String>,
+    /// A failure of the Generate Skill form, shown with it.
+    skill_error: Option<String>,
+    /// "Every network adapter to every host" is unticked, but nothing is
+    /// chosen yet, so the settings still say every adapter.
+    limiting: bool,
     /// The server's state as last drawn, to redraw when it changes.
     server_seen: (Option<String>, Option<String>),
 }
 
 enum Panel {
     Form,
+    /// The key Generate Skill or Regenerate Key just made, in a modal.
     Issued {
         device: String,
+        /// This computer's hosts-file entry, which holds the key.
+        entry: String,
+        /// The generic skill, the same for every computer.
         skill: String,
+        /// Both inside a message asking the device's agent to set them up.
+        prompt: String,
+        tab: IssuedTab,
         note: Option<String>,
+        /// The block whose text is being selected, and its selection.
+        selecting: Option<(Block, LineEdit)>,
     },
+}
+
+/// The modal's blocks of text, which can be selected and copied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Block {
+    Prompt,
+    Entry,
+    Skill,
+}
+
+impl Block {
+    fn id(self) -> &'static str {
+        match self {
+            Block::Prompt => "issued-prompt",
+            Block::Entry => "issued-entry",
+            Block::Skill => "issued-skill",
+        }
+    }
+}
+
+/// How the issued key goes to the device.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IssuedTab {
+    /// A prompt for the device's agent, which sets itself up.
+    Prompt,
+    /// The hosts-file entry and the skill, to put in place by hand.
+    Skill,
 }
 
 /// The Updates section's state.
@@ -249,10 +293,12 @@ fn status(label: &str, good: bool) -> gpui::Div {
         )
 }
 
-fn client_states() -> [ClientState; 4] {
-    Client::ALL.map(|c| ClientState {
-        found: clients::find(c).is_some(),
-        registration: clients::registration(c),
+fn client_states() -> [ClientState; Client::ALL.len()] {
+    Client::ALL.map(|c| {
+        ClientState {
+            found: clients::find(c).is_some(),
+            registration: clients::registration(c),
+        }
     })
 }
 
@@ -273,7 +319,7 @@ impl Status {
                     Field::CloudflareModel => r.cloudflare_model.clone(),
                     Field::MinConfidence => format!("{}", r.min_confidence),
                     Field::HttpPort => config.http.port.to_string(),
-                    Field::DeviceName | Field::DeviceUrl => String::new(),
+                    Field::ListenOn | Field::DeviceName | Field::DeviceUrl => String::new(),
                 };
                 let mut edit = LineEdit::default();
                 edit.set_text(text);
@@ -348,7 +394,7 @@ impl Status {
     }
 
     fn set_http(&mut self, on: bool) {
-        match remote::set_server(Some(on), None) {
+        match remote::set_server(Some(on), None, None) {
             Ok(config) => {
                 self.config.http = config.http;
                 self.remote.error = None;
@@ -359,7 +405,7 @@ impl Status {
 
     fn apply_port(&mut self) {
         match self.text(Field::HttpPort).parse::<u16>() {
-            Ok(port) => match remote::set_server(None, Some(port)) {
+            Ok(port) => match remote::set_server(None, Some(port), None) {
                 Ok(config) => {
                     self.config.http = config.http;
                     self.remote.error = None;
@@ -371,9 +417,148 @@ impl Status {
         }
     }
 
+    fn set_listen_on(&mut self, listen_on: Vec<String>) {
+        match remote::set_server(None, None, Some(&listen_on)) {
+            Ok(config) => {
+                self.config.http = config.http;
+                self.remote.error = None;
+            }
+            Err(e) => self.remote.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Ticks or unticks one adapter, address or range. The last one stays
+    /// ticked: none would mean every adapter again, which has its own box.
+    fn toggle_listen_entry(&mut self, entry: &str, on: bool) {
+        let mut list = self.config.http.listen_on.clone();
+        if on {
+            list.push(entry.to_string());
+        } else {
+            list.retain(|e| e != entry);
+            if list.is_empty() {
+                self.remote.error = Some(
+                    "Tick something else first, or tick Every network adapter to every host."
+                        .into(),
+                );
+                return;
+            }
+        }
+        self.set_listen_on(list);
+    }
+
+    /// Adds the address or range typed in the box.
+    fn add_listen_entry(&mut self) {
+        let entry = self.text(Field::ListenOn);
+        if entry.is_empty() {
+            return;
+        }
+        if let Err(e) = remote::interfaces::Filter::parse(&entry) {
+            self.remote.error = Some(format!("{e:#}"));
+            return;
+        }
+        let mut list = self.config.http.listen_on.clone();
+        list.push(entry);
+        self.set_listen_on(list);
+        if self.remote.error.is_none() {
+            self.field(Field::ListenOn).set_text(String::new());
+            self.field(Field::ListenOn).active = false;
+        }
+    }
+
+    /// "Every network adapter to every host", or the adapters, addresses and
+    /// ranges to listen on instead.
+    fn listen_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        let listen_on = &self.config.http.listen_on;
+        let every = listen_on.is_empty() && !self.remote.limiting;
+        let mut out = div().flex().flex_col().gap_2().child(
+            Checkbox::new("listen-every", "Every network adapter to every host", every).on_change(
+                cx.listener(|s, on: &bool, _, cx| {
+                    if *on {
+                        s.set_listen_on(Vec::new());
+                    }
+                    s.remote.limiting = !*on;
+                    cx.notify();
+                }),
+            ),
+        );
+        if every {
+            return out;
+        }
+        // The choices: Tailscale (even while it is not connected), each adapter,
+        // then anything chosen that is neither (addresses, ranges, adapters
+        // that are gone for now).
+        let adapters = remote::interfaces::adapters();
+        let addrs = |ips: &[std::net::IpAddr]| remote::interfaces::summary(ips, 2);
+        let mut choices: Vec<(String, String)> = Vec::new();
+        let tailscale: Vec<std::net::IpAddr> = adapters
+            .iter()
+            .flat_map(|a| a.addrs.iter().copied())
+            .filter(remote::interfaces::is_tailscale)
+            .collect();
+        let label = if tailscale.is_empty() {
+            "Tailscale (not connected now)".to_string()
+        } else {
+            format!("Tailscale: {}", addrs(&tailscale))
+        };
+        choices.push((remote::interfaces::TAILSCALE.to_string(), label));
+        for a in &adapters {
+            choices.push((a.name.clone(), format!("{}: {}", a.name, addrs(&a.addrs))));
+        }
+        for e in listen_on {
+            if !choices.iter().any(|(c, _)| c == e) {
+                choices.push((e.clone(), e.clone()));
+            }
+        }
+        let mut list = div().flex().flex_col().gap_1p5().pl_6();
+        for (i, (entry, label)) in choices.into_iter().enumerate() {
+            let on = listen_on.contains(&entry);
+            list = list.child(
+                Checkbox::new(
+                    ElementId::Name(SharedString::from(format!("listen-{i}"))),
+                    label,
+                    on,
+                )
+                .on_change(cx.listener(move |s, on: &bool, _, cx| {
+                    s.toggle_listen_entry(&entry, *on);
+                    cx.notify();
+                })),
+            );
+        }
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().min_w_0().child(self.input(
+                    Field::ListenOn,
+                    "Address or range, like 192.168.1.0/24",
+                    cx,
+                )))
+                .child(
+                    Button::new("listen-add", "Add")
+                        .flex_none()
+                        .on_click(cx.listener(|s, _, _, cx| {
+                            s.add_listen_entry();
+                            cx.notify();
+                        })),
+                ),
+        );
+        out = out
+            .child(
+                div()
+                    .pl_6()
+                    .text_color(rgb(p.text_dim))
+                    .child("Only on these, following their addresses as they change:"),
+            )
+            .child(list);
+        out
+    }
+
     fn open_form(&mut self) {
         self.remote.panel = Some(Panel::Form);
         self.remote.error = None;
+        self.remote.skill_error = None;
         // A Tailscale lookup is a subprocess; once per form is plenty.
         self.remote.url_placeholder = remote::devices::suggested_url(self.config.http.port);
         self.activate(Field::DeviceName);
@@ -389,7 +574,7 @@ impl Status {
             .unwrap_or_else(|| self.remote.url_placeholder.clone());
         match remote::generate(&name, &url) {
             Ok(issued) => self.show_issued(issued),
-            Err(e) => self.remote.error = Some(format!("{e:#}")),
+            Err(e) => self.remote.skill_error = Some(format!("{e:#}")),
         }
     }
 
@@ -403,10 +588,15 @@ impl Status {
     fn show_issued(&mut self, issued: remote::Issued) {
         self.remote.panel = Some(Panel::Issued {
             device: issued.device.name.clone(),
+            prompt: issued.prompt,
+            entry: issued.host_entry,
             skill: issued.skill,
+            tab: IssuedTab::Prompt,
             note: None,
+            selecting: None,
         });
         self.remote.error = None;
+        self.remote.skill_error = None;
         self.remote.devices = Devices::load().devices;
         for (_, e) in &mut self.fields {
             e.active = false;
@@ -423,6 +613,223 @@ impl Status {
             Ok(_) => self.remote.devices = Devices::load().devices,
             Err(e) => self.remote.error = Some(format!("{e:#}")),
         }
+    }
+
+    /// The key just issued, in a modal: as a prompt that has the device's
+    /// agent set itself up, or as the hosts-file entry and the skill.
+    fn issued_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let p = palette();
+        let dim = |t: String| div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(t);
+        let Some(Panel::Issued { device, entry, skill, prompt, tab, note, selecting }) = &self.remote.panel else {
+            return None;
+        };
+        let tab = *tab;
+        let note_msg = |s: &mut Self, msg: String| {
+            if let Some(Panel::Issued { note, .. }) = &mut s.remote.panel {
+                *note = Some(msg);
+            }
+        };
+        let set_tab = |to: IssuedTab| {
+            cx.listener(move |s: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                if let Some(Panel::Issued { tab, note, selecting, .. }) = &mut s.remote.panel {
+                    *tab = to;
+                    *note = None;
+                    *selecting = None;
+                }
+                cx.notify();
+            })
+        };
+        let copy_button = |id: &'static str, label: &'static str, text: String, msg: &'static str| {
+            Button::new(id, label).on_click(cx.listener(move |s, _, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                note_msg(s, msg.into());
+                cx.notify();
+            }))
+        };
+        // A block of text to read, select and copy, that scrolls on its
+        // own: the wheel stops here, as gpui otherwise scrolls every scroll
+        // area under the pointer at once. Its own scroll id per block keeps
+        // each one's place.
+        let mono = |block: Block, text: String| {
+            let input = match selecting {
+                Some((b, edit)) if *b == block => TextInput::edit(block.id(), edit),
+                _ => TextInput::new(block.id(), text.clone()).multiline(),
+            };
+            let pressed = text.clone();
+            div()
+                .id(ElementId::Name(SharedString::from(format!("{}-scroll", block.id()))))
+                .overflow_y_scroll()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .rounded(px(6.0))
+                .bg(rgb(p.deep_bg))
+                .child(
+                    input
+                        .caret_on(false)
+                        .colors(TextInputColors {
+                            bg: p.deep_bg,
+                            border: None,
+                            focus_border: p.deep_bg,
+                            ..Default::default()
+                        })
+                        .w_full()
+                        .p_2()
+                        .rounded(px(6.0))
+                        .font_family("Menlo")
+                        .text_size(px(11.0))
+                        .on_focus(cx.listener(move |s, press: &TextPress, _, cx| {
+                            // The settings' fields give up the keyboard, so
+                            // ⌘C copies from here.
+                            for (_, e) in &mut s.fields {
+                                e.active = false;
+                            }
+                            if let Some(Panel::Issued { selecting, .. }) = &mut s.remote.panel {
+                                if !matches!(selecting, Some((b, _)) if *b == block) {
+                                    let mut edit = LineEdit::multiline();
+                                    edit.text = pressed.clone();
+                                    *selecting = Some((block, edit));
+                                }
+                                if let Some((_, edit)) = selecting {
+                                    edit.press(press);
+                                }
+                            }
+                            cx.notify();
+                        }))
+                        .on_select_to(cx.listener(move |s, at: &usize, _, cx| {
+                            if let Some(Panel::Issued { selecting: Some((b, edit)), .. }) = &mut s.remote.panel {
+                                if *b == block {
+                                    edit.extend_to(*at);
+                                    cx.notify();
+                                }
+                            }
+                        })),
+                )
+        };
+        let tabs = div()
+            .flex()
+            .gap_1()
+            .pb_1()
+            .child(Chip::new("tab-prompt", "Prompt for an agent").selected(tab == IssuedTab::Prompt).on_click(set_tab(IssuedTab::Prompt)))
+            .child(Chip::new("tab-skill", "Skill file").selected(tab == IssuedTab::Skill).on_click(set_tab(IssuedTab::Skill)));
+        let done = Button::new("done-skill", "Done")
+            .ghost()
+            .on_click(cx.listener(|s, _, _, cx| {
+                s.remote.panel = None;
+                cx.notify();
+            }));
+        let modal = Modal::new(format!("Key for {device}")).width(600.0).fill().child(tabs);
+        let modal = match tab {
+            IssuedTab::Prompt => modal
+                .child(dim(format!(
+                    "Paste this into an agent on {device}, such as Claude Code or Codex. It has the skill and this computer's entry for {}, holding the key, and asks the agent to set both up. The key isn't shown anywhere else.",
+                    skill::HOSTS_FILE
+                )))
+                .child(mono(Block::Prompt, prompt.clone()).flex_1().min_h(px(120.0)))
+                .action(done)
+                .action(
+                    copy_button("copy-prompt", "Copy Prompt", prompt.clone(), "Copied. It holds the key, so clear the clipboard once it's pasted.")
+                        .primary(),
+                ),
+            IssuedTab::Skill => {
+                let save = skill.clone();
+                modal
+                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("1. The entry for {}", skill::HOSTS_FILE)))
+                    .child(dim(format!(
+                        "On {device}, add this under the file's `hosts:` line (a new file starts with `hosts:`). It holds the key, which isn't shown anywhere else."
+                    )))
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_2()
+                            .child(mono(Block::Entry, entry.trim_end().to_string()).flex_1().min_w_0())
+                            .child(
+                                copy_button("copy-entry", "Copy Entry", entry.clone(), "Copied the entry. It holds the key, so clear the clipboard once it's pasted.")
+                                    .flex_none(),
+                            ),
+                    )
+                    .child(div().pt_2().font_weight(gpui::FontWeight::MEDIUM).child("2. The skill"))
+                    .child(dim(format!(
+                        "You only need this once on {device}: the same skill drives every computer in its hosts file. Put it at ~/.claude/skills/{}/SKILL.md, or wherever its agent keeps skills.",
+                        skill::GENERIC_SKILL_NAME
+                    )))
+                    .child(mono(Block::Skill, skill.clone()).flex_1().min_h(px(120.0)))
+                    .action(done)
+                    .action(Button::new("save-skill", "Save to Downloads").on_click(cx.listener(move |s, _, _, cx| {
+                        let msg = match remote::save_download(skill::GENERIC_SKILL_NAME, "SKILL.md", &save) {
+                            Ok(path) => {
+                                let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
+                                format!("Saved {}.", path.display())
+                            }
+                            Err(e) => format!("Couldn't save: {e:#}"),
+                        };
+                        note_msg(s, msg);
+                        cx.notify();
+                    })))
+                    .action(copy_button("copy-skill", "Copy Skill", skill.clone(), "Copied the skill.").primary())
+            }
+        };
+        Some(
+            modal
+                .when_some(note.clone(), |d, n| d.child(dim(n)))
+                .when(!self.config.http.enabled, |d| {
+                    d.child(
+                        div()
+                            .text_color(rgb(p.warning))
+                            .text_size(px(11.5))
+                            .child("The HTTP server is off; turn on Serve over HTTP before the device connects."),
+                    )
+                }),
+        )
+    }
+
+    /// Generate Skill, in Other devices: the form, and the key it issues.
+    fn skill_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        let dim = |t: String| div().text_color(rgb(p.text_dim)).child(t);
+        let section = div().flex().flex_col().gap_2();
+        match &self.remote.panel {
+            None | Some(Panel::Issued { .. }) => section.child(
+                div().flex().child(
+                    Button::new("generate-skill", "Generate Skill…")
+                        .primary()
+                        .on_click(cx.listener(|s, _, _, cx| {
+                            s.open_form();
+                            cx.notify();
+                        })),
+                ),
+            ),
+            Some(Panel::Form) => section.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(rgb(p.edge))
+                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child("New device"))
+                    .child(Self::row("Device name", self.input(Field::DeviceName, "Work laptop", cx)))
+                    .child(Self::row("URL", self.input(Field::DeviceUrl, &self.remote.url_placeholder, cx)))
+                    .child(dim("The device that connects in, and the address it reaches this computer at.".into()).text_size(px(11.5)))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("do-generate", "Generate Skill").primary().on_click(cx.listener(|s, _, _, cx| {
+                                s.generate_skill();
+                                cx.notify();
+                            })))
+                            .child(Button::new("cancel-generate", "Cancel").ghost().on_click(cx.listener(|s, _, _, cx| {
+                                s.remote.panel = None;
+                                s.remote.skill_error = None;
+                                cx.notify();
+                            }))),
+                    ),
+            ),
+        }
+        .when_some(self.remote.skill_error.clone(), |d, e| {
+            d.child(div().text_color(rgb(p.warning)).child(e))
+        })
     }
 
     fn remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -467,6 +874,7 @@ impl Status {
                     .child(div().text_color(rgb(p.text_dim)).child("Port"))
                     .child(div().w(px(80.0)).flex_none().child(self.input(Field::HttpPort, "8642", cx))),
             )
+            .child(self.listen_picker(cx))
             .child(status_line);
 
         // The devices.
@@ -530,119 +938,11 @@ impl Status {
             );
         }
 
-        // The form, or the skill it made.
-        section = match &self.remote.panel {
-            None => section.child(
-                div().flex().child(
-                    Button::new("generate-skill", "Generate Skill…")
-                        .primary()
-                        .on_click(cx.listener(|s, _, _, cx| {
-                            s.open_form();
-                            cx.notify();
-                        })),
-                ),
-            ),
-            Some(Panel::Form) => section.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(p.edge))
-                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child("New device"))
-                    .child(Self::row("Device name", self.input(Field::DeviceName, "Work laptop", cx)))
-                    .child(Self::row("URL", self.input(Field::DeviceUrl, &self.remote.url_placeholder, cx)))
-                    .child(dim("The device that connects in, and the address it reaches this computer at.".into()).text_size(px(11.5)))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(Button::new("do-generate", "Generate Skill").primary().on_click(cx.listener(|s, _, _, cx| {
-                                s.generate_skill();
-                                cx.notify();
-                            })))
-                            .child(Button::new("cancel-generate", "Cancel").ghost().on_click(cx.listener(|s, _, _, cx| {
-                                s.remote.panel = None;
-                                s.remote.error = None;
-                                cx.notify();
-                            }))),
-                    ),
-            ),
-            Some(Panel::Issued { device, skill, note }) => {
-                let (copy, save) = (skill.clone(), skill.clone());
-                section.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p_3()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(rgb(p.edge))
-                        .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("Skill for {device}")))
-                        .child(dim(format!(
-                            "Install it on {device} as ~/.claude/skills/{}/SKILL.md. It holds the device's key, which isn't shown anywhere else.",
-                            skill::skill_name()
-                        )).text_size(px(11.5)))
-                        .child(
-                            div()
-                                .id("skill-text")
-                                .max_h(px(220.0))
-                                .overflow_y_scroll()
-                                .p_2()
-                                .rounded(px(6.0))
-                                .bg(rgb(p.deep_bg))
-                                .font_family("Menlo")
-                                .text_size(px(11.0))
-                                .child(skill.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(Button::new("copy-skill", "Copy").primary().on_click(cx.listener(move |s, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                                    if let Some(Panel::Issued { note, .. }) = &mut s.remote.panel {
-                                        *note = Some("Copied.".into());
-                                    }
-                                    cx.notify();
-                                })))
-                                .child(Button::new("save-skill", "Save to Downloads").on_click(cx.listener(move |s, _, _, cx| {
-                                    let msg = match remote::save_skill(&save) {
-                                        Ok(path) => {
-                                            let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
-                                            format!("Saved {}.", path.display())
-                                        }
-                                        Err(e) => format!("Couldn't save: {e:#}"),
-                                    };
-                                    if let Some(Panel::Issued { note, .. }) = &mut s.remote.panel {
-                                        *note = Some(msg);
-                                    }
-                                    cx.notify();
-                                })))
-                                .child(Button::new("done-skill", "Done").ghost().on_click(cx.listener(|s, _, _, cx| {
-                                    s.remote.panel = None;
-                                    cx.notify();
-                                })))
-                                .when_some(note.clone(), |d, n| d.child(dim(n).text_size(px(11.5)))),
-                        )
-                        .when(!http.enabled, |d| {
-                            d.child(
-                                div()
-                                    .text_color(rgb(p.warning))
-                                    .text_size(px(11.5))
-                                    .child("The HTTP server is off; turn on Serve over HTTP before the device connects."),
-                            )
-                        }),
-                )
-            }
-        };
-        section.when_some(self.remote.error.clone(), |d, e| {
-            d.child(div().text_color(rgb(p.warning)).child(e))
-        })
+        section
+            .when_some(self.remote.error.clone(), |d, e| {
+                d.child(div().text_color(rgb(p.warning)).child(e))
+            })
+            .child(self.skill_section(cx))
     }
 
     /// Asks GitHub for the latest release, off the main thread. `announce`,
@@ -1014,6 +1314,21 @@ impl Status {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // The modal's text is read-only: ⌘A and ⌘C, nothing that edits.
+        if let Some(Panel::Issued { selecting: Some((_, edit)), .. }) = &mut self.remote.panel {
+            let m = ev.keystroke.modifiers;
+            if (m.platform || m.control) && matches!(ev.keystroke.key.as_str(), "a" | "c") {
+                edit.key(ev, cx);
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
+        if ev.keystroke.key == "escape" && matches!(self.remote.panel, Some(Panel::Issued { .. })) {
+            self.remote.panel = None;
+            cx.notify();
+            return;
+        }
         let Some(f) = self.active() else { return };
         let key = ev.keystroke.key.as_str();
         if key == "escape" {
@@ -1040,6 +1355,7 @@ impl Status {
             LineEditKey::Submitted => {
                 match f {
                     Field::HttpPort => self.apply_port(),
+                    Field::ListenOn => self.add_listen_entry(),
                     Field::DeviceName | Field::DeviceUrl => self.generate_skill(),
                     _ => self.save(),
                 }
@@ -1114,7 +1430,8 @@ impl Render for Status {
         let all_granted = self.permissions.iter().all(|p| p.granted);
         let provider = self.config.recipe.provider;
 
-        div()
+        let modal = self.issued_modal(cx).map(IntoElement::into_any_element);
+        let page = div()
             .id("status")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
@@ -1220,14 +1537,14 @@ impl Render for Status {
                                     .items_center()
                                     .gap_3()
                                     .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::MEDIUM).child(client.label()))
-                                    .child(div().w(px(130.0)).flex_none().child(match (state.found, &state.registration, busy) {
+                                    .child(div().w(px(105.0)).flex_none().child(match (state.found, &state.registration, busy) {
                                         (_, _, true) => status("Working…", false),
                                         (false, _, _) => status("Not found", false),
                                         (true, clients::Registration::Current, _) => status("Installed", true),
                                         (true, clients::Registration::Elsewhere(_), _) => status("Points elsewhere", false),
                                         (true, clients::Registration::Absent, _) => status("Not installed", false),
                                     }))
-                                    .child(div().w(px(180.0)).flex_none().flex().justify_end().gap_2().when(state.found, |d| {
+                                    .child(div().flex_none().flex().justify_end().gap_2().when(state.found, |d| {
                                         d.child(
                                             Button::new(("install", client as usize), if installed { "Reinstall" } else { "Install" })
                                                 // A stale entry needs fixing as much as a missing one.
@@ -1243,7 +1560,7 @@ impl Render for Status {
                                                     .on_click(cx.listener(move |s, _, _, cx| s.install(client, false, cx))),
                                             )
                                         })
-                                    })),
+                                    }))
                             )
                             .when_some(elsewhere, |d, path| {
                                 d.child(
@@ -1409,13 +1726,15 @@ impl Render for Status {
                             })
                             .when_some(self.error.clone(), |d, e| d.child(div().text_color(rgb(p.warning)).child(e))),
                     ),
-            )
+            );
+        // The modal covers the window, not the page that scrolls under it.
+        div().size_full().relative().child(page).children(modal)
     }
 }
 
 pub fn open(service: Arc<Service>, cx: &mut App) -> Option<gpui::WindowHandle<Status>> {
     use gpui::{size, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
-    let bounds = Bounds::centered(None, size(px(560.0), px(720.0)), cx);
+    let bounds = Bounds::centered(None, size(px(640.0), px(720.0)), cx);
     super::native::set_regular(true);
     let handle = cx
         .open_window(

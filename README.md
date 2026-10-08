@@ -146,11 +146,13 @@ opencomputeruse install claude          # claude mcp add --scope user opencomput
 opencomputeruse install claude-desktop  # an "mcpServers" entry in claude_desktop_config.json
 opencomputeruse install codex           # codex mcp add opencomputeruse -- <path> mcp
 opencomputeruse install opencode        # an "mcp" entry in ~/.config/opencode/opencode.json(c)
+opencomputeruse install kimi            # an "mcpServers" entry in ~/.kimi-code/mcp.json
 opencomputeruse clients                 # which clients run this copy
 ```
 
 Claude Desktop reads its config when it starts, so quit and reopen it after
-installing. A client whose entry runs another copy (an old build, or the app before it
+installing. Kimi means Kimi Code (`kimi`); it keeps its config in
+`$KIMI_CODE_HOME`, `~/.kimi-code` by default. The legacy `kimi-cli` is not supported. A client whose entry runs another copy (an old build, or the app before it
 moved) shows as "points elsewhere"; installing again points it here.
 
 For other clients, use `{ "command": "<path to opencomputeruse>", "args": ["mcp"] }`.
@@ -164,13 +166,44 @@ starts again at login, so it survives reboots.
 
 Each device needs a key. **Generate Skill** asks for the device's name and the
 URL it reaches this computer at (this computer's Tailscale name by default),
-and gives back a `SKILL.md` to install on that device. The skill carries the
-URL, the key and how to call every tool with curl. Keys are stored only as
-hashes, so the skill is the one place a key appears. Devices are listed in
-the app with **Regenerate Key** and **Remove**, and in the local MCP server
-as `list_devices`, `generate_skill`, `regenerate_key` and `remove_device`.
-Regenerating or removing a key ends that device's sessions. None of this
-management is reachable over HTTP.
+and shows the key once, in a dialog with two tabs:
+
+- **Prompt for an agent**: one prompt to paste into an agent on the device
+  (Claude Code, Codex, OpenCode, …). It holds the skill and this computer's
+  hosts-file entry, and asks the agent to install the one and add the other.
+- **Skill file**: the hosts-file entry and the skill, to put in place by
+  hand. The skill is the same for every computer, so a device needs it only
+  once; each computer it drives adds an entry.
+
+Keys are stored only as hashes, so that is the one place a key appears.
+Devices are listed in the app with **Regenerate Key** and **Remove**, and in
+the local MCP server as `list_devices`, `generate_skill`, `regenerate_key`
+and `remove_device`. Regenerating or removing a key ends that device's
+sessions. None of this management is reachable over HTTP.
+
+### The skill and the hosts file
+
+The skill (`opencomputeruse-remote`) holds no key. It teaches the agent to read
+host names, URLs and keys from `~/.config/opencomputeruse/hosts.yaml` on the
+device that drives the others, so one file serves several computers:
+
+```yaml
+hosts:
+  work-mac:
+    url: "http://work-mac.example.ts.net:8642"
+    key: "ocu_..."
+  studio:
+    url: "http://studio.example.ts.net:8642"
+    key: "ocu_..."
+```
+
+Only this small shape is read: a `hosts:` map, each host with `url:` and
+`key:` values (bare, or in single or double quotes), `#` comments, and the
+last entry of a name winning. Create the file with `umask 077` and
+`chmod 600`. Keys may hold only letters, digits and `._~+/=-`. The skill has the agent save its
+shell helper to `~/.config/opencomputeruse/ocu.sh`; `ocu HOST TOOL [JSON]` reads the key itself and gives it to
+curl on stdin, so it never shows up in a command line or the agent's
+transcript. It needs a POSIX shell, awk and curl, so not Windows.
 
 The API:
 
@@ -183,6 +216,21 @@ The API:
 There is no TLS, so use it over Tailscale or another trusted network. On
 Linux and Windows, `opencomputeruse serve` runs the server, and
 `serve --install` starts it at login.
+
+It listens on every network adapter unless you limit it, for example so it
+is reachable over Tailscale but not on a coffee shop's Wi-Fi. Untick
+**Every network adapter to every host** in the app, pass
+`serve --listen-on`, or set `http.listen_on` in the settings file to a list
+of:
+
+- an adapter, such as `en0`, or `tailscale` for whichever adapter has this
+  computer's Tailscale address,
+- an address, such as `192.168.1.5`,
+- a range, such as `192.168.1.0/24`.
+
+The server follows these as addresses come and go, and waits while none of
+them has one: `opencomputeruse serve --listen-on tailscale` listens once
+Tailscale connects.
 
 ## Settings
 

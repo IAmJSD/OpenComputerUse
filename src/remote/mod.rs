@@ -4,6 +4,7 @@
 //! local MCP server's device tools.
 
 pub mod devices;
+pub mod interfaces;
 pub mod server;
 pub mod skill;
 
@@ -14,53 +15,93 @@ use crate::config::Config;
 use crate::tools::Output;
 use devices::Devices;
 
-/// A new or regenerated device key, rendered as the skill that carries it.
+/// A new or regenerated device key, as what the device sets up with it.
 pub struct Issued {
     pub device: devices::Device,
+    /// What the device adds under `hosts:` in its hosts file: this
+    /// computer's name, URL and the key.
+    pub host_entry: String,
+    /// The generic skill, the same for every computer (no key).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub skill: String,
+    /// Both, inside a message asking the device's agent to set them up.
+    pub prompt: String,
+}
+
+impl Issued {
+    fn new(device: devices::Device, key: &str) -> Self {
+        let host_entry = skill::host_entry(&device, key);
+        let skill = skill::render_generic(&crate::tools::list());
+        Issued {
+            prompt: skill::agent_prompt(&skill, &host_entry),
+            device,
+            host_entry,
+            skill,
+        }
+    }
 }
 
 pub fn generate(name: &str, url: &str) -> Result<Issued> {
     let mut d = Devices::load();
     let (device, key) = d.add(name, url)?;
-    Ok(Issued {
-        skill: skill::render(&device, &key, &crate::tools::list()),
-        device,
-    })
+    Ok(Issued::new(device, &key))
 }
 
 pub fn regenerate(id: &str, url: Option<&str>) -> Result<Issued> {
     let mut d = Devices::load();
     let (device, key) = d.regenerate(id, url)?;
-    Ok(Issued {
-        skill: skill::render(&device, &key, &crate::tools::list()),
-        device,
-    })
+    Ok(Issued::new(device, &key))
 }
 
-/// Where a skill is saved: `~/Downloads/<skill name>/SKILL.md`, ready to
-/// copy into a device's skills folder.
-pub fn save_skill(skill: &str) -> Result<std::path::PathBuf> {
+/// Saves a file to `~/Downloads/<folder>/<file>`, created readable by the
+/// user alone (it may hold a key), and returns where it went. A link at the
+/// folder or file is never written through; an existing regular file is
+/// replaced.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::PathBuf> {
+    use std::io::Write as _;
+
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .unwrap_or_default();
-    let dir = std::path::Path::new(&home)
-        .join("Downloads")
-        .join(skill::skill_name());
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("SKILL.md");
-    std::fs::write(&path, skill)?;
+    let dir = std::path::Path::new(&home).join("Downloads").join(folder);
+    let path = dir.join(file);
+    for p in [&dir, &path] {
+        anyhow::ensure!(
+            !std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()),
+            "{} is a symlink; not writing through it",
+            p.display()
+        );
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(text.as_bytes())?;
+        // A file that was already there keeps its old mode otherwise.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, text)?;
     }
     Ok(path)
 }
 
-/// Turns the server on or off (and moves it), and has it start at login
-/// while it is on.
-pub fn set_server(enabled: Option<bool>, port: Option<u16>) -> Result<Config> {
+/// Turns the server on or off (and moves it, or limits where it listens),
+/// and has it start at login while it is on.
+pub fn set_server(
+    enabled: Option<bool>,
+    port: Option<u16>,
+    listen_on: Option<&[String]>,
+) -> Result<Config> {
     let mut config = Config::load();
     if let Some(on) = enabled {
         config.http.enabled = on;
@@ -68,6 +109,9 @@ pub fn set_server(enabled: Option<bool>, port: Option<u16>) -> Result<Config> {
     if let Some(port) = port {
         anyhow::ensure!(port >= 1024, "use a port from 1024 up");
         config.http.port = port;
+    }
+    if let Some(listen_on) = listen_on {
+        config.http.listen_on = interfaces::clean(listen_on)?;
     }
     config.save()?;
     if cfg!(target_os = "macos") {
@@ -93,14 +137,24 @@ pub fn is_tool(name: &str) -> bool {
 }
 
 pub fn tool_definitions() -> Vec<Value> {
-    let port = Config::load().http.port;
+    let http = Config::load().http;
+    let port = http.port;
     vec![
         json!({
             "name": "http_server",
-            "description": "Show, or turn on and off, the HTTP server that lets other devices drive this computer with a key (off by default). While on, it starts again after a reboot. Devices reach it at the URL in their skill, usually over Tailscale.",
+            "description": "Show, or turn on and off, the HTTP server that lets other devices drive this computer with a key (off by default). While on, it starts again after a reboot. Devices reach it at the URL in their skill, usually over Tailscale. It listens on every network adapter unless listen_on limits it, for example to Tailscale only.",
             "inputSchema": { "type": "object", "properties": {
                 "enabled": { "type": "boolean", "description": "Turn the server on or off. Leave out to only show its state." },
                 "port": { "type": "integer", "description": format!("The port to listen on. Currently {port}.") },
+                "listen_on": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": format!(
+                        "Limit the server to some of this computer's addresses, following them as they change. Each entry is a network adapter (\"en0\", or \"tailscale\" for whichever adapter has the Tailscale address), an address (\"192.168.1.5\") or a range (\"192.168.1.0/24\"). An empty list listens on every adapter again. Currently {}. This computer's adapters: {}.",
+                        listen_on_text(&http.listen_on),
+                        adapters_text(),
+                    ),
+                },
             } },
         }),
         json!({
@@ -110,7 +164,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "generate_skill",
-            "description": "Allow a device to drive this computer over HTTP: makes it a key and returns a SKILL.md, containing the key, to install on that device (in its skills folder, e.g. ~/.claude/skills/<name>/SKILL.md). The key is shown only in this skill.",
+            "description": "Allow a device to drive this computer over HTTP: makes it a key and returns a prompt to paste into an agent on that device. The prompt holds the generic opencomputeruse-remote skill and this computer's entry for the device's ~/.config/opencomputeruse/hosts.yaml, which holds the key, and asks the agent to set both up. The key is shown only here, so pass the prompt on as it is.",
             "inputSchema": { "type": "object", "properties": {
                 "device_name": { "type": "string", "description": "What the device that will connect is called, e.g. \"Work laptop\"." },
                 "url": { "type": "string", "description": format!("How that device reaches this computer. Defaults to {}.", devices::suggested_url(port)) },
@@ -118,7 +172,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "regenerate_key",
-            "description": "Give a device a new key, retiring the old one and ending its sessions, and return the new skill to install on it.",
+            "description": "Give a device a new key, retiring the old one and ending its sessions, and return a prompt for an agent on that device that sets the new key up (as generate_skill does).",
             "inputSchema": { "type": "object", "properties": {
                 "device": { "type": "string", "description": "The device's id or name, from list_devices." },
                 "url": { "type": "string", "description": "A new URL for it to reach this computer at. Leave out to keep the current one." },
@@ -151,10 +205,46 @@ fn server_state(config: &Config) -> String {
     } else {
         "`opencomputeruse serve` serves it; `opencomputeruse serve --install` keeps it running after a reboot"
     };
+    if h.listen_on.is_empty() {
+        return format!(
+            "The HTTP server is on, listening on {}:{}; {how}.",
+            h.bind, h.port
+        );
+    }
+    let addrs: Vec<String> = interfaces::listen_addrs(h)
+        .unwrap_or_default()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let now = if addrs.is_empty() {
+        "none of them has an address now".to_string()
+    } else {
+        format!("now {}", addrs.join(", "))
+    };
     format!(
-        "The HTTP server is on, listening on {}:{}; {how}.",
-        h.bind, h.port
+        "The HTTP server is on, listening on {} only ({now}); {how}.",
+        listen_on_text(&h.listen_on)
     )
+}
+
+fn listen_on_text(listen_on: &[String]) -> String {
+    if listen_on.is_empty() {
+        "every adapter".into()
+    } else {
+        listen_on.join(", ")
+    }
+}
+
+/// This computer's adapters and their addresses, for the tool description.
+fn adapters_text() -> String {
+    interfaces::adapters()
+        .iter()
+        .map(|a| {
+            let addrs: Vec<String> = a.addrs.iter().map(ToString::to_string).collect();
+            format!("{} ({})", a.name, addrs.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub fn call(name: &str, args: &Value) -> Result<Output> {
@@ -163,8 +253,18 @@ pub fn call(name: &str, args: &Value) -> Result<Output> {
         "http_server" => {
             let enabled = args.get("enabled").and_then(Value::as_bool);
             let port = args.get("port").and_then(Value::as_u64).map(|p| p as u16);
-            let config = if enabled.is_some() || port.is_some() {
-                set_server(enabled, port)?
+            let listen_on = match args.get("listen_on") {
+                None | Some(Value::Null) => None,
+                Some(Value::Array(a)) => Some(
+                    a.iter()
+                        .map(|v| v.as_str().map(str::to_string))
+                        .collect::<Option<Vec<String>>>()
+                        .ok_or_else(|| anyhow::anyhow!("\"listen_on\" is a list of strings"))?,
+                ),
+                Some(_) => bail!("\"listen_on\" is a list of strings"),
+            };
+            let config = if enabled.is_some() || port.is_some() || listen_on.is_some() {
+                set_server(enabled, port, listen_on.as_deref())?
             } else {
                 Config::load()
             };
@@ -215,15 +315,15 @@ pub fn call(name: &str, args: &Value) -> Result<Output> {
 
 fn issued_text(issued: &Issued) -> String {
     let mut note = format!(
-        "Skill for {} ({}). Install it on that device as ~/.claude/skills/{}/SKILL.md. It contains the device's key, which is not shown anywhere else.",
+        "Key for {} ({}). Paste everything below the line into an agent on that device (Claude Code, Codex, OpenCode, …): it adds this computer to the device's {} and installs the skill. The key is not shown anywhere else.",
         issued.device.name,
         issued.device.id,
-        skill::skill_name()
+        skill::HOSTS_FILE
     );
     if !Config::load().http.enabled {
         note.push_str(" The HTTP server is off: turn it on (http_server with enabled: true) before the device connects.");
     }
-    format!("{note}\n\n{}", issued.skill)
+    format!("{note}\n\n---\n\n{}", issued.prompt)
 }
 
 // ------------------------------------------------------- start at login

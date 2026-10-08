@@ -80,7 +80,14 @@ pub struct HttpConfig {
     pub port: u16,
     /// Every interface by default, so devices on the network (or the
     /// tailnet) can reach it; every request still needs a device's key.
+    /// Used while `listen_on` is empty.
     pub bind: String,
+    /// Limits the server to some of this computer's addresses, following
+    /// them as they change. Each entry is a network adapter (`en0`, or
+    /// `tailscale` for whichever adapter has this computer's Tailscale
+    /// address), an address (`192.168.1.5`) or a range (`192.168.1.0/24`).
+    /// Empty listens on `bind`.
+    pub listen_on: Vec<String>,
 }
 
 impl Default for HttpConfig {
@@ -89,6 +96,7 @@ impl Default for HttpConfig {
             enabled: false,
             port: 8642,
             bind: "0.0.0.0".into(),
+            listen_on: Vec::new(),
         }
     }
 }
