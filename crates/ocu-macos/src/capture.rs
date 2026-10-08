@@ -71,6 +71,28 @@ pub fn windows(pid: i32) -> Vec<WindowInfo> {
     out
 }
 
+/// The topmost normal window on screen whose owner is not in `skip`, and
+/// its owner.
+pub fn front_window(skip: &[i32]) -> Option<(i32, WindowInfo)> {
+    let opts = CGWindowListOption(
+        CGWindowListOption::OptionOnScreenOnly.0 | CGWindowListOption::ExcludeDesktopElements.0,
+    );
+    let list = CGWindowListCopyWindowInfo(opts, 0)?;
+    let list: &CFArray<CFDictionary> = unsafe { list.cast_unchecked() };
+    // Front to back, so the first that qualifies is the one in front.
+    list.iter().find_map(|dict| {
+        let pid = num(&dict, "kCGWindowOwnerPID")? as i32;
+        if skip.contains(&pid)
+            || num(&dict, "kCGWindowLayer") != Some(0.0)
+            || num(&dict, "kCGWindowAlpha").unwrap_or(1.0) <= 0.0
+        {
+            return None;
+        }
+        let w = parse(&dict)?;
+        (w.frame.width >= 100.0 && w.frame.height >= 60.0).then_some((pid, w))
+    })
+}
+
 fn parse(dict: &CFDictionary) -> Option<WindowInfo> {
     let bounds = get(dict, "kCGWindowBounds")?.downcast_ref::<CFDictionary>()?;
     let frame = Rect {

@@ -14,8 +14,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_OWNER,
+    EnumWindows, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
 };
 
 use ocu_core::image::{encode_png, Order};
@@ -98,6 +99,61 @@ pub fn windows(pids: &[u32]) -> Vec<WindowInfo> {
     let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut acc as *mut _ as isize)) };
     acc.out.sort_by_key(|(w, owned)| (*owned, !w.on_screen));
     acc.out.into_iter().map(|(w, _)| w).collect()
+}
+
+/// Whether `hwnd` is an app window a user could have in front: visible,
+/// not minimised, not a tool window or the desktop and taskbar, and not
+/// owned by one of `skip`.
+fn is_app_window(hwnd: HWND, skip: &[u32]) -> bool {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 || skip.contains(&pid) {
+        return false;
+    }
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || cloaked(hwnd) {
+            return false;
+        }
+        if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
+            return false;
+        }
+    }
+    let mut class = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut class) };
+    let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+    if matches!(
+        class.as_str(),
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    ) {
+        return false;
+    }
+    let f = frame(hwnd);
+    f.width >= 100.0 && f.height >= 60.0
+}
+
+/// The window in front, skipping `skip`'s: the foreground window if it
+/// qualifies, else the topmost app window under it.
+pub fn front_window(skip: &[u32]) -> Option<HWND> {
+    let fg = unsafe { GetForegroundWindow() };
+    if !fg.is_invalid() && is_app_window(fg, skip) {
+        return Some(fg);
+    }
+    struct Acc<'a> {
+        skip: &'a [u32],
+        found: Option<HWND>,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let acc = &mut *(lparam.0 as *mut Acc);
+        if is_app_window(hwnd, acc.skip) {
+            acc.found = Some(hwnd);
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut acc = Acc { skip, found: None };
+    // EnumWindows goes top to bottom, and stopping early reports an error.
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut acc as *mut _ as isize)) };
+    acc.found
 }
 
 pub fn hwnd(id: u64) -> HWND {

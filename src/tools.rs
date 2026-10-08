@@ -102,18 +102,19 @@ fn base_tools() -> Vec<Value> {
     vec![
         tool(
             "start_session",
-            "Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front, unless `foreground` is set. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. Returns the session id and the app's windows.",
+            "Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front, unless `foreground` is set. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows.",
             json!({
-                "app": { "type": "string" },
+                "app": { "type": "string", "description": "The app to start. Required unless `active_window` is set." },
                 "args": { "type": "array", "items": { "type": "string" } },
                 "env": { "type": "object", "additionalProperties": { "type": "string" } },
                 "cwd": { "type": "string" },
                 "new_instance": { "type": "boolean", "description": "macOS: start a separate instance even when the app is already running. Otherwise a running app is attached to, and left running when the session ends." },
+                "active_window": { "type": "boolean", "description": "macOS and Windows: attach to the window in front (the topmost one not belonging to the app this client runs in) instead of starting `app`. It becomes the session's default window, and its app is left running when the session ends." },
                 "foreground": { "type": "boolean", "description": "macOS and Windows: open the app in front and bring it and the target window to the front before every action, so the user can watch. Default false (the app stays in the background). Linux sessions are always on their own virtual display." },
                 "display_width": { "type": "integer", "description": "Linux: the virtual display's width. Default 1440." },
                 "display_height": { "type": "integer", "description": "Linux: the virtual display's height. Default 900." },
             }),
-            &["app"],
+            &[],
         ),
         tool(
             "end_session",
@@ -220,6 +221,41 @@ fn base_tools() -> Vec<Value> {
             &[],
         ),
     ]
+}
+
+/// This process and its ancestors: the client that started this server and
+/// the apps it runs inside, whose windows are never "the window in front".
+/// Elsewhere the backend runs in this process and finds them itself.
+#[cfg(target_os = "macos")]
+fn client_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    let mut pid = std::process::id() as i32;
+    while pid > 1 && pids.len() < 64 {
+        pids.push(pid as u32);
+        // The short record: the full one is refused for other users'
+        // processes, such as the root-owned `login` under a terminal.
+        let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as i32;
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDT_SHORTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if got != size {
+            break;
+        }
+        pid = info.pbsi_ppid as i32;
+    }
+    pids
+}
+
+#[cfg(not(target_os = "macos"))]
+fn client_pids() -> Vec<u32> {
+    Vec::new()
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -381,13 +417,25 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
                 }),
                 _ => None,
             };
+            let active_window = flag(args, "active_window", false);
+            let app = match opt_str(args, "app") {
+                Some(app) => app,
+                None if active_window => String::new(),
+                None => bail!("missing \"app\" (or set \"active_window\": true)"),
+            };
             let spec = LaunchSpec {
-                app: str_arg(args, "app")?.to_string(),
+                app,
                 args: serde_json::from_value(args.get("args").cloned().unwrap_or(json!([])))?,
                 env: serde_json::from_value(args.get("env").cloned().unwrap_or(json!({})))?,
                 cwd: opt_str(args, "cwd"),
                 new_instance: flag(args, "new_instance", false),
                 foreground: flag(args, "foreground", false),
+                active_window,
+                skip_pids: if active_window {
+                    client_pids()
+                } else {
+                    Vec::new()
+                },
                 display_size,
             };
             let Response::Session { info, windows } =

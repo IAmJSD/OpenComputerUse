@@ -81,6 +81,9 @@ impl Platform for LinuxPlatform {
     }
 
     fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>> {
+        if spec.active_window {
+            bail!("each Linux session has its own virtual display, with no window in front to attach to; start the app instead");
+        }
         let xvfb = self.xvfb.as_ref().ok_or_else(|| {
             anyhow!(
                 "Xvfb is not installed; install it (apt install xvfb) or set OCU_XVFB to its path"

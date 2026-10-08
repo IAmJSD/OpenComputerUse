@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -57,6 +57,9 @@ impl Platform for WindowsPlatform {
     }
 
     fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>> {
+        if spec.active_window {
+            return attach_active(spec);
+        }
         let foreground = unsafe { GetForegroundWindow() };
         let job = launch::Job::spawn(spec)?;
         let name = std::path::Path::new(&spec.app)
@@ -64,11 +67,12 @@ impl Platform for WindowsPlatform {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut session = WindowsSession {
-            job,
+            owner: Owner::Job(job),
             name,
             uia: uia::Uia::new()?,
             closed: false,
             foreground: spec.foreground,
+            pinned: None,
         };
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut sent_back = Vec::new();
@@ -104,7 +108,7 @@ impl Platform for WindowsPlatform {
             let now = unsafe { GetForegroundWindow() };
             let mut owner = 0u32;
             unsafe { GetWindowThreadProcessId(now, Some(&mut owner)) };
-            if session.job.pids().contains(&owner) && !foreground.is_invalid() {
+            if session.owner.pids().contains(&owner) && !foreground.is_invalid() {
                 let _ = unsafe { SetForegroundWindow(foreground) };
             }
             if !windows.is_empty() {
@@ -115,6 +119,30 @@ impl Platform for WindowsPlatform {
         }
         Ok(Box::new(session))
     }
+}
+
+/// A session on the window in front, skipping the client's own apps. The
+/// app is not in a job: it was running before and keeps running after.
+fn attach_active(spec: &LaunchSpec) -> Result<Box<dyn Session>> {
+    let mut skip = launch::ancestors();
+    skip.extend(&spec.skip_pids);
+    let hwnd = capture::front_window(&skip)
+        .ok_or_else(|| anyhow!("no window is in front, other than the client's own"))?;
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    let process = launch::Process::open(pid)?;
+    let session = WindowsSession {
+        name: process.name(),
+        owner: Owner::Attached(process),
+        uia: uia::Uia::new()?,
+        closed: false,
+        foreground: spec.foreground,
+        pinned: Some(hwnd.0 as usize as u64),
+    };
+    if session.foreground {
+        bring_forward(hwnd);
+    }
+    Ok(Box::new(session))
 }
 
 /// Makes `hwnd` the foreground window. Windows only lets the foreground
@@ -143,14 +171,54 @@ fn bring_forward(hwnd: HWND) {
     sleep(Duration::from_millis(100));
 }
 
+/// Where a session's app came from: started in a kill-on-close job, or an
+/// app that was already running, whose window the session attached to.
+enum Owner {
+    Job(launch::Job),
+    Attached(launch::Process),
+}
+
+impl Owner {
+    fn pid(&self) -> u32 {
+        match self {
+            Owner::Job(job) => job.pid,
+            Owner::Attached(p) => p.pid,
+        }
+    }
+
+    fn pids(&self) -> Vec<u32> {
+        match self {
+            Owner::Job(job) => job.pids(),
+            Owner::Attached(p) => vec![p.pid],
+        }
+    }
+
+    fn alive(&self) -> bool {
+        match self {
+            Owner::Job(job) => job.alive(),
+            Owner::Attached(p) => p.alive(),
+        }
+    }
+
+    /// Ends a started app; an attached one is left running.
+    fn kill(&mut self) {
+        if let Owner::Job(job) = self {
+            job.kill();
+        }
+    }
+}
+
 pub struct WindowsSession {
-    job: launch::Job,
+    owner: Owner,
     name: String,
     uia: uia::Uia,
     closed: bool,
     /// Started with [`LaunchSpec::foreground`]: the window is brought to the
     /// front before every action.
     foreground: bool,
+    /// The window the session was attached to, which comes first in its
+    /// window list while it exists.
+    pinned: Option<u64>,
 }
 
 impl WindowsSession {
@@ -170,10 +238,24 @@ impl WindowsSession {
 impl Session for WindowsSession {
     fn describe(&self) -> Description {
         let mut details = BTreeMap::new();
-        details.insert(
-            "job".into(),
-            "the app and its children run in a kill-on-close job".into(),
-        );
+        match self.owner {
+            Owner::Job(_) => {
+                details.insert(
+                    "job".into(),
+                    "the app and its children run in a kill-on-close job".into(),
+                );
+            }
+            Owner::Attached(_) => {
+                details.insert(
+                    "active_window".into(),
+                    "attached to the window that was in front; it comes first".into(),
+                );
+                details.insert(
+                    "attached".into(),
+                    "already running; it is left open when the session ends".into(),
+                );
+            }
+        }
         if self.foreground {
             details.insert(
                 "foreground".into(),
@@ -182,13 +264,18 @@ impl Session for WindowsSession {
         }
         Description {
             app: self.name.clone(),
-            pid: Some(self.job.pid),
+            pid: Some(self.owner.pid()),
             details,
         }
     }
 
     fn windows(&mut self) -> Result<Vec<WindowInfo>> {
-        Ok(capture::windows(&self.job.pids()))
+        let mut windows = capture::windows(&self.owner.pids());
+        if let Some(i) = windows.iter().position(|w| Some(w.id) == self.pinned) {
+            let w = windows.remove(i);
+            windows.insert(0, w);
+        }
+        Ok(windows)
     }
 
     fn screenshot(&mut self, window: Option<u64>) -> Result<Screenshot> {
@@ -271,12 +358,12 @@ impl Session for WindowsSession {
     }
 
     fn is_alive(&mut self) -> bool {
-        self.job.alive()
+        self.owner.alive()
     }
 
     fn close(&mut self) {
         if !std::mem::replace(&mut self.closed, true) {
-            self.job.kill();
+            self.owner.kill();
         }
     }
 }

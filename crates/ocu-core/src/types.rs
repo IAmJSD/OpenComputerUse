@@ -26,6 +26,15 @@ pub struct LaunchSpec {
     /// instead of keeping it behind the user's windows (macOS, Windows).
     #[serde(default)]
     pub foreground: bool,
+    /// Attach to the window in front instead of starting `app`: the topmost
+    /// normal window not owned by one of `skip_pids` (macOS, Windows). Its
+    /// app is left running when the session ends.
+    #[serde(default)]
+    pub active_window: bool,
+    /// Processes whose windows never count as the one in front: the client
+    /// asking, and the apps it runs inside (a terminal, an editor).
+    #[serde(default)]
+    pub skip_pids: Vec<u32>,
     /// The virtual display's size, where the backend makes one (Linux).
     #[serde(default)]
     pub display_size: Option<Size>,

@@ -52,6 +52,9 @@ impl Platform for MacPlatform {
                 "OpenComputerUse needs the Accessibility permission. Open the OpenComputerUse app to grant it, then try again."
             );
         }
+        if spec.active_window {
+            return Ok(Box::new(session::attach_active(spec)?));
+        }
         Ok(Box::new(session::launch(spec)?))
     }
 

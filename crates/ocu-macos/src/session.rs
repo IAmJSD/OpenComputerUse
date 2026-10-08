@@ -273,6 +273,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         successor_of,
         launched_at: Instant::now(),
         foreground: spec.foreground,
+        pinned: None,
     };
     session.chromium = is_chromium(session.pid);
     // Wait for a window, putting the user's app back in front if this one
@@ -296,6 +297,42 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         session.bring_forward(first.as_ref());
     } else if let Some(before) = session.front_before {
         session.raise_user_app(before);
+    }
+    Ok(session)
+}
+
+/// A session on the window in front, skipping the client's own apps.
+pub fn attach_active(spec: &LaunchSpec) -> Result<MacSession> {
+    let mut skip: Vec<i32> = spec.skip_pids.iter().map(|&p| p as i32).collect();
+    skip.push(std::process::id() as i32);
+    let Some((pid, window)) = capture::front_window(&skip) else {
+        bail!("no window is in front, other than the client's own");
+    };
+    let name = running(pid)
+        .and_then(|a| a.localizedName())
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    let session = MacSession {
+        pid,
+        name,
+        launched: false,
+        child: None,
+        front_before: frontmost_pid(),
+        elements: ElementTable::default(),
+        closed: false,
+        chromium: is_chromium(pid),
+        gecko: running(pid)
+            .and_then(|a| a.bundleURL())
+            .and_then(|u| u.path())
+            .is_some_and(|p| is_gecko_bundle(Path::new(&p.to_string()))),
+        asked_for_tree: false,
+        successor_of: None,
+        launched_at: Instant::now(),
+        foreground: spec.foreground,
+        pinned: Some(window.id),
+    };
+    if session.foreground {
+        session.bring_forward(Some(&window));
     }
     Ok(session)
 }
@@ -371,6 +408,9 @@ pub struct MacSession {
     /// Started with [`LaunchSpec::foreground`]: the app is brought to the
     /// front before every action and left there.
     foreground: bool,
+    /// The window the session was attached to, which comes first in its
+    /// window list while it exists.
+    pinned: Option<u64>,
 }
 
 impl MacSession {
@@ -448,8 +488,18 @@ impl MacSession {
         }
     }
 
+    /// The app's windows, best first, with the pinned one leading.
+    fn listed(&self) -> Vec<WindowInfo> {
+        let mut windows = app_windows(self.pid);
+        if let Some(i) = windows.iter().position(|w| Some(w.id) == self.pinned) {
+            let w = windows.remove(i);
+            windows.insert(0, w);
+        }
+        windows
+    }
+
     fn window(&mut self, window: Option<u64>) -> Result<WindowInfo> {
-        let windows = app_windows(self.pid);
+        let windows = self.listed();
         pick_window(&windows, window).cloned()
     }
 
@@ -520,6 +570,12 @@ impl Session for MacSession {
                 "brought to the front before every action".into(),
             );
         }
+        if self.pinned.is_some() {
+            details.insert(
+                "active_window".into(),
+                "attached to the window that was in front; it comes first".into(),
+            );
+        }
         if !self.launched {
             details.insert(
                 "attached".into(),
@@ -539,7 +595,7 @@ impl Session for MacSession {
     }
 
     fn windows(&mut self) -> Result<Vec<WindowInfo>> {
-        Ok(app_windows(self.pid))
+        Ok(self.listed())
     }
 
     fn screenshot(&mut self, window: Option<u64>) -> Result<Screenshot> {

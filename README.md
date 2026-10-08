@@ -31,7 +31,7 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 
 | Tool | What it does |
 | --- | --- |
-| `start_session` | Start an app (a `.app` path, bundle id or name on macOS; an executable elsewhere) and return a session id and its windows; `foreground: true` (macOS, Windows) brings it to the front for every action instead of keeping it in the background |
+| `start_session` | Start an app (a `.app` path, bundle id or name on macOS; an executable elsewhere) and return a session id and its windows; `foreground: true` (macOS, Windows) brings it to the front for every action instead of keeping it in the background, and `active_window: true` (macOS, Windows) attaches to the window in front instead of starting an app |
 | `end_session`, `list_sessions`, `list_windows` | Manage sessions |
 | `screenshot` | Capture a session window, even a covered one; `ui_tree: true` adds the accessibility tree |
 | `get_ui_tree` | One line per element: `[e12] Button "Save" @(x,y wxh) actions=press` |

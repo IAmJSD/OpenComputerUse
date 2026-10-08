@@ -8,6 +8,9 @@ use std::os::windows::ffi::OsStrExt as _;
 use anyhow::{bail, Result};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
@@ -15,8 +18,10 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessW, GetExitCodeProcess, ResumeThread, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED,
-    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+    CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, OpenProcess,
+    QueryFullProcessImageNameW, ResumeThread, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, SW_SHOWNORMAL};
 
@@ -215,4 +220,84 @@ impl Drop for Job {
             let _ = CloseHandle(self.handle);
         }
     }
+}
+
+/// A process the session did not start (the app of a window it attached
+/// to): watched, never ended.
+pub struct Process {
+    pub pid: u32,
+    handle: HANDLE,
+}
+
+unsafe impl Send for Process {}
+
+impl Process {
+    pub fn open(pid: u32) -> Result<Self> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }?;
+        Ok(Self { pid, handle })
+    }
+
+    /// The executable's name without its extension: "notepad".
+    pub fn name(&self) -> String {
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = unsafe {
+            QueryFullProcessImageNameW(
+                self.handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+        };
+        if ok.is_err() {
+            return String::new();
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        std::path::Path::new(&path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    pub fn alive(&self) -> bool {
+        let mut code = 0u32;
+        unsafe { GetExitCodeProcess(self.handle, &mut code) }.is_ok() && code == 259
+        // STILL_ACTIVE
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+/// This process and its ancestors: the client that started the server and
+/// the apps it runs inside (a terminal, an editor).
+pub fn ancestors() -> Vec<u32> {
+    let mut parents = std::collections::HashMap::new();
+    unsafe {
+        if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut more = Process32FirstW(snap, &mut entry).is_ok();
+            while more {
+                parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+                more = Process32NextW(snap, &mut entry).is_ok();
+            }
+            let _ = CloseHandle(snap);
+        }
+    }
+    let mut out = Vec::new();
+    let mut pid = unsafe { GetCurrentProcessId() };
+    // Parent ids can be stale and reused, so stop at a repeat.
+    while pid != 0 && !out.contains(&pid) && out.len() < 64 {
+        out.push(pid);
+        pid = parents.get(&pid).copied().unwrap_or(0);
+    }
+    out
 }
