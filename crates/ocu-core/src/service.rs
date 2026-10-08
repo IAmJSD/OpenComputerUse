@@ -226,6 +226,11 @@ impl Service {
             Request::StartSession(spec) => {
                 let mut session = self.platform.launch(&spec)?;
                 let d = session.describe();
+                // Driving itself, it answers its own accessibility requests
+                // off the main thread, which AppKit aborts on.
+                if d.pid == Some(std::process::id()) {
+                    bail!("{} can't drive itself", d.app);
+                }
                 let windows = session.windows().unwrap_or_default();
                 let info = SessionInfo {
                     id: self.new_id(),
