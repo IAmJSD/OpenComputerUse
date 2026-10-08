@@ -22,6 +22,10 @@ pub struct LaunchSpec {
     /// (macOS; elsewhere every launch is a fresh process).
     #[serde(default)]
     pub new_instance: bool,
+    /// Bring the app to the front when it starts and before every action,
+    /// instead of keeping it behind the user's windows (macOS, Windows).
+    #[serde(default)]
+    pub foreground: bool,
     /// The virtual display's size, where the backend makes one (Linux).
     #[serde(default)]
     pub display_size: Option<Size>,

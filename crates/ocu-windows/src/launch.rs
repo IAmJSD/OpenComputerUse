@@ -18,7 +18,7 @@ use windows::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, ResumeThread, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED,
     CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
 };
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE;
+use windows::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, SW_SHOWNORMAL};
 
 use ocu_core::LaunchSpec;
 
@@ -128,8 +128,12 @@ impl Job {
             let si = STARTUPINFOW {
                 cb: std::mem::size_of::<STARTUPINFOW>() as u32,
                 dwFlags: STARTF_USESHOWWINDOW,
-                // Show, but do not take the foreground.
-                wShowWindow: SW_SHOWNOACTIVATE.0 as u16,
+                // Show, but do not take the foreground unless asked to.
+                wShowWindow: if spec.foreground {
+                    SW_SHOWNORMAL.0 as u16
+                } else {
+                    SW_SHOWNOACTIVATE.0 as u16
+                },
                 ..Default::default()
             };
             let mut pi = PROCESS_INFORMATION::default();

@@ -1,7 +1,8 @@
 //! The Windows backend. Apps start inside a kill-on-close Job Object
 //! (so they die with the MCP server), shown without activating and sent to
-//! the back; they are captured with `PrintWindow`, read and pressed through
-//! UI Automation, and sent input as window messages.
+//! the back (or, for a foreground session, brought to the front before
+//! every action); they are captured with `PrintWindow`, read and pressed
+//! through UI Automation, and sent input as window messages.
 #![cfg(windows)]
 
 mod capture;
@@ -14,13 +15,15 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::POINT;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow, SetWindowPos, HWND_BOTTOM,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, SetForegroundWindow,
+    SetWindowPos, ShowWindow, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE,
 };
 
 use ocu_core::keys::{parse_chord, parse_chords};
@@ -65,11 +68,21 @@ impl Platform for WindowsPlatform {
             name,
             uia: uia::Uia::new()?,
             closed: false,
+            foreground: spec.foreground,
         };
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut sent_back = Vec::new();
         while Instant::now() < deadline && session.is_alive() {
             let windows = session.windows()?;
+            if session.foreground {
+                if let Some(w) = windows.first() {
+                    sleep(Duration::from_millis(300));
+                    bring_forward(capture::hwnd(w.id));
+                    break;
+                }
+                sleep(Duration::from_millis(150));
+                continue;
+            }
             // New windows go behind everything else, and focus goes back.
             for w in &windows {
                 if !sent_back.contains(&w.id) {
@@ -104,11 +117,40 @@ impl Platform for WindowsPlatform {
     }
 }
 
+/// Makes `hwnd` the foreground window. Windows only lets the foreground
+/// thread hand the foreground on, so this joins that thread's input queue
+/// for the moment it takes.
+fn bring_forward(hwnd: HWND) {
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let now = GetForegroundWindow();
+        if now == hwnd {
+            return;
+        }
+        let ours = GetCurrentThreadId();
+        let theirs = GetWindowThreadProcessId(now, None);
+        let attached =
+            theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, true).as_bool();
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        if attached {
+            let _ = AttachThreadInput(ours, theirs, false);
+        }
+    }
+    // Long enough for the activation to reach the app before input does.
+    sleep(Duration::from_millis(100));
+}
+
 pub struct WindowsSession {
     job: launch::Job,
     name: String,
     uia: uia::Uia,
     closed: bool,
+    /// Started with [`LaunchSpec::foreground`]: the window is brought to the
+    /// front before every action.
+    foreground: bool,
 }
 
 impl WindowsSession {
@@ -132,6 +174,12 @@ impl Session for WindowsSession {
             "job".into(),
             "the app and its children run in a kill-on-close job".into(),
         );
+        if self.foreground {
+            details.insert(
+                "foreground".into(),
+                "brought to the front before every action".into(),
+            );
+        }
         Description {
             app: self.name.clone(),
             pid: Some(self.job.pid),
@@ -160,6 +208,9 @@ impl Session for WindowsSession {
         }
         let w = self.window(window)?;
         let top = capture::hwnd(w.id);
+        if self.foreground {
+            bring_forward(top);
+        }
         let origin = (w.frame.x, w.frame.y);
         match action {
             Action::ElementAction { element, name } => self

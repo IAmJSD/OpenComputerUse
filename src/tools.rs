@@ -102,13 +102,14 @@ fn base_tools() -> Vec<Value> {
     vec![
         tool(
             "start_session",
-            "Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. Returns the session id and the app's windows.",
+            "Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front, unless `foreground` is set. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. Returns the session id and the app's windows.",
             json!({
                 "app": { "type": "string" },
                 "args": { "type": "array", "items": { "type": "string" } },
                 "env": { "type": "object", "additionalProperties": { "type": "string" } },
                 "cwd": { "type": "string" },
                 "new_instance": { "type": "boolean", "description": "macOS: start a separate instance even when the app is already running. Otherwise a running app is attached to, and left running when the session ends." },
+                "foreground": { "type": "boolean", "description": "macOS and Windows: open the app in front and bring it and the target window to the front before every action, so the user can watch. Default false (the app stays in the background). Linux sessions are always on their own virtual display." },
                 "display_width": { "type": "integer", "description": "Linux: the virtual display's width. Default 1440." },
                 "display_height": { "type": "integer", "description": "Linux: the virtual display's height. Default 900." },
             }),
@@ -386,6 +387,7 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
                 env: serde_json::from_value(args.get("env").cloned().unwrap_or(json!({})))?,
                 cwd: opt_str(args, "cwd"),
                 new_instance: flag(args, "new_instance", false),
+                foreground: flag(args, "foreground", false),
                 display_size,
             };
             let Response::Session { info, windows } =

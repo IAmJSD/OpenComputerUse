@@ -163,7 +163,7 @@ fn open_bundle(bundle: &Path, spec: &LaunchSpec) -> Result<i32> {
     let workspace = NSWorkspace::sharedWorkspace();
     let url = NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
     let config = NSWorkspaceOpenConfiguration::configuration();
-    config.setActivates(false);
+    config.setActivates(spec.foreground);
     config.setAddsToRecentItems(false);
     config.setCreatesNewApplicationInstance(spec.new_instance);
     if !spec.args.is_empty() {
@@ -272,13 +272,16 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         asked_for_tree: false,
         successor_of,
         launched_at: Instant::now(),
+        foreground: spec.foreground,
     };
     session.chromium = is_chromium(session.pid);
     // Wait for a window, putting the user's app back in front if this one
     // grabbed focus while starting.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        session.restore_front();
+        if !session.foreground {
+            session.restore_front();
+        }
         // A relaunching app is briefly without a process; give its
         // successor a moment to appear before calling it gone.
         let gone = !session.is_alive() && session.launched_at.elapsed() > Duration::from_secs(8);
@@ -288,7 +291,10 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         sleep(Duration::from_millis(150));
     }
     sleep(Duration::from_millis(300));
-    if let Some(before) = session.front_before {
+    if session.foreground {
+        let first = app_windows(session.pid).into_iter().next();
+        session.bring_forward(first.as_ref());
+    } else if let Some(before) = session.front_before {
         session.raise_user_app(before);
     }
     Ok(session)
@@ -362,9 +368,30 @@ pub struct MacSession {
     /// replaces it is the app.
     successor_of: Option<(String, Vec<i32>)>,
     launched_at: Instant,
+    /// Started with [`LaunchSpec::foreground`]: the app is brought to the
+    /// front before every action and left there.
+    foreground: bool,
 }
 
 impl MacSession {
+    /// Makes the app frontmost and `window` its main, topmost window.
+    fn bring_forward(&self, window: Option<&WindowInfo>) {
+        if frontmost_pid() != Some(self.pid) && !crate::sky::bring_to_front(self.pid) {
+            if let Some(app) = running(self.pid) {
+                #[allow(deprecated)]
+                app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+            }
+        }
+        if let Some(w) = window {
+            if let Ok(el) = ax::window_element(self.pid, Some(w.id as u32)) {
+                let _ = el.perform("AXRaise");
+                let _ = el.set("AXMain", CFBoolean::new(true));
+            }
+        }
+        // Long enough for the activation to reach the app before input does.
+        sleep(Duration::from_millis(100));
+    }
+
     /// Gives focus back to whatever had it before the launch, so the session
     /// stays in the background.
     fn restore_front(&self) {
@@ -487,6 +514,12 @@ impl MacSession {
 impl Session for MacSession {
     fn describe(&self) -> Description {
         let mut details = BTreeMap::new();
+        if self.foreground {
+            details.insert(
+                "foreground".into(),
+                "brought to the front before every action".into(),
+            );
+        }
         if !self.launched {
             details.insert(
                 "attached".into(),
@@ -519,6 +552,11 @@ impl Session for MacSession {
     /// user's app back on top.
     fn screenshot_uncovered(&mut self, window: Option<u64>) -> Result<Screenshot> {
         let w = self.window(window)?;
+        if self.foreground {
+            self.bring_forward(Some(&w));
+            sleep(Duration::from_millis(80));
+            return capture::capture(&w);
+        }
         let front = frontmost_pid();
         let el = ax::window_element(self.pid, Some(w.id as u32))?;
         el.perform("AXRaise")?;
@@ -570,6 +608,10 @@ impl Session for MacSession {
     }
 
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
+        if self.foreground && !matches!(action, Action::Wait { .. }) {
+            let w = self.window(window).ok();
+            self.bring_forward(w.as_ref());
+        }
         match action {
             Action::ElementAction { element, name } => {
                 let el = self.elements.get(element)?;
@@ -605,7 +647,12 @@ impl Session for MacSession {
         }
         let w = self.window(window)?;
         let t = self.target(&w);
-        let _focus = t.prepare(user_focus());
+        // In front already, the app takes input without borrowing focus.
+        let _focus = if self.foreground {
+            None
+        } else {
+            t.prepare(user_focus())
+        };
         match action {
             Action::Click {
                 x,
