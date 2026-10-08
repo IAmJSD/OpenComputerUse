@@ -154,11 +154,11 @@ impl Agent {
         }
     }
 
-    /// The menu's Check for Updates: the window, checking.
+    /// The menu's Check for Updates: the window, checking, then an alert.
     fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         self.show_status(cx);
         if let Some(h) = self.status {
-            let _ = h.update(cx, |s, _, cx| s.check_for_updates(cx));
+            let _ = h.update(cx, |s, window, cx| s.check_for_updates(true, window, cx));
         }
     }
 
@@ -366,8 +366,12 @@ pub fn run(show: bool) -> Result<()> {
         }
         {
             let agent = agent.clone();
+            // With the window focused, the menu dispatches through it, so it
+            // can't be reached until that's over: without waiting, it'd look
+            // closed and a second one would open.
             cx.on_action(move |_: &menu::CheckForUpdates, cx| {
-                agent.update(cx, |a, cx| a.check_for_updates(cx))
+                let agent = agent.clone();
+                cx.defer(move |cx| agent.update(cx, |a, cx| a.check_for_updates(cx)));
             });
         }
         cx.on_window_closed({

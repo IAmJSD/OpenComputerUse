@@ -8,8 +8,8 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, px, rgb, App, AppContext as _, ClipboardItem, Context, ElementId, FocusHandle,
-    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, PromptButton,
+    PromptLevel, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
 };
 
 use ocu_core::{Permission, Service, SessionInfo};
@@ -645,8 +645,15 @@ impl Status {
         })
     }
 
-    /// Asks GitHub for the latest release, off the main thread.
-    pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+    /// Asks GitHub for the latest release, off the main thread. `announce`,
+    /// for the menu's check, also says what it found in an alert, since the
+    /// Updates section is likely scrolled out of sight.
+    pub fn check_for_updates(
+        &mut self,
+        announce: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.updates.checking || self.updates.progress.is_some() {
             return;
         }
@@ -654,12 +661,80 @@ impl Status {
         self.updates.error = None;
         cx.notify();
         let task = cx.background_executor().spawn(async { update::check() });
-        cx.spawn(async move |this, cx| {
+        // Long enough to see "Checking…", so a click visibly does something.
+        let shown = cx.background_executor().timer(Duration::from_millis(600));
+        cx.spawn_in(window, async move |this, cx| {
             let status = task.await;
+            shown.await;
             update::mark_checked();
-            let _ = this.update(cx, |s, cx| s.show_update(status, cx));
+            let _ = this.update_in(cx, |s, window, cx| {
+                if announce {
+                    s.announce_update(&status, window, cx);
+                }
+                s.show_update(status, cx);
+            });
         })
         .detach();
+    }
+
+    /// An alert with a check's result, offering the update if there is one.
+    fn announce_update(&self, status: &UpdateStatus, window: &mut Window, cx: &mut Context<Self>) {
+        let current = update::current_version();
+        let answer = match status {
+            UpdateStatus::UpToDate => window.prompt(
+                PromptLevel::Info,
+                "You're up to date.",
+                Some(&format!("OpenComputerUse {current} is the latest version.")),
+                &[PromptButton::Ok("OK".into())],
+                cx,
+            ),
+            UpdateStatus::Failed(e) => window.prompt(
+                PromptLevel::Warning,
+                "Couldn't check for updates.",
+                Some(e),
+                &[PromptButton::Ok("OK".into())],
+                cx,
+            ),
+            UpdateStatus::Available(up) => {
+                let mut detail = format!("You have {current}.");
+                if up.install.is_some() && !self.sessions.is_empty() {
+                    detail.push_str(
+                        " Updating restarts the app, which ends the sessions running now.",
+                    );
+                }
+                let action = if up.install.is_some() {
+                    "Update"
+                } else {
+                    "Open Release Page"
+                };
+                let answer = window.prompt(
+                    PromptLevel::Info,
+                    &format!("OpenComputerUse {} is available.", up.version),
+                    Some(&detail),
+                    &[action, "Later"],
+                    cx,
+                );
+                let up = up.clone();
+                cx.spawn(async move |this, cx| {
+                    if answer.await != Ok(0) {
+                        return;
+                    }
+                    match up.install {
+                        Some(installer) => {
+                            let _ = this.update(cx, |s, cx| s.install_update(installer, cx));
+                        }
+                        None => {
+                            let _ = std::process::Command::new("/usr/bin/open")
+                                .arg(&up.page)
+                                .spawn();
+                        }
+                    }
+                })
+                .detach();
+                return;
+            }
+        };
+        drop(answer);
     }
 
     /// Shows the result of a check, made here or by the background check.
@@ -783,7 +858,9 @@ impl Status {
                 Button::new("check-updates", "Check for Updates")
                     .flex_none()
                     .disabled(busy)
-                    .on_click(cx.listener(|s, _, _, cx| s.check_for_updates(cx))),
+                    .on_click(
+                        cx.listener(|s, _, window, cx| s.check_for_updates(false, window, cx)),
+                    ),
             ),
         };
         div()
