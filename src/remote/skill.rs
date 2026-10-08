@@ -281,7 +281,9 @@ mod tests {
         let entry = host_entry(&device("Laptop", "http://x.ts.net:8642"), "ocu_k");
         let p = agent_prompt("---\nname: x\n---\n", &entry);
         assert!(p.contains("-----BEGIN SKILL-----\n---\nname: x\n---\n-----END SKILL-----\n"));
-        assert!(p.contains(&format!("-----BEGIN HOSTS-----\n{entry}-----END HOSTS-----\n")));
+        assert!(p.contains(&format!(
+            "-----BEGIN HOSTS-----\n{entry}-----END HOSTS-----\n"
+        )));
         assert!(p.contains("~/.claude/skills/opencomputeruse-remote/SKILL.md"));
         assert!(p.contains(HOSTS_FILE));
         assert!(p.find("BEGIN HOSTS") < p.find("BEGIN SKILL"));
@@ -303,7 +305,8 @@ mod tests {
     /// Runs `script` in `sh` with the helpers loaded and `hosts` as the hosts
     /// file: (exit code, stdout, stderr).
     fn sh(name: &str, hosts: &str, script: &str) -> (i32, String, String) {
-        let dir = std::env::temp_dir().join(format!("ocu-skill-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ocu-skill-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ocu.sh"), OCU_SH).unwrap();
         std::fs::write(dir.join("hosts.yaml"), hosts).unwrap();
@@ -326,21 +329,30 @@ mod tests {
     #[test]
     fn the_shell_helper_reads_the_hosts_file() {
         let (code, out, _) = sh("entry", HOSTS, "_ocu_entry studio");
-        assert_eq!((code, out.as_str()), (0, "https://studio.example.com\tocu_BBB-222\n"));
+        assert_eq!(
+            (code, out.as_str()),
+            (0, "https://studio.example.com\tocu_BBB-222\n")
+        );
         // The last entry of a repeated name wins.
         let (_, out, _) = sh("dup", HOSTS, "_ocu_entry work-mac");
         assert_eq!(out, "http://work-mac.ts.net:9000\tocu_CCC333\n");
         // Windows line endings.
         let crlf = HOSTS.replace('\n', "\r\n");
         let (code, out, _) = sh("crlf", &crlf, "_ocu_entry studio");
-        assert_eq!((code, out.as_str()), (0, "https://studio.example.com\tocu_BBB-222\n"));
+        assert_eq!(
+            (code, out.as_str()),
+            (0, "https://studio.example.com\tocu_BBB-222\n")
+        );
     }
 
     #[test]
     fn listing_hosts_never_shows_a_key() {
         let (code, out, _) = sh("list", HOSTS, "ocu_hosts");
         assert_eq!(code, 0);
-        assert_eq!(out, "work-mac\thttp://work-mac.ts.net:9000\nstudio\thttps://studio.example.com\n");
+        assert_eq!(
+            out,
+            "work-mac\thttp://work-mac.ts.net:9000\nstudio\thttps://studio.example.com\n"
+        );
         assert!(!out.contains("ocu_"));
     }
 

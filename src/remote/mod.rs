@@ -76,7 +76,10 @@ pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)?;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)

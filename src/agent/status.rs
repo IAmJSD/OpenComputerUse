@@ -294,11 +294,9 @@ fn status(label: &str, good: bool) -> gpui::Div {
 }
 
 fn client_states() -> [ClientState; Client::ALL.len()] {
-    Client::ALL.map(|c| {
-        ClientState {
-            found: clients::find(c).is_some(),
-            registration: clients::registration(c),
-        }
+    Client::ALL.map(|c| ClientState {
+        found: clients::find(c).is_some(),
+        registration: clients::registration(c),
     })
 }
 
@@ -619,8 +617,22 @@ impl Status {
     /// agent set itself up, or as the hosts-file entry and the skill.
     fn issued_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let p = palette();
-        let dim = |t: String| div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(t);
-        let Some(Panel::Issued { device, entry, skill, prompt, tab, note, selecting }) = &self.remote.panel else {
+        let dim = |t: String| {
+            div()
+                .text_color(rgb(p.text_dim))
+                .text_size(px(11.5))
+                .child(t)
+        };
+        let Some(Panel::Issued {
+            device,
+            entry,
+            skill,
+            prompt,
+            tab,
+            note,
+            selecting,
+        }) = &self.remote.panel
+        else {
             return None;
         };
         let tab = *tab;
@@ -631,7 +643,13 @@ impl Status {
         };
         let set_tab = |to: IssuedTab| {
             cx.listener(move |s: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                if let Some(Panel::Issued { tab, note, selecting, .. }) = &mut s.remote.panel {
+                if let Some(Panel::Issued {
+                    tab,
+                    note,
+                    selecting,
+                    ..
+                }) = &mut s.remote.panel
+                {
                     *tab = to;
                     *note = None;
                     *selecting = None;
@@ -639,13 +657,14 @@ impl Status {
                 cx.notify();
             })
         };
-        let copy_button = |id: &'static str, label: &'static str, text: String, msg: &'static str| {
-            Button::new(id, label).on_click(cx.listener(move |s, _, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                note_msg(s, msg.into());
-                cx.notify();
-            }))
-        };
+        let copy_button =
+            |id: &'static str, label: &'static str, text: String, msg: &'static str| {
+                Button::new(id, label).on_click(cx.listener(move |s, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    note_msg(s, msg.into());
+                    cx.notify();
+                }))
+            };
         // A block of text to read, select and copy, that scrolls on its
         // own: the wheel stops here, as gpui otherwise scrolls every scroll
         // area under the pointer at once. Its own scroll id per block keeps
@@ -657,7 +676,10 @@ impl Status {
             };
             let pressed = text.clone();
             div()
-                .id(ElementId::Name(SharedString::from(format!("{}-scroll", block.id()))))
+                .id(ElementId::Name(SharedString::from(format!(
+                    "{}-scroll",
+                    block.id()
+                ))))
                 .overflow_y_scroll()
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .rounded(px(6.0))
@@ -695,7 +717,11 @@ impl Status {
                             cx.notify();
                         }))
                         .on_select_to(cx.listener(move |s, at: &usize, _, cx| {
-                            if let Some(Panel::Issued { selecting: Some((b, edit)), .. }) = &mut s.remote.panel {
+                            if let Some(Panel::Issued {
+                                selecting: Some((b, edit)),
+                                ..
+                            }) = &mut s.remote.panel
+                            {
                                 if *b == block {
                                     edit.extend_to(*at);
                                     cx.notify();
@@ -708,15 +734,26 @@ impl Status {
             .flex()
             .gap_1()
             .pb_1()
-            .child(Chip::new("tab-prompt", "Prompt for an agent").selected(tab == IssuedTab::Prompt).on_click(set_tab(IssuedTab::Prompt)))
-            .child(Chip::new("tab-skill", "Skill file").selected(tab == IssuedTab::Skill).on_click(set_tab(IssuedTab::Skill)));
+            .child(
+                Chip::new("tab-prompt", "Prompt for an agent")
+                    .selected(tab == IssuedTab::Prompt)
+                    .on_click(set_tab(IssuedTab::Prompt)),
+            )
+            .child(
+                Chip::new("tab-skill", "Skill file")
+                    .selected(tab == IssuedTab::Skill)
+                    .on_click(set_tab(IssuedTab::Skill)),
+            );
         let done = Button::new("done-skill", "Done")
             .ghost()
             .on_click(cx.listener(|s, _, _, cx| {
                 s.remote.panel = None;
                 cx.notify();
             }));
-        let modal = Modal::new(format!("Key for {device}")).width(600.0).fill().child(tabs);
+        let modal = Modal::new(format!("Key for {device}"))
+            .width(600.0)
+            .fill()
+            .child(tabs);
         let modal = match tab {
             IssuedTab::Prompt => modal
                 .child(dim(format!(
@@ -768,18 +805,14 @@ impl Status {
                     .action(copy_button("copy-skill", "Copy Skill", skill.clone(), "Copied the skill.").primary())
             }
         };
-        Some(
-            modal
-                .when_some(note.clone(), |d, n| d.child(dim(n)))
-                .when(!self.config.http.enabled, |d| {
-                    d.child(
-                        div()
-                            .text_color(rgb(p.warning))
-                            .text_size(px(11.5))
-                            .child("The HTTP server is off; turn on Serve over HTTP before the device connects."),
-                    )
-                }),
-        )
+        Some(modal.when_some(note.clone(), |d, n| d.child(dim(n))).when(
+            !self.config.http.enabled,
+            |d| {
+                d.child(div().text_color(rgb(p.warning)).text_size(px(11.5)).child(
+                    "The HTTP server is off; turn on Serve over HTTP before the device connects.",
+                ))
+            },
+        ))
     }
 
     /// Generate Skill, in Other devices: the form, and the key it issues.
@@ -1315,7 +1348,11 @@ impl Status {
 
     fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // The modal's text is read-only: ⌘A and ⌘C, nothing that edits.
-        if let Some(Panel::Issued { selecting: Some((_, edit)), .. }) = &mut self.remote.panel {
+        if let Some(Panel::Issued {
+            selecting: Some((_, edit)),
+            ..
+        }) = &mut self.remote.panel
+        {
             let m = ev.keystroke.modifiers;
             if (m.platform || m.control) && matches!(ev.keystroke.key.as_str(), "a" | "c") {
                 edit.key(ev, cx);

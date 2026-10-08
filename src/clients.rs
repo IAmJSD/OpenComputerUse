@@ -618,7 +618,10 @@ mod tests {
         assert_eq!(Client::parse("Kimi").unwrap(), Client::Kimi);
         assert_eq!(Client::ALL.len(), 5);
         assert_eq!(Client::ALL[Client::Kimi as usize], Client::Kimi);
-        assert!(Client::parse("nope").unwrap_err().to_string().contains("kimi"));
+        assert!(Client::parse("nope")
+            .unwrap_err()
+            .to_string()
+            .contains("kimi"));
     }
 
     #[test]
