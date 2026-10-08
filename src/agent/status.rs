@@ -97,8 +97,10 @@ pub struct Status {
     clients: [ClientState; Client::ALL.len()],
     busy: Option<Client>,
     client_message: Option<String>,
-    /// The generic skill's text, while it is showing under the client list.
+    /// The generic skill's text, while it is showing in Other devices.
     skill_preview: Option<String>,
+    /// What the last skill button did.
+    skill_message: Option<String>,
     updates: Updates,
     remote: Remote,
     /// "Work while the Mac is locked": whether the privileged pieces are in
@@ -331,6 +333,7 @@ impl Status {
             busy: None,
             client_message: None,
             skill_preview: None,
+            skill_message: None,
             lock_installed: ocu_macos::lock::installed(),
             lock_busy: false,
             lock_message: None,
@@ -698,12 +701,12 @@ impl Status {
             .into_any_element()
     }
 
-    /// Generate Skill, below the MCP clients: the form, and the key it issues.
+    /// Generate Skill, in Other devices: the form, and the key it issues.
     fn skill_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
         let dim = |t: String| div().text_color(rgb(p.text_dim)).child(t);
         let section = div().flex().flex_col().gap_2().child(dim(format!(
-            "Add skill installs one generic skill in a client. It reads each computer's URL and key from {}, so one file serves several. Generate Skill makes a key for a device and the entry that device adds to that file.",
+            "Generate Skill makes a key for a device and the entry that device adds to its {}.",
             skill::HOSTS_FILE
         )).text_size(px(11.5)));
         match &self.remote.panel {
@@ -752,6 +755,100 @@ impl Status {
         })
     }
 
+    /// The skill that lets agents on this computer drive other computers:
+    /// added to each agent that takes skills, or copied for any other.
+    fn agent_skills(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Drive other computers from here"))
+            .child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(format!(
+                "One skill lets agents here drive any computer you have a key for. It reads each computer's URL and key from {}, so one file serves several.",
+                skill::HOSTS_FILE
+            )))
+            .children(Client::ALL.iter().filter(|&&c| self.clients[c as usize].skill_available).map(|&client| {
+                let state = &self.clients[client as usize];
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().min_w_0().child(client.label()))
+                    .child(div().w(px(105.0)).flex_none().child(if state.skill_installed {
+                        status("Added", true)
+                    } else {
+                        status("Not added", false)
+                    }))
+                    .child(
+                        Button::new(("add-skill", client as usize), if state.skill_installed { "Update skill" } else { "Add skill" })
+                            .flex_none()
+                            .on_click(cx.listener(move |s, _, _, cx| {
+                                s.set_skill(client, true);
+                                cx.notify();
+                            })),
+                    )
+                    .when(state.skill_installed, |d| {
+                        d.child(
+                            Button::new(("remove-skill", client as usize), "Remove skill")
+                                .flex_none()
+                                .ghost()
+                                .on_click(cx.listener(move |s, _, _, cx| {
+                                    s.set_skill(client, false);
+                                    cx.notify();
+                                })),
+                        )
+                    })
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().text_color(rgb(p.text_dim)).child("Any other agent"))
+                    .child(Button::new("preview-skill", if self.skill_preview.is_some() { "Hide preview" } else { "Preview" }).flex_none().on_click(cx.listener(|s, _, _, cx| {
+                        s.skill_preview = match s.skill_preview {
+                            Some(_) => None,
+                            None => Some(skill::render_generic(&crate::tools::list())),
+                        };
+                        cx.notify();
+                    })))
+                    .child(Button::new("copy-generic", "Copy skill").flex_none().on_click(cx.listener(|s, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(skill::render_generic(&crate::tools::list())));
+                        s.skill_message = Some("Copied the skill.".into());
+                        cx.notify();
+                    })))
+                    .child(Button::new("save-generic", "Save skill").flex_none().on_click(cx.listener(|s, _, _, cx| {
+                        let text = skill::render_generic(&crate::tools::list());
+                        s.skill_message = Some(match remote::save_download(skill::GENERIC_SKILL_NAME, "SKILL.md", &text) {
+                            Ok(path) => {
+                                let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
+                                format!("Saved {}.", path.display())
+                            }
+                            Err(e) => format!("Couldn't save: {e:#}"),
+                        });
+                        cx.notify();
+                    }))),
+            )
+            .when_some(self.skill_preview.clone(), |d, text| {
+                d.child(
+                    div()
+                        .id("generic-preview")
+                        .max_h(px(260.0))
+                        .overflow_y_scroll()
+                        .p_2()
+                        .rounded(px(6.0))
+                        .bg(rgb(p.deep_bg))
+                        .font_family("Menlo")
+                        .text_size(px(11.0))
+                        .child(text),
+                )
+            })
+            .when_some(self.skill_message.clone(), |d, m| {
+                d.child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(m))
+            })
+    }
+
     fn set_skill(&mut self, client: Client, add: bool) {
         let result = if add {
             skills::add(client).map(|_| {
@@ -760,7 +857,7 @@ impl Status {
         } else {
             skills::remove(client).map(|()| format!("Removed the skill from {}.", client.label()))
         };
-        self.client_message = Some(result.unwrap_or_else(|e| format!("{e:#}")));
+        self.skill_message = Some(result.unwrap_or_else(|e| format!("{e:#}")));
         self.clients = client_states();
     }
 
@@ -874,9 +971,13 @@ impl Status {
         if matches!(self.remote.panel, Some(Panel::Issued { regen: true, .. })) {
             section = section.child(self.issued_panel(cx));
         }
-        section.when_some(self.remote.error.clone(), |d, e| {
-            d.child(div().text_color(rgb(p.warning)).child(e))
-        })
+        section
+            .when_some(self.remote.error.clone(), |d, e| {
+                d.child(div().text_color(rgb(p.warning)).child(e))
+            })
+            .child(self.skill_section(cx))
+            .child(Divider::horizontal())
+            .child(self.agent_skills(cx))
     }
 
     /// Asks GitHub for the latest release, off the main thread. `announce`,
@@ -1479,25 +1580,6 @@ impl Render for Status {
                                             )
                                         })
                                     }))
-                                    .when(state.skill_available, |d| {
-                                        d.child(div().flex_none().flex().justify_end().gap_2().child(
-                                            Button::new(("add-skill", client as usize), "Add skill")
-                                                .on_click(cx.listener(move |s, _, _, cx| {
-                                                    s.set_skill(client, true);
-                                                    cx.notify();
-                                                })),
-                                        )
-                                        .when(state.skill_installed, |d| {
-                                            d.child(
-                                                Button::new(("remove-skill", client as usize), "Remove skill")
-                                                    .ghost()
-                                                    .on_click(cx.listener(move |s, _, _, cx| {
-                                                        s.set_skill(client, false);
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                        }))
-                                    })
                             )
                             .when_some(elsewhere, |d, path| {
                                 d.child(
@@ -1523,51 +1605,6 @@ impl Render for Status {
                                 cx.notify();
                             }))),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().flex_1().min_w_0().text_color(rgb(p.text_dim)).child("Generic skill (any agent)"))
-                            .child(Button::new("preview-skill", if self.skill_preview.is_some() { "Hide preview" } else { "Preview" }).flex_none().on_click(cx.listener(|s, _, _, cx| {
-                                s.skill_preview = match s.skill_preview {
-                                    Some(_) => None,
-                                    None => Some(skill::render_generic(&crate::tools::list())),
-                                };
-                                cx.notify();
-                            })))
-                            .child(Button::new("copy-generic", "Copy skill").flex_none().on_click(cx.listener(|s, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(skill::render_generic(&crate::tools::list())));
-                                s.client_message = Some("Copied the skill.".into());
-                                cx.notify();
-                            })))
-                            .child(Button::new("save-generic", "Save skill").flex_none().on_click(cx.listener(|s, _, _, cx| {
-                                let text = skill::render_generic(&crate::tools::list());
-                                s.client_message = Some(match remote::save_download(skill::GENERIC_SKILL_NAME, "SKILL.md", &text) {
-                                    Ok(path) => {
-                                        let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
-                                        format!("Saved {}.", path.display())
-                                    }
-                                    Err(e) => format!("Couldn't save: {e:#}"),
-                                });
-                                cx.notify();
-                            }))),
-                    )
-                    .when_some(self.skill_preview.clone(), |d, text| {
-                        d.child(
-                            div()
-                                .id("generic-preview")
-                                .max_h(px(260.0))
-                                .overflow_y_scroll()
-                                .p_2()
-                                .rounded(px(6.0))
-                                .bg(rgb(p.deep_bg))
-                                .font_family("Menlo")
-                                .text_size(px(11.0))
-                                .child(text),
-                        )
-                    })
-                    .child(self.skill_section(cx))
                     // Sessions.
                     .child(Self::section("Sessions"))
                     .when(self.sessions.is_empty(), |d| {
