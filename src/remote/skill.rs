@@ -1,7 +1,8 @@
-//! The skill a device installs to drive this computer: a `SKILL.md` holding
-//! the URL, the device's key, and how to call every tool over HTTP. It is
-//! what generating (or regenerating) a key produces, and the only place the
-//! key is ever shown.
+//! What a device needs to drive this computer: the generic skill (how to
+//! call every tool over HTTP, the same for every computer), this computer's
+//! entry for the device's hosts file (its URL and the device's key), and a
+//! prompt holding both for the device's agent to set up. Generating (or
+//! regenerating) a key produces them, and is the only time the key is shown.
 
 use std::fmt::Write as _;
 
@@ -9,16 +10,6 @@ use serde_json::Value;
 
 use super::devices::{computer_name, host_slug, Device};
 
-/// The skill's directory name, which is also its `name`.
-pub fn skill_name() -> String {
-    format!("computer-{}", host_slug())
-}
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// One line per parameter: `name` (type, required): description.
 fn params(schema: &Value) -> String {
     let required: Vec<&str> = schema
         .get("required")
@@ -80,11 +71,9 @@ fn tools_section(tools: &[Value]) -> String {
 }
 
 /// Where the generic skill reads host names, URLs and keys from.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const HOSTS_FILE: &str = "~/.config/opencomputeruse/hosts.yaml";
 
 /// The generic skill's directory name, which is also its `name`.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const GENERIC_SKILL_NAME: &str = "opencomputeruse-remote";
 
 /// POSIX shell for the generic skill: `ocu_hosts` lists the hosts in the
@@ -94,7 +83,6 @@ pub const GENERIC_SKILL_NAME: &str = "opencomputeruse-remote";
 /// The file is a deliberately small subset of YAML (see the skill text), and
 /// a key or URL holding characters that could break out of curl's config
 /// line is refused.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const OCU_SH: &str = r##"OCU_HOSTS="${OCU_HOSTS:-$HOME/.config/opencomputeruse/hosts.yaml}"
 _ocu_entry() (
   awk -v host="${1-}" -v file="$OCU_HOSTS" '
@@ -148,7 +136,6 @@ ocu() (
 
 /// The skill that works for every computer in the hosts file: no key in it.
 /// Deployed to the user's agent harnesses by the settings window.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn render_generic(tools: &[Value]) -> String {
     let mut s = format!(
         r#"---
@@ -226,79 +213,10 @@ pub fn host_entry(device: &Device, key: &str) -> String {
     )
 }
 
-pub fn render(device: &Device, key: &str, tools: &[Value]) -> String {
-    let computer = computer_name();
-    let name = skill_name();
-    let url = &device.url;
-    let mut s = String::new();
-    let _ = write!(
-        s,
-        r#"---
-name: {name}
-description: Operate desktop apps on {computer}, a separate computer, through its OpenComputerUse HTTP API. Starts apps there in the background, takes screenshots, reads accessibility trees, clicks, types and presses keys. Use when asked to do anything in an app on {computer}.
----
-
-# Using {computer}
-
-{computer} runs OpenComputerUse, which lets this device ("{device_name}") drive apps on it over HTTP. Apps run in the background on {computer}; its user keeps their own screen, pointer and keyboard.
-
-This file contains the device's key. Keep it private. If it leaks, regenerate the key in OpenComputerUse on {computer}.
-
-```sh
-OCU_URL={url_q}
-OCU_KEY={key_q}
-```
-
-## Calling a tool
-
-Every tool is a POST with its arguments as JSON:
-
-```sh
-curl -sS -X POST "$OCU_URL/v1/tools/start_session" \
-  -H "Authorization: Bearer $OCU_KEY" -H "Content-Type: application/json" \
-  -d '{{"app": "TextEdit"}}'
-```
-
-The response is `{{"content": [...], "isError": false}}`. `content` holds a `text` item, and for actions and screenshots an `image` item: a base64 PNG of the app's window. To look at it, save it and open the file:
-
-```sh
-curl -sS -X POST "$OCU_URL/v1/tools/screenshot" \
-  -H "Authorization: Bearer $OCU_KEY" -H "Content-Type: application/json" \
-  -d '{{"session_id": "SESSION_ID"}}' \
-  | tee /tmp/ocu-response.json | jq -r '.content[] | select(.type == "text") | .text'
-jq -r '.content[] | select(.type == "image") | .data' /tmp/ocu-response.json | base64 --decode > /tmp/ocu-screen.png
-```
-
-`GET $OCU_URL/v1/tools` lists the tools with their JSON schemas.
-
-{how_to_work}
-## As an MCP server instead
-
-Clients that speak MCP over HTTP can use the same key:
-
-```sh
-claude mcp add --transport http {name} {url_q}/mcp --header "Authorization: Bearer $OCU_KEY"
-```
-
-## Tools
-
-"#,
-        how_to_work = HOW_TO_WORK,
-        name = name,
-        computer = computer,
-        device_name = device.name,
-        url_q = shell_quote(url),
-        key_q = shell_quote(key),
-    );
-    s.push_str(&tools_section(tools));
-    s
-}
-
 /// A message to paste into the device's agent, which then sets itself up
 /// to drive this computer: it adds this computer's `entry`, with the key,
 /// to the hosts file, and installs the generic `skill`. The entry comes
 /// first, where it is seen without scrolling past the skill.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn agent_prompt(skill: &str, entry: &str) -> String {
     let computer = computer_name();
     format!(
@@ -327,22 +245,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_skill_carries_url_key_and_tools() {
-        let device = Device {
-            id: "a".into(),
-            name: "Laptop".into(),
-            url: "http://x.ts.net:8642".into(),
-            key_hash: String::new(),
-            created: 0,
-        };
+    fn the_generic_skill_lists_the_tools() {
         let tools = vec![serde_json::json!({
             "name": "click", "description": "Click.",
             "inputSchema": {"type": "object", "properties": {"x": {"type": "number", "description": "Across."}}, "required": ["x"]}
         })];
-        let s = render(&device, "ocu_secret", &tools);
-        assert!(s.starts_with("---\nname: computer-"));
-        assert!(s.contains("OCU_KEY='ocu_secret'"));
-        assert!(s.contains("OCU_URL='http://x.ts.net:8642'"));
+        let s = render_generic(&tools);
         assert!(s.contains("### `click`") && s.contains("`x` (number, required): Across."));
     }
 

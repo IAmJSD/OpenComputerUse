@@ -15,34 +15,42 @@ use crate::config::Config;
 use crate::tools::Output;
 use devices::Devices;
 
-/// A new or regenerated device key, rendered as the skill that carries it.
+/// A new or regenerated device key, as what the device sets up with it.
 pub struct Issued {
     pub device: devices::Device,
-    pub skill: String,
-    /// What the device adds under `hosts:` in its hosts file, for the
-    /// generic skill: this computer's name, URL and the key.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// What the device adds under `hosts:` in its hosts file: this
+    /// computer's name, URL and the key.
     pub host_entry: String,
+    /// The generic skill, the same for every computer (no key).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub skill: String,
+    /// Both, inside a message asking the device's agent to set them up.
+    pub prompt: String,
+}
+
+impl Issued {
+    fn new(device: devices::Device, key: &str) -> Self {
+        let host_entry = skill::host_entry(&device, key);
+        let skill = skill::render_generic(&crate::tools::list());
+        Issued {
+            prompt: skill::agent_prompt(&skill, &host_entry),
+            device,
+            host_entry,
+            skill,
+        }
+    }
 }
 
 pub fn generate(name: &str, url: &str) -> Result<Issued> {
     let mut d = Devices::load();
     let (device, key) = d.add(name, url)?;
-    Ok(Issued {
-        skill: skill::render(&device, &key, &crate::tools::list()),
-        host_entry: skill::host_entry(&device, &key),
-        device,
-    })
+    Ok(Issued::new(device, &key))
 }
 
 pub fn regenerate(id: &str, url: Option<&str>) -> Result<Issued> {
     let mut d = Devices::load();
     let (device, key) = d.regenerate(id, url)?;
-    Ok(Issued {
-        skill: skill::render(&device, &key, &crate::tools::list()),
-        host_entry: skill::host_entry(&device, &key),
-        device,
-    })
+    Ok(Issued::new(device, &key))
 }
 
 /// Saves a file to `~/Downloads/<folder>/<file>`, created readable by the
@@ -156,7 +164,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "generate_skill",
-            "description": "Allow a device to drive this computer over HTTP: makes it a key and returns a SKILL.md, containing the key, to install on that device (in its skills folder, e.g. ~/.claude/skills/<name>/SKILL.md). The key is shown only in this skill.",
+            "description": "Allow a device to drive this computer over HTTP: makes it a key and returns a prompt to paste into an agent on that device. The prompt holds the generic opencomputeruse-remote skill and this computer's entry for the device's ~/.config/opencomputeruse/hosts.yaml, which holds the key, and asks the agent to set both up. The key is shown only here, so pass the prompt on as it is.",
             "inputSchema": { "type": "object", "properties": {
                 "device_name": { "type": "string", "description": "What the device that will connect is called, e.g. \"Work laptop\"." },
                 "url": { "type": "string", "description": format!("How that device reaches this computer. Defaults to {}.", devices::suggested_url(port)) },
@@ -164,7 +172,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "regenerate_key",
-            "description": "Give a device a new key, retiring the old one and ending its sessions, and return the new skill to install on it.",
+            "description": "Give a device a new key, retiring the old one and ending its sessions, and return a prompt for an agent on that device that sets the new key up (as generate_skill does).",
             "inputSchema": { "type": "object", "properties": {
                 "device": { "type": "string", "description": "The device's id or name, from list_devices." },
                 "url": { "type": "string", "description": "A new URL for it to reach this computer at. Leave out to keep the current one." },
@@ -307,15 +315,15 @@ pub fn call(name: &str, args: &Value) -> Result<Output> {
 
 fn issued_text(issued: &Issued) -> String {
     let mut note = format!(
-        "Skill for {} ({}). Install it on that device as ~/.claude/skills/{}/SKILL.md. It contains the device's key, which is not shown anywhere else.",
+        "Key for {} ({}). Paste everything below the line into an agent on that device (Claude Code, Codex, OpenCode, …): it adds this computer to the device's {} and installs the skill. The key is not shown anywhere else.",
         issued.device.name,
         issued.device.id,
-        skill::skill_name()
+        skill::HOSTS_FILE
     );
     if !Config::load().http.enabled {
         note.push_str(" The HTTP server is off: turn it on (http_server with enabled: true) before the device connects.");
     }
-    format!("{note}\n\n{}", issued.skill)
+    format!("{note}\n\n---\n\n{}", issued.prompt)
 }
 
 // ------------------------------------------------------- start at login

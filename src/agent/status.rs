@@ -586,12 +586,11 @@ impl Status {
     }
 
     fn show_issued(&mut self, issued: remote::Issued) {
-        let generic = skill::render_generic(&crate::tools::list());
         self.remote.panel = Some(Panel::Issued {
             device: issued.device.name.clone(),
-            prompt: skill::agent_prompt(&generic, &issued.host_entry),
+            prompt: issued.prompt,
             entry: issued.host_entry,
-            skill: generic,
+            skill: issued.skill,
             tab: IssuedTab::Prompt,
             note: None,
             selecting: None,
