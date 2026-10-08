@@ -16,7 +16,7 @@ use ocu_core::{Permission, Service, SessionInfo};
 
 use super::ui::{
     icon, palette, Badge, Button, Checkbox, Chip, Divider, Heading, LineEdit, LineEditKey, Modal,
-    TextInput, TextPress,
+    TextInput, TextInputColors, TextPress,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -137,7 +137,27 @@ enum Panel {
         prompt: String,
         tab: IssuedTab,
         note: Option<String>,
+        /// The block whose text is being selected, and its selection.
+        selecting: Option<(Block, LineEdit)>,
     },
+}
+
+/// The modal's blocks of text, which can be selected and copied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Block {
+    Prompt,
+    Entry,
+    Skill,
+}
+
+impl Block {
+    fn id(self) -> &'static str {
+        match self {
+            Block::Prompt => "issued-prompt",
+            Block::Entry => "issued-entry",
+            Block::Skill => "issued-skill",
+        }
+    }
 }
 
 /// How the issued key goes to the device.
@@ -574,6 +594,7 @@ impl Status {
             skill: generic,
             tab: IssuedTab::Prompt,
             note: None,
+            selecting: None,
         });
         self.remote.error = None;
         self.remote.skill_error = None;
@@ -600,7 +621,7 @@ impl Status {
     fn issued_modal(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let p = palette();
         let dim = |t: String| div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(t);
-        let Some(Panel::Issued { device, entry, skill, prompt, tab, note }) = &self.remote.panel else {
+        let Some(Panel::Issued { device, entry, skill, prompt, tab, note, selecting }) = &self.remote.panel else {
             return None;
         };
         let tab = *tab;
@@ -611,9 +632,10 @@ impl Status {
         };
         let set_tab = |to: IssuedTab| {
             cx.listener(move |s: &mut Self, _: &gpui::ClickEvent, _, cx| {
-                if let Some(Panel::Issued { tab, note, .. }) = &mut s.remote.panel {
+                if let Some(Panel::Issued { tab, note, selecting, .. }) = &mut s.remote.panel {
                     *tab = to;
                     *note = None;
+                    *selecting = None;
                 }
                 cx.notify();
             })
@@ -625,20 +647,63 @@ impl Status {
                 cx.notify();
             }))
         };
-        // A block of text that scrolls on its own. One id per block, so each
-        // keeps its own place, and the wheel stops here: gpui otherwise
-        // scrolls every scroll area under the pointer at once.
-        let mono = |id: &'static str, text: String| {
+        // A block of text to read, select and copy, that scrolls on its
+        // own: the wheel stops here, as gpui otherwise scrolls every scroll
+        // area under the pointer at once. Its own scroll id per block keeps
+        // each one's place.
+        let mono = |block: Block, text: String| {
+            let input = match selecting {
+                Some((b, edit)) if *b == block => TextInput::edit(block.id(), edit),
+                _ => TextInput::new(block.id(), text.clone()).multiline(),
+            };
+            let pressed = text.clone();
             div()
-                .id(id)
+                .id(ElementId::Name(SharedString::from(format!("{}-scroll", block.id()))))
                 .overflow_y_scroll()
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                .p_2()
                 .rounded(px(6.0))
                 .bg(rgb(p.deep_bg))
-                .font_family("Menlo")
-                .text_size(px(11.0))
-                .child(text)
+                .child(
+                    input
+                        .caret_on(false)
+                        .colors(TextInputColors {
+                            bg: p.deep_bg,
+                            border: None,
+                            focus_border: p.deep_bg,
+                            ..Default::default()
+                        })
+                        .w_full()
+                        .p_2()
+                        .rounded(px(6.0))
+                        .font_family("Menlo")
+                        .text_size(px(11.0))
+                        .on_focus(cx.listener(move |s, press: &TextPress, _, cx| {
+                            // The settings' fields give up the keyboard, so
+                            // ⌘C copies from here.
+                            for (_, e) in &mut s.fields {
+                                e.active = false;
+                            }
+                            if let Some(Panel::Issued { selecting, .. }) = &mut s.remote.panel {
+                                if !matches!(selecting, Some((b, _)) if *b == block) {
+                                    let mut edit = LineEdit::multiline();
+                                    edit.text = pressed.clone();
+                                    *selecting = Some((block, edit));
+                                }
+                                if let Some((_, edit)) = selecting {
+                                    edit.press(press);
+                                }
+                            }
+                            cx.notify();
+                        }))
+                        .on_select_to(cx.listener(move |s, at: &usize, _, cx| {
+                            if let Some(Panel::Issued { selecting: Some((b, edit)), .. }) = &mut s.remote.panel {
+                                if *b == block {
+                                    edit.extend_to(*at);
+                                    cx.notify();
+                                }
+                            }
+                        })),
+                )
         };
         let tabs = div()
             .flex()
@@ -659,7 +724,7 @@ impl Status {
                     "Paste this into an agent on {device}, such as Claude Code or Codex. It has the skill and this computer's entry for {}, holding the key, and asks the agent to set both up. The key isn't shown anywhere else.",
                     skill::HOSTS_FILE
                 )))
-                .child(mono("issued-prompt", prompt.clone()).flex_1().min_h(px(120.0)))
+                .child(mono(Block::Prompt, prompt.clone()).flex_1().min_h(px(120.0)))
                 .action(done)
                 .action(
                     copy_button("copy-prompt", "Copy Prompt", prompt.clone(), "Copied. It holds the key, so clear the clipboard once it's pasted.")
@@ -677,7 +742,7 @@ impl Status {
                             .flex()
                             .items_start()
                             .gap_2()
-                            .child(mono("issued-entry", entry.trim_end().to_string()).flex_1().min_w_0())
+                            .child(mono(Block::Entry, entry.trim_end().to_string()).flex_1().min_w_0())
                             .child(
                                 copy_button("copy-entry", "Copy Entry", entry.clone(), "Copied the entry. It holds the key, so clear the clipboard once it's pasted.")
                                     .flex_none(),
@@ -688,7 +753,7 @@ impl Status {
                         "You only need this once on {device}: the same skill drives every computer in its hosts file. Put it at ~/.claude/skills/{}/SKILL.md, or wherever its agent keeps skills.",
                         skill::GENERIC_SKILL_NAME
                     )))
-                    .child(mono("issued-skill", skill.clone()).flex_1().min_h(px(120.0)))
+                    .child(mono(Block::Skill, skill.clone()).flex_1().min_h(px(120.0)))
                     .action(done)
                     .action(Button::new("save-skill", "Save to Downloads").on_click(cx.listener(move |s, _, _, cx| {
                         let msg = match remote::save_download(skill::GENERIC_SKILL_NAME, "SKILL.md", &save) {
@@ -1250,6 +1315,16 @@ impl Status {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // The modal's text is read-only: ⌘A and ⌘C, nothing that edits.
+        if let Some(Panel::Issued { selecting: Some((_, edit)), .. }) = &mut self.remote.panel {
+            let m = ev.keystroke.modifiers;
+            if (m.platform || m.control) && matches!(ev.keystroke.key.as_str(), "a" | "c") {
+                edit.key(ev, cx);
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
         if ev.keystroke.key == "escape" && matches!(self.remote.panel, Some(Panel::Issued { .. })) {
             self.remote.panel = None;
             cx.notify();
