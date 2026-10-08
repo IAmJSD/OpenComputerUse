@@ -1,13 +1,15 @@
 //! Keeps the HTTP server in step with the settings: started, stopped or
 //! moved when they change, whether from the window or the MCP server's
-//! http_server tool, and the login item that brings it back after a reboot
-//! put back if it has gone missing.
+//! http_server tool, and following the chosen adapters' addresses as they
+//! change; and the login item that brings it back after a reboot put back
+//! if it has gone missing.
 
 use std::sync::{Arc, Mutex};
 
 use ocu_core::Service;
 
 use crate::config::Config;
+use crate::remote::interfaces;
 use crate::remote::server::HttpServer;
 
 /// What the window shows about the server.
@@ -29,35 +31,48 @@ pub fn state() -> HttpState {
 #[derive(Default)]
 pub struct HttpHost {
     server: Option<HttpServer>,
-    /// What the running (or failed) server was started with.
-    applied: Option<(String, u16)>,
 }
 
 impl HttpHost {
     pub fn sync(&mut self, service: &Arc<Service>) {
         let http = Config::load().http;
-        let want = http.enabled.then(|| (http.bind.clone(), http.port));
-        if want == self.applied {
+        if !http.enabled {
+            if self.server.take().is_some() {
+                *STATE.lock().unwrap() = HttpState::default();
+            }
             return;
         }
-        // Stopping first frees the port for a restart on the same one.
-        self.server = None;
-        self.applied = want.clone();
-        let mut state = STATE.lock().unwrap();
-        *state = HttpState::default();
-        let Some((bind, port)) = want else { return };
-        #[cfg(target_os = "macos")]
-        if !crate::remote::autostart::is_set() {
-            if let Err(e) = crate::remote::autostart::set(true) {
-                log::warn!("start at login: {e:#}");
+        let server = self.server.get_or_insert_with(|| {
+            #[cfg(target_os = "macos")]
+            if !crate::remote::autostart::is_set() {
+                if let Err(e) = crate::remote::autostart::set(true) {
+                    log::warn!("start at login: {e:#}");
+                }
             }
+            HttpServer::new(service.clone())
+        });
+        let (addrs, mut errors) = match interfaces::listen_addrs(&http) {
+            Ok(addrs) => (addrs, Vec::new()),
+            Err(e) => (Vec::new(), vec![format!("{e:#}")]),
+        };
+        errors.extend(server.listen_on(&addrs));
+        let listening = server.addrs();
+        let mut state = HttpState {
+            listening: (!listening.is_empty()).then(|| interfaces::summary(&listening, 1)),
+            error: (!errors.is_empty()).then(|| errors.join("; ")),
+        };
+        if listening.is_empty() && errors.is_empty() {
+            state.error = Some(format!(
+                "Nothing in {} has an address now; it listens once something does.",
+                http.listen_on.join(", ")
+            ));
         }
-        match HttpServer::start(service.clone(), &bind, port) {
-            Ok(server) => {
-                state.listening = Some(server.addr.clone());
-                self.server = Some(server);
+        let mut current = STATE.lock().unwrap();
+        if (&current.listening, &current.error) != (&state.listening, &state.error) {
+            if let Some(e) = &state.error {
+                log::warn!("HTTP server: {e}");
             }
-            Err(e) => state.error = Some(format!("{e:#}")),
+            *current = state;
         }
     }
 }

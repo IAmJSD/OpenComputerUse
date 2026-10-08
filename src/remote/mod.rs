@@ -4,6 +4,7 @@
 //! local MCP server's device tools.
 
 pub mod devices;
+pub mod interfaces;
 pub mod server;
 pub mod skill;
 
@@ -85,9 +86,13 @@ pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::
     Ok(path)
 }
 
-/// Turns the server on or off (and moves it), and has it start at login
-/// while it is on.
-pub fn set_server(enabled: Option<bool>, port: Option<u16>) -> Result<Config> {
+/// Turns the server on or off (and moves it, or limits where it listens),
+/// and has it start at login while it is on.
+pub fn set_server(
+    enabled: Option<bool>,
+    port: Option<u16>,
+    listen_on: Option<&[String]>,
+) -> Result<Config> {
     let mut config = Config::load();
     if let Some(on) = enabled {
         config.http.enabled = on;
@@ -95,6 +100,9 @@ pub fn set_server(enabled: Option<bool>, port: Option<u16>) -> Result<Config> {
     if let Some(port) = port {
         anyhow::ensure!(port >= 1024, "use a port from 1024 up");
         config.http.port = port;
+    }
+    if let Some(listen_on) = listen_on {
+        config.http.listen_on = interfaces::clean(listen_on)?;
     }
     config.save()?;
     if cfg!(target_os = "macos") {
@@ -120,14 +128,24 @@ pub fn is_tool(name: &str) -> bool {
 }
 
 pub fn tool_definitions() -> Vec<Value> {
-    let port = Config::load().http.port;
+    let http = Config::load().http;
+    let port = http.port;
     vec![
         json!({
             "name": "http_server",
-            "description": "Show, or turn on and off, the HTTP server that lets other devices drive this computer with a key (off by default). While on, it starts again after a reboot. Devices reach it at the URL in their skill, usually over Tailscale.",
+            "description": "Show, or turn on and off, the HTTP server that lets other devices drive this computer with a key (off by default). While on, it starts again after a reboot. Devices reach it at the URL in their skill, usually over Tailscale. It listens on every network adapter unless listen_on limits it, for example to Tailscale only.",
             "inputSchema": { "type": "object", "properties": {
                 "enabled": { "type": "boolean", "description": "Turn the server on or off. Leave out to only show its state." },
                 "port": { "type": "integer", "description": format!("The port to listen on. Currently {port}.") },
+                "listen_on": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": format!(
+                        "Limit the server to some of this computer's addresses, following them as they change. Each entry is a network adapter (\"en0\", or \"tailscale\" for whichever adapter has the Tailscale address), an address (\"192.168.1.5\") or a range (\"192.168.1.0/24\"). An empty list listens on every adapter again. Currently {}. This computer's adapters: {}.",
+                        listen_on_text(&http.listen_on),
+                        adapters_text(),
+                    ),
+                },
             } },
         }),
         json!({
@@ -178,10 +196,46 @@ fn server_state(config: &Config) -> String {
     } else {
         "`opencomputeruse serve` serves it; `opencomputeruse serve --install` keeps it running after a reboot"
     };
+    if h.listen_on.is_empty() {
+        return format!(
+            "The HTTP server is on, listening on {}:{}; {how}.",
+            h.bind, h.port
+        );
+    }
+    let addrs: Vec<String> = interfaces::listen_addrs(h)
+        .unwrap_or_default()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let now = if addrs.is_empty() {
+        "none of them has an address now".to_string()
+    } else {
+        format!("now {}", addrs.join(", "))
+    };
     format!(
-        "The HTTP server is on, listening on {}:{}; {how}.",
-        h.bind, h.port
+        "The HTTP server is on, listening on {} only ({now}); {how}.",
+        listen_on_text(&h.listen_on)
     )
+}
+
+fn listen_on_text(listen_on: &[String]) -> String {
+    if listen_on.is_empty() {
+        "every adapter".into()
+    } else {
+        listen_on.join(", ")
+    }
+}
+
+/// This computer's adapters and their addresses, for the tool description.
+fn adapters_text() -> String {
+    interfaces::adapters()
+        .iter()
+        .map(|a| {
+            let addrs: Vec<String> = a.addrs.iter().map(ToString::to_string).collect();
+            format!("{} ({})", a.name, addrs.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub fn call(name: &str, args: &Value) -> Result<Output> {
@@ -190,8 +244,18 @@ pub fn call(name: &str, args: &Value) -> Result<Output> {
         "http_server" => {
             let enabled = args.get("enabled").and_then(Value::as_bool);
             let port = args.get("port").and_then(Value::as_u64).map(|p| p as u16);
-            let config = if enabled.is_some() || port.is_some() {
-                set_server(enabled, port)?
+            let listen_on = match args.get("listen_on") {
+                None | Some(Value::Null) => None,
+                Some(Value::Array(a)) => Some(
+                    a.iter()
+                        .map(|v| v.as_str().map(str::to_string))
+                        .collect::<Option<Vec<String>>>()
+                        .ok_or_else(|| anyhow::anyhow!("\"listen_on\" is a list of strings"))?,
+                ),
+                Some(_) => bail!("\"listen_on\" is a list of strings"),
+            };
+            let config = if enabled.is_some() || port.is_some() || listen_on.is_some() {
+                set_server(enabled, port, listen_on.as_deref())?
             } else {
                 Config::load()
             };

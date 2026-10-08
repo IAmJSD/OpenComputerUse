@@ -216,6 +216,21 @@ There is no TLS, so use it over Tailscale or another trusted network. On
 Linux and Windows, `opencomputeruse serve` runs the server, and
 `serve --install` starts it at login.
 
+It listens on every network adapter unless you limit it, for example so it
+is reachable over Tailscale but not on a coffee shop's Wi-Fi. Untick
+**Every network adapter to every host** in the app, pass
+`serve --listen-on`, or set `http.listen_on` in the settings file to a list
+of:
+
+- an adapter, such as `en0`, or `tailscale` for whichever adapter has this
+  computer's Tailscale address,
+- an address, such as `192.168.1.5`,
+- a range, such as `192.168.1.0/24`.
+
+The server follows these as addresses come and go, and waits while none of
+them has one: `opencomputeruse serve --listen-on tailscale` listens once
+Tailscale connects.
+
 ## Settings
 
 The settings file is at `opencomputeruse config-path`. On macOS it is

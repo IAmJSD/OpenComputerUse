@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::io::Read as _;
+use std::net::SocketAddr;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -116,22 +117,17 @@ impl State {
     }
 }
 
-pub struct HttpServer {
+/// One listening socket, feeding the shared state its requests.
+struct Listener {
     server: Arc<Server>,
     thread: Option<JoinHandle<()>>,
-    pub addr: String,
+    addr: SocketAddr,
 }
 
-impl HttpServer {
-    pub fn start(service: Arc<Service>, bind: &str, port: u16) -> Result<Self> {
-        let addr = format!("{bind}:{port}");
+impl Listener {
+    fn start(state: Arc<State>, addr: SocketAddr) -> Result<Self> {
         let server =
-            Arc::new(Server::http(&addr).map_err(|e| anyhow!("can't listen on {addr}: {e}"))?);
-        let state = Arc::new(State {
-            service,
-            devices: Mutex::new((Devices::default(), None)),
-            workers: Mutex::new(HashMap::new()),
-        });
+            Arc::new(Server::http(addr).map_err(|e| anyhow!("can't listen on {addr}: {e}"))?);
         let s = server.clone();
         let thread = std::thread::Builder::new()
             .name("http".into())
@@ -142,8 +138,6 @@ impl HttpServer {
                         .name("http-request".into())
                         .spawn(move || handle(&state, request));
                 }
-                // Unblocked: drop the workers, ending every device's sessions.
-                state.workers.lock().unwrap().clear();
             })?;
         log::info!("HTTP server listening on {addr}");
         Ok(Self {
@@ -152,22 +146,66 @@ impl HttpServer {
             addr,
         })
     }
-
-    /// Serves until the process ends (`opencomputeruse serve`).
-    pub fn wait(mut self) {
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
 }
 
-impl Drop for HttpServer {
+impl Drop for Listener {
     fn drop(&mut self) {
         self.server.unblock();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
         log::info!("HTTP server on {} stopped", self.addr);
+    }
+}
+
+/// The server: listening on any number of addresses, which can change
+/// while it runs without ending the devices' sessions.
+pub struct HttpServer {
+    state: Arc<State>,
+    listeners: Vec<Listener>,
+}
+
+impl HttpServer {
+    pub fn new(service: Arc<Service>) -> Self {
+        Self {
+            state: Arc::new(State {
+                service,
+                devices: Mutex::new((Devices::default(), None)),
+                workers: Mutex::new(HashMap::new()),
+            }),
+            listeners: Vec::new(),
+        }
+    }
+
+    /// Listens on exactly `addrs`: stops listening where it no longer
+    /// should (first, freeing the port), then starts where it now should.
+    /// Returns what could not be listened on; asking again retries those.
+    pub fn listen_on(&mut self, addrs: &[SocketAddr]) -> Vec<String> {
+        self.listeners.retain(|l| addrs.contains(&l.addr));
+        let mut errors = Vec::new();
+        for addr in addrs {
+            if self.listeners.iter().any(|l| l.addr == *addr) {
+                continue;
+            }
+            match Listener::start(self.state.clone(), *addr) {
+                Ok(l) => self.listeners.push(l),
+                Err(e) => errors.push(format!("{e:#}")),
+            }
+        }
+        errors
+    }
+
+    /// Where it listens now.
+    pub fn addrs(&self) -> Vec<SocketAddr> {
+        self.listeners.iter().map(|l| l.addr).collect()
+    }
+}
+
+impl Drop for HttpServer {
+    fn drop(&mut self) {
+        self.listeners.clear();
+        // Drop the workers, ending every device's sessions.
+        self.state.workers.lock().unwrap().clear();
     }
 }
 

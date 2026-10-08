@@ -35,13 +35,14 @@ enum Field {
     CloudflareModel,
     MinConfidence,
     HttpPort,
+    ListenOn,
     DeviceName,
     DeviceUrl,
 }
 
 impl Field {
     /// Every field, in tab order.
-    const ALL: [Field; 9] = [
+    const ALL: [Field; 10] = [
         Field::TypesafeKey,
         Field::TypesafeModel,
         Field::CloudflareAccount,
@@ -49,6 +50,7 @@ impl Field {
         Field::CloudflareModel,
         Field::MinConfidence,
         Field::HttpPort,
+        Field::ListenOn,
         Field::DeviceName,
         Field::DeviceUrl,
     ];
@@ -76,6 +78,7 @@ impl Field {
             Field::CloudflareModel => "cf-model",
             Field::MinConfidence => "min-confidence",
             Field::HttpPort => "http-port",
+            Field::ListenOn => "listen-on",
             Field::DeviceName => "device-name",
             Field::DeviceUrl => "device-url",
         }
@@ -117,6 +120,9 @@ struct Remote {
     error: Option<String>,
     /// A failure of the Generate Skill form, shown with it.
     skill_error: Option<String>,
+    /// "Every network adapter to every host" is unticked, but nothing is
+    /// chosen yet, so the settings still say every adapter.
+    limiting: bool,
     /// The server's state as last drawn, to redraw when it changes.
     server_seen: (Option<String>, Option<String>),
 }
@@ -292,7 +298,7 @@ impl Status {
                     Field::CloudflareModel => r.cloudflare_model.clone(),
                     Field::MinConfidence => format!("{}", r.min_confidence),
                     Field::HttpPort => config.http.port.to_string(),
-                    Field::DeviceName | Field::DeviceUrl => String::new(),
+                    Field::ListenOn | Field::DeviceName | Field::DeviceUrl => String::new(),
                 };
                 let mut edit = LineEdit::default();
                 edit.set_text(text);
@@ -368,7 +374,7 @@ impl Status {
     }
 
     fn set_http(&mut self, on: bool) {
-        match remote::set_server(Some(on), None) {
+        match remote::set_server(Some(on), None, None) {
             Ok(config) => {
                 self.config.http = config.http;
                 self.remote.error = None;
@@ -379,7 +385,7 @@ impl Status {
 
     fn apply_port(&mut self) {
         match self.text(Field::HttpPort).parse::<u16>() {
-            Ok(port) => match remote::set_server(None, Some(port)) {
+            Ok(port) => match remote::set_server(None, Some(port), None) {
                 Ok(config) => {
                     self.config.http = config.http;
                     self.remote.error = None;
@@ -389,6 +395,144 @@ impl Status {
             },
             Err(_) => self.remote.error = Some("The port is a number, like 8642.".into()),
         }
+    }
+
+    fn set_listen_on(&mut self, listen_on: Vec<String>) {
+        match remote::set_server(None, None, Some(&listen_on)) {
+            Ok(config) => {
+                self.config.http = config.http;
+                self.remote.error = None;
+            }
+            Err(e) => self.remote.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Ticks or unticks one adapter, address or range. The last one stays
+    /// ticked: none would mean every adapter again, which has its own box.
+    fn toggle_listen_entry(&mut self, entry: &str, on: bool) {
+        let mut list = self.config.http.listen_on.clone();
+        if on {
+            list.push(entry.to_string());
+        } else {
+            list.retain(|e| e != entry);
+            if list.is_empty() {
+                self.remote.error = Some(
+                    "Tick something else first, or tick Every network adapter to every host."
+                        .into(),
+                );
+                return;
+            }
+        }
+        self.set_listen_on(list);
+    }
+
+    /// Adds the address or range typed in the box.
+    fn add_listen_entry(&mut self) {
+        let entry = self.text(Field::ListenOn);
+        if entry.is_empty() {
+            return;
+        }
+        if let Err(e) = remote::interfaces::Filter::parse(&entry) {
+            self.remote.error = Some(format!("{e:#}"));
+            return;
+        }
+        let mut list = self.config.http.listen_on.clone();
+        list.push(entry);
+        self.set_listen_on(list);
+        if self.remote.error.is_none() {
+            self.field(Field::ListenOn).set_text(String::new());
+            self.field(Field::ListenOn).active = false;
+        }
+    }
+
+    /// "Every network adapter to every host", or the adapters, addresses and
+    /// ranges to listen on instead.
+    fn listen_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        let listen_on = &self.config.http.listen_on;
+        let every = listen_on.is_empty() && !self.remote.limiting;
+        let mut out = div().flex().flex_col().gap_2().child(
+            Checkbox::new("listen-every", "Every network adapter to every host", every).on_change(
+                cx.listener(|s, on: &bool, _, cx| {
+                    if *on {
+                        s.set_listen_on(Vec::new());
+                    }
+                    s.remote.limiting = !*on;
+                    cx.notify();
+                }),
+            ),
+        );
+        if every {
+            return out;
+        }
+        // The choices: Tailscale (even while it is not connected), each adapter,
+        // then anything chosen that is neither (addresses, ranges, adapters
+        // that are gone for now).
+        let adapters = remote::interfaces::adapters();
+        let addrs = |ips: &[std::net::IpAddr]| remote::interfaces::summary(ips, 2);
+        let mut choices: Vec<(String, String)> = Vec::new();
+        let tailscale: Vec<std::net::IpAddr> = adapters
+            .iter()
+            .flat_map(|a| a.addrs.iter().copied())
+            .filter(remote::interfaces::is_tailscale)
+            .collect();
+        let label = if tailscale.is_empty() {
+            "Tailscale (not connected now)".to_string()
+        } else {
+            format!("Tailscale: {}", addrs(&tailscale))
+        };
+        choices.push((remote::interfaces::TAILSCALE.to_string(), label));
+        for a in &adapters {
+            choices.push((a.name.clone(), format!("{}: {}", a.name, addrs(&a.addrs))));
+        }
+        for e in listen_on {
+            if !choices.iter().any(|(c, _)| c == e) {
+                choices.push((e.clone(), e.clone()));
+            }
+        }
+        let mut list = div().flex().flex_col().gap_1p5().pl_6();
+        for (i, (entry, label)) in choices.into_iter().enumerate() {
+            let on = listen_on.contains(&entry);
+            list = list.child(
+                Checkbox::new(
+                    ElementId::Name(SharedString::from(format!("listen-{i}"))),
+                    label,
+                    on,
+                )
+                .on_change(cx.listener(move |s, on: &bool, _, cx| {
+                    s.toggle_listen_entry(&entry, *on);
+                    cx.notify();
+                })),
+            );
+        }
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().min_w_0().child(self.input(
+                    Field::ListenOn,
+                    "Address or range, like 192.168.1.0/24",
+                    cx,
+                )))
+                .child(
+                    Button::new("listen-add", "Add")
+                        .flex_none()
+                        .on_click(cx.listener(|s, _, _, cx| {
+                            s.add_listen_entry();
+                            cx.notify();
+                        })),
+                ),
+        );
+        out = out
+            .child(
+                div()
+                    .pl_6()
+                    .text_color(rgb(p.text_dim))
+                    .child("Only on these, following their addresses as they change:"),
+            )
+            .child(list);
+        out
     }
 
     fn open_form(&mut self) {
@@ -662,6 +806,7 @@ impl Status {
                     .child(div().text_color(rgb(p.text_dim)).child("Port"))
                     .child(div().w(px(80.0)).flex_none().child(self.input(Field::HttpPort, "8642", cx))),
             )
+            .child(self.listen_picker(cx))
             .child(status_line);
 
         // The devices.
@@ -1129,6 +1274,7 @@ impl Status {
             LineEditKey::Submitted => {
                 match f {
                     Field::HttpPort => self.apply_port(),
+                    Field::ListenOn => self.add_listen_entry(),
                     Field::DeviceName | Field::DeviceUrl => self.generate_skill(),
                     _ => self.save(),
                 }
