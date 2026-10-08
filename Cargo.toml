@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/ocu-core", "crates/ocu-macos", "crates/ocu-linux", "crates/ocu-windows"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 authors = ["Astrid Gealer"]
