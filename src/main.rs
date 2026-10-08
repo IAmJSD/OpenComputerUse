@@ -10,6 +10,8 @@ mod config;
 mod mcp;
 mod recipe;
 mod remote;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod skills;
 mod tools;
 mod update;
 mod vision;
@@ -26,7 +28,7 @@ opencomputeruse: background computer use for agents, over MCP
 
 USAGE:
     opencomputeruse mcp                   Run the MCP server on stdio (what clients launch)
-    opencomputeruse install <client>      Register the MCP server with claude, claude-desktop, codex or opencode
+    opencomputeruse install <client>      Register the MCP server with claude, claude-desktop, codex, opencode or kimi
     opencomputeruse uninstall <client>    Remove it again
     opencomputeruse clients               Show which clients run this copy
     opencomputeruse serve [--port N]      Run the HTTP server for other devices (the app does this on macOS)
@@ -52,7 +54,7 @@ fn run() -> Result<()> {
         Some("mcp") => run_mcp(),
         Some("install") | Some("uninstall") => {
             let Some(client) = args.get(1) else {
-                bail!("name a client: claude, claude-desktop, codex or opencode")
+                bail!("name a client: claude, claude-desktop, codex, opencode or kimi")
             };
             let client = clients::Client::parse(client)?;
             if first == Some("install") {

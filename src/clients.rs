@@ -17,14 +17,16 @@ pub enum Client {
     ClaudeDesktop,
     Codex,
     OpenCode,
+    Kimi,
 }
 
 impl Client {
-    pub const ALL: [Client; 4] = [
+    pub const ALL: [Client; 5] = [
         Client::ClaudeCode,
         Client::ClaudeDesktop,
         Client::Codex,
         Client::OpenCode,
+        Client::Kimi,
     ];
 
     pub fn label(self) -> &'static str {
@@ -33,6 +35,7 @@ impl Client {
             Client::ClaudeDesktop => "Claude Desktop",
             Client::Codex => "Codex",
             Client::OpenCode => "OpenCode",
+            Client::Kimi => "Kimi",
         }
     }
 
@@ -42,6 +45,7 @@ impl Client {
             Client::ClaudeDesktop => "claude-desktop",
             Client::Codex => "codex",
             Client::OpenCode => "opencode",
+            Client::Kimi => "kimi",
         }
     }
 
@@ -51,7 +55,8 @@ impl Client {
             "claude-desktop" | "claudedesktop" | "desktop" => Ok(Client::ClaudeDesktop),
             "codex" => Ok(Client::Codex),
             "opencode" => Ok(Client::OpenCode),
-            _ => bail!("unknown client \"{s}\" (claude, claude-desktop, codex or opencode)"),
+            "kimi" => Ok(Client::Kimi),
+            _ => bail!("unknown client \"{s}\" (claude, claude-desktop, codex, opencode or kimi)"),
         }
     }
 
@@ -65,7 +70,7 @@ impl Client {
     }
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -88,6 +93,19 @@ pub fn find(client: Client) -> Option<PathBuf> {
             .or_else(|| find_cli("opencode"));
     }
     find_cli(client.binary())
+}
+
+/// The folder a client keeps its config in, and its skills folder under it.
+/// Claude Desktop has no skills folder.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn config_root(client: Client) -> Option<PathBuf> {
+    match client {
+        Client::ClaudeCode => Some(home().join(".claude")),
+        Client::Codex => Some(home().join(".codex")),
+        Client::OpenCode => Some(opencode::config_dir()),
+        Client::Kimi => Some(kimi::dir()),
+        Client::ClaudeDesktop => None,
+    }
 }
 
 fn find_cli(name: &str) -> Option<PathBuf> {
@@ -137,6 +155,7 @@ pub fn registered_command(client: Client) -> Option<String> {
             }),
         Client::OpenCode => opencode::registered_command(),
         Client::ClaudeDesktop => desktop::registered_command(),
+        Client::Kimi => mcp_json::registered_command(&kimi::path()),
         Client::Codex => {
             let text = std::fs::read_to_string(home().join(".codex/config.toml")).ok()?;
             let header = [
@@ -240,6 +259,7 @@ pub fn install(client: Client) -> Result<()> {
     match client {
         Client::OpenCode => return opencode::set(Some(&server_command()?.to_string_lossy())),
         Client::ClaudeDesktop => return desktop::set(Some(&server_command()?.to_string_lossy())),
+        Client::Kimi => return kimi::set(Some(&server_command()?.to_string_lossy())),
         _ => {}
     }
     let cli = find(client).ok_or_else(|| {
@@ -276,7 +296,7 @@ pub fn install(client: Client) -> Result<()> {
             }
             run(&cli, &["mcp", "add", SERVER_NAME, "--", &exe, "mcp"])?;
         }
-        Client::OpenCode | Client::ClaudeDesktop => unreachable!(),
+        Client::OpenCode | Client::ClaudeDesktop | Client::Kimi => unreachable!(),
     }
     Ok(())
 }
@@ -291,13 +311,14 @@ pub fn uninstall(client: Client) -> Result<()> {
     match client {
         Client::OpenCode => return opencode::set(None),
         Client::ClaudeDesktop => return desktop::set(None),
+        Client::Kimi => return kimi::set(None),
         _ => {}
     }
     let cli = find(client).ok_or_else(|| anyhow!("{} is not installed", client.label()))?;
     match client {
         Client::ClaudeCode => run(&cli, &["mcp", "remove", "--scope", "user", SERVER_NAME])?,
         Client::Codex => run(&cli, &["mcp", "remove", SERVER_NAME])?,
-        Client::OpenCode | Client::ClaudeDesktop => unreachable!(),
+        Client::OpenCode | Client::ClaudeDesktop | Client::Kimi => unreachable!(),
     };
     Ok(())
 }
@@ -336,10 +357,9 @@ mod desktop {
 
     use std::path::PathBuf;
 
-    use anyhow::{Context as _, Result};
-    use serde_json::{json, Map, Value};
+    use anyhow::Result;
 
-    use super::{home, write_config, SERVER_NAME};
+    use super::home;
 
     fn config_dir() -> PathBuf {
         if cfg!(target_os = "macos") {
@@ -375,18 +395,67 @@ mod desktop {
             .or_else(|| Some(config_dir()).filter(|d| d.is_dir()))
     }
 
-    fn load() -> Result<(String, Value)> {
-        let text = std::fs::read_to_string(path()).unwrap_or_default();
+    pub fn registered_command() -> Option<String> {
+        super::mcp_json::registered_command(&path())
+    }
+
+    /// Adds (with `exe`) or removes the server's entry, keeping the app's
+    /// preferences and other servers as they were.
+    pub fn set(exe: Option<&str>) -> Result<()> {
+        super::mcp_json::set(&path(), "Claude Desktop", exe)
+    }
+}
+
+mod kimi {
+    //! Kimi Code (`kimi`) has no `mcp add`: its MCP servers are the
+    //! `mcpServers` of `mcp.json` in its config folder, `~/.kimi-code` or
+    //! `$KIMI_CODE_HOME`.
+
+    use std::path::PathBuf;
+
+    use anyhow::Result;
+
+    use super::home;
+
+    pub fn dir() -> PathBuf {
+        std::env::var_os("KIMI_CODE_HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".kimi-code"))
+    }
+
+    pub fn path() -> PathBuf {
+        dir().join("mcp.json")
+    }
+
+    pub fn set(exe: Option<&str>) -> Result<()> {
+        super::mcp_json::set(&path(), "Kimi", exe)
+    }
+}
+
+mod mcp_json {
+    //! The `{"mcpServers": {name: {"command", "args"}}}` file Claude Desktop
+    //! and Kimi Code both keep, edited without disturbing the rest of it.
+
+    use std::path::Path;
+
+    use anyhow::{Context as _, Result};
+    use serde_json::{json, Map, Value};
+
+    use super::{write_config, SERVER_NAME};
+
+    fn load(path: &Path) -> Result<(String, Value)> {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
         if text.trim().is_empty() {
             return Ok((text, json!({})));
         }
         let value =
-            serde_json::from_str(&text).with_context(|| format!("reading {}", path().display()))?;
+            serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
         Ok((text, value))
     }
 
-    pub fn registered_command() -> Option<String> {
-        let (_, config) = load().ok()?;
+    pub fn registered_command(path: &Path) -> Option<String> {
+        let (_, config) = load(path).ok()?;
         config
             .get("mcpServers")?
             .get(SERVER_NAME)?
@@ -395,19 +464,19 @@ mod desktop {
             .map(str::to_string)
     }
 
-    /// Adds (with `exe`) or removes the server's entry, keeping the app's
-    /// preferences and other servers as they were.
-    pub fn set(exe: Option<&str>) -> Result<()> {
-        let (original, mut config) = load()?;
+    /// Adds (with `exe`) or removes the server's entry. `label` names the
+    /// client in error messages.
+    pub fn set(path: &Path, label: &str, exe: Option<&str>) -> Result<()> {
+        let (original, mut config) = load(path)?;
         let root = config
             .as_object_mut()
-            .context("Claude Desktop's config is not a JSON object")?;
+            .with_context(|| format!("{label}'s config is not a JSON object"))?;
         let servers = root
             .entry("mcpServers")
             .or_insert_with(|| Value::Object(Map::new()));
         let servers = servers
             .as_object_mut()
-            .context("Claude Desktop's \"mcpServers\" setting is not an object")?;
+            .with_context(|| format!("{label}'s \"mcpServers\" setting is not an object"))?;
         match exe {
             Some(exe) => {
                 servers.insert(
@@ -422,7 +491,7 @@ mod desktop {
                 }
             }
         }
-        write_config(&path(), &original, &config)
+        write_config(path, &original, &config)
     }
 }
 
@@ -550,5 +619,47 @@ mod opencode {
             assert!(!has_comments(r#"{ "url": "http://x/y" }"#));
             assert!(!has_comments(r#"{ "a": "\"//\"" }"#));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kimi_is_a_client() {
+        assert_eq!(Client::parse("Kimi").unwrap(), Client::Kimi);
+        assert_eq!(Client::ALL.len(), 5);
+        assert_eq!(Client::ALL[Client::Kimi as usize], Client::Kimi);
+        assert!(Client::parse("nope").unwrap_err().to_string().contains("kimi"));
+    }
+
+    #[test]
+    fn the_mcp_json_helper_adds_and_removes_only_our_entry() {
+        let dir = std::env::temp_dir().join(format!("ocu-mcpjson-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"theme": "dark", "mcpServers": {"other": {"command": "x"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(mcp_json::registered_command(&path), None);
+        mcp_json::set(&path, "Kimi", Some("/bin/opencomputeruse")).unwrap();
+        assert_eq!(
+            mcp_json::registered_command(&path).as_deref(),
+            Some("/bin/opencomputeruse")
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert_eq!(v["mcpServers"][SERVER_NAME]["args"][0], "mcp");
+        mcp_json::set(&path, "Kimi", None).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v["mcpServers"].get(SERVER_NAME).is_none());
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

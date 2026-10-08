@@ -18,6 +18,9 @@ use devices::Devices;
 pub struct Issued {
     pub device: devices::Device,
     pub skill: String,
+    /// What the device adds under `hosts:` in its hosts file.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub host_entry: String,
 }
 
 pub fn generate(name: &str, url: &str) -> Result<Issued> {
@@ -25,6 +28,7 @@ pub fn generate(name: &str, url: &str) -> Result<Issued> {
     let (device, key) = d.add(name, url)?;
     Ok(Issued {
         skill: skill::render(&device, &key, &crate::tools::list()),
+        host_entry: skill::host_entry(&device, &key),
         device,
     })
 }
@@ -34,26 +38,49 @@ pub fn regenerate(id: &str, url: Option<&str>) -> Result<Issued> {
     let (device, key) = d.regenerate(id, url)?;
     Ok(Issued {
         skill: skill::render(&device, &key, &crate::tools::list()),
+        host_entry: skill::host_entry(&device, &key),
         device,
     })
 }
 
-/// Where a skill is saved: `~/Downloads/<skill name>/SKILL.md`, ready to
-/// copy into a device's skills folder.
-pub fn save_skill(skill: &str) -> Result<std::path::PathBuf> {
+/// Saves a file to `~/Downloads/<folder>/<file>`, created readable by the
+/// user alone (it may hold a key), and returns where it went. A link at the
+/// folder or file is never written through; an existing regular file is
+/// replaced.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::PathBuf> {
+    use std::io::Write as _;
+
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .unwrap_or_default();
-    let dir = std::path::Path::new(&home)
-        .join("Downloads")
-        .join(skill::skill_name());
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("SKILL.md");
-    std::fs::write(&path, skill)?;
+    let dir = std::path::Path::new(&home).join("Downloads").join(folder);
+    let path = dir.join(file);
+    for p in [&dir, &path] {
+        anyhow::ensure!(
+            !std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()),
+            "{} is a symlink; not writing through it",
+            p.display()
+        );
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(text.as_bytes())?;
+        // A file that was already there keeps its old mode otherwise.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, text)?;
     }
     Ok(path)
 }

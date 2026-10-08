@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::clients::{self, Client};
 use crate::config::{Config, Provider};
 use crate::remote::{self, devices::Device, devices::Devices, skill};
+use crate::skills;
 use crate::update::{self, Installer, Progress, UpdateStatus};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -90,9 +91,11 @@ pub struct Status {
     fields: Vec<(Field, LineEdit)>,
     saved: bool,
     error: Option<String>,
-    clients: [ClientState; 4],
+    clients: [ClientState; Client::ALL.len()],
     busy: Option<Client>,
     client_message: Option<String>,
+    /// The generic skill's text, while it is showing under the client list.
+    skill_preview: Option<String>,
     updates: Updates,
     remote: Remote,
     /// "Work while the Mac is locked": whether the privileged pieces are in
@@ -112,6 +115,8 @@ struct Remote {
     confirm_remove: Option<String>,
     url_placeholder: String,
     error: Option<String>,
+    /// A failure of the Generate Skill form, shown with it.
+    skill_error: Option<String>,
     /// The server's state as last drawn, to redraw when it changes.
     server_seen: (Option<String>, Option<String>),
 }
@@ -121,6 +126,11 @@ enum Panel {
     Issued {
         device: String,
         skill: String,
+        /// What to add under `hosts:` on the device.
+        entry: String,
+        /// Made by Regenerate Key, so shown beside the device list rather
+        /// than with the Generate Skill button.
+        regen: bool,
         note: Option<String>,
     },
 }
@@ -141,6 +151,10 @@ struct Updates {
 struct ClientState {
     found: bool,
     registration: clients::Registration,
+    /// The client has a skills folder on this computer, and whether the
+    /// generic skill is in it.
+    skill_available: bool,
+    skill_installed: bool,
 }
 
 const GOOD: u32 = 0x2E7D4F;
@@ -249,10 +263,15 @@ fn status(label: &str, good: bool) -> gpui::Div {
         )
 }
 
-fn client_states() -> [ClientState; 4] {
-    Client::ALL.map(|c| ClientState {
-        found: clients::find(c).is_some(),
-        registration: clients::registration(c),
+fn client_states() -> [ClientState; Client::ALL.len()] {
+    Client::ALL.map(|c| {
+        let found = clients::find(c).is_some();
+        ClientState {
+            found,
+            registration: clients::registration(c),
+            skill_available: skills::available(c, found),
+            skill_installed: skills::installed(c),
+        }
     })
 }
 
@@ -305,6 +324,7 @@ impl Status {
             },
             busy: None,
             client_message: None,
+            skill_preview: None,
             lock_installed: ocu_macos::lock::installed(),
             lock_busy: false,
             lock_message: None,
@@ -374,6 +394,7 @@ impl Status {
     fn open_form(&mut self) {
         self.remote.panel = Some(Panel::Form);
         self.remote.error = None;
+        self.remote.skill_error = None;
         // A Tailscale lookup is a subprocess; once per form is plenty.
         self.remote.url_placeholder = remote::devices::suggested_url(self.config.http.port);
         self.activate(Field::DeviceName);
@@ -388,25 +409,28 @@ impl Status {
             .filter(|u| !u.is_empty())
             .unwrap_or_else(|| self.remote.url_placeholder.clone());
         match remote::generate(&name, &url) {
-            Ok(issued) => self.show_issued(issued),
-            Err(e) => self.remote.error = Some(format!("{e:#}")),
+            Ok(issued) => self.show_issued(issued, false),
+            Err(e) => self.remote.skill_error = Some(format!("{e:#}")),
         }
     }
 
     fn regenerate(&mut self, id: &str) {
         match remote::regenerate(id, None) {
-            Ok(issued) => self.show_issued(issued),
+            Ok(issued) => self.show_issued(issued, true),
             Err(e) => self.remote.error = Some(format!("{e:#}")),
         }
     }
 
-    fn show_issued(&mut self, issued: remote::Issued) {
+    fn show_issued(&mut self, issued: remote::Issued, regen: bool) {
         self.remote.panel = Some(Panel::Issued {
             device: issued.device.name.clone(),
             skill: issued.skill,
+            entry: issued.host_entry,
+            regen,
             note: None,
         });
         self.remote.error = None;
+        self.remote.skill_error = None;
         self.remote.devices = Devices::load().devices;
         for (_, e) in &mut self.fields {
             e.active = false;
@@ -423,6 +447,177 @@ impl Status {
             Ok(_) => self.remote.devices = Devices::load().devices,
             Err(e) => self.remote.error = Some(format!("{e:#}")),
         }
+    }
+
+    /// The key just issued: its hosts-file entry, and a skill that holds it.
+    fn issued_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let p = palette();
+        let dim = |t: String| div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(t);
+        let Some(Panel::Issued { device, skill, entry, note, .. }) = &self.remote.panel else {
+            return div().into_any_element();
+        };
+        let file = format!("hosts:\n{entry}");
+        let (copy, save, copy_file, save_file) = (skill.clone(), skill.clone(), file.clone(), file.clone());
+        let mono = |id: &'static str, text: String| {
+            div()
+                .id(id)
+                .max_h(px(220.0))
+                .overflow_y_scroll()
+                .p_2()
+                .rounded(px(6.0))
+                .bg(rgb(p.deep_bg))
+                .font_family("Menlo")
+                .text_size(px(11.0))
+                .child(text)
+        };
+        let note_msg = |s: &mut Self, msg: String| {
+            if let Some(Panel::Issued { note, .. }) = &mut s.remote.panel {
+                *note = Some(msg);
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgb(p.edge))
+            .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("Key for {device}")))
+            .child(dim(format!(
+                "On {device}, save this as {}. If that file exists, add the lines under its `hosts:` instead (the last entry of a name wins, so a regenerated key can go below the old one). The key isn't shown anywhere else.",
+                skill::HOSTS_FILE
+            )))
+            .child(mono("host-entry", file.clone()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Button::new("copy-entry", "Copy hosts.yaml").primary().on_click(cx.listener(move |s, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_file.clone()));
+                        note_msg(s, "Copied. It holds the key, so paste it into the file and clear the clipboard.".into());
+                        cx.notify();
+                    })))
+                    .child(Button::new("save-entry", "Save hosts.yaml").on_click(cx.listener(move |s, _, _, cx| {
+                        let msg = match remote::save_download("opencomputeruse", "hosts.yaml", &save_file) {
+                            Ok(path) => {
+                                let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
+                                format!("Saved {}.", path.display())
+                            }
+                            Err(e) => format!("Couldn't save: {e:#}"),
+                        };
+                        note_msg(s, msg);
+                        cx.notify();
+                    }))),
+            )
+            .child(dim(format!(
+                "Or install a skill on {device} that holds this key itself, as ~/.claude/skills/{}/SKILL.md:",
+                skill::skill_name()
+            )))
+            .child(mono("skill-text", skill.clone()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Button::new("copy-skill", "Copy skill").on_click(cx.listener(move |s, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                        note_msg(s, "Copied.".into());
+                        cx.notify();
+                    })))
+                    .child(Button::new("save-skill", "Save to Downloads").on_click(cx.listener(move |s, _, _, cx| {
+                        let msg = match remote::save_download(&skill::skill_name(), "SKILL.md", &save) {
+                            Ok(path) => {
+                                let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
+                                format!("Saved {}.", path.display())
+                            }
+                            Err(e) => format!("Couldn't save: {e:#}"),
+                        };
+                        note_msg(s, msg);
+                        cx.notify();
+                    })))
+                    .child(Button::new("done-skill", "Done").ghost().on_click(cx.listener(|s, _, _, cx| {
+                        s.remote.panel = None;
+                        cx.notify();
+                    })))
+                    .when_some(note.clone(), |d, n| d.child(dim(n))),
+            )
+            .when(!self.config.http.enabled, |d| {
+                d.child(
+                    div()
+                        .text_color(rgb(p.warning))
+                        .text_size(px(11.5))
+                        .child("The HTTP server is off; turn on Serve over HTTP before the device connects."),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Generate Skill, below the MCP clients: the form, and the key it issues.
+    fn skill_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        let dim = |t: String| div().text_color(rgb(p.text_dim)).child(t);
+        let section = div().flex().flex_col().gap_2().child(dim(format!(
+            "Add skill installs one generic skill in a client. It reads each computer's URL and key from {}, so one file serves several. Generate Skill makes a key for a device and the entry that device adds to that file.",
+            skill::HOSTS_FILE
+        )).text_size(px(11.5)));
+        match &self.remote.panel {
+            None | Some(Panel::Issued { regen: true, .. }) => section.child(
+                div().flex().child(
+                    Button::new("generate-skill", "Generate Skill…")
+                        .primary()
+                        .on_click(cx.listener(|s, _, _, cx| {
+                            s.open_form();
+                            cx.notify();
+                        })),
+                ),
+            ),
+            Some(Panel::Form) => section.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(rgb(p.edge))
+                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child("New device"))
+                    .child(Self::row("Device name", self.input(Field::DeviceName, "Work laptop", cx)))
+                    .child(Self::row("URL", self.input(Field::DeviceUrl, &self.remote.url_placeholder, cx)))
+                    .child(dim("The device that connects in, and the address it reaches this computer at.".into()).text_size(px(11.5)))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(Button::new("do-generate", "Generate Skill").primary().on_click(cx.listener(|s, _, _, cx| {
+                                s.generate_skill();
+                                cx.notify();
+                            })))
+                            .child(Button::new("cancel-generate", "Cancel").ghost().on_click(cx.listener(|s, _, _, cx| {
+                                s.remote.panel = None;
+                                s.remote.skill_error = None;
+                                cx.notify();
+                            }))),
+                    ),
+            ),
+            Some(Panel::Issued { regen: false, .. }) => section.child(self.issued_panel(cx)),
+        }
+        .when_some(self.remote.skill_error.clone(), |d, e| {
+            d.child(div().text_color(rgb(p.warning)).child(e))
+        })
+    }
+
+    fn set_skill(&mut self, client: Client, add: bool) {
+        let result = if add {
+            skills::add(client).map(|_| {
+                format!("Added the skill to {}. Start a new session to use it.", client.label())
+            })
+        } else {
+            skills::remove(client).map(|()| format!("Removed the skill from {}.", client.label()))
+        };
+        self.client_message = Some(result.unwrap_or_else(|e| format!("{e:#}")));
+        self.clients = client_states();
     }
 
     fn remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -530,116 +725,10 @@ impl Status {
             );
         }
 
-        // The form, or the skill it made.
-        section = match &self.remote.panel {
-            None => section.child(
-                div().flex().child(
-                    Button::new("generate-skill", "Generate Skill…")
-                        .primary()
-                        .on_click(cx.listener(|s, _, _, cx| {
-                            s.open_form();
-                            cx.notify();
-                        })),
-                ),
-            ),
-            Some(Panel::Form) => section.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(p.edge))
-                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child("New device"))
-                    .child(Self::row("Device name", self.input(Field::DeviceName, "Work laptop", cx)))
-                    .child(Self::row("URL", self.input(Field::DeviceUrl, &self.remote.url_placeholder, cx)))
-                    .child(dim("The device that connects in, and the address it reaches this computer at.".into()).text_size(px(11.5)))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(Button::new("do-generate", "Generate Skill").primary().on_click(cx.listener(|s, _, _, cx| {
-                                s.generate_skill();
-                                cx.notify();
-                            })))
-                            .child(Button::new("cancel-generate", "Cancel").ghost().on_click(cx.listener(|s, _, _, cx| {
-                                s.remote.panel = None;
-                                s.remote.error = None;
-                                cx.notify();
-                            }))),
-                    ),
-            ),
-            Some(Panel::Issued { device, skill, note }) => {
-                let (copy, save) = (skill.clone(), skill.clone());
-                section.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p_3()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(rgb(p.edge))
-                        .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("Skill for {device}")))
-                        .child(dim(format!(
-                            "Install it on {device} as ~/.claude/skills/{}/SKILL.md. It holds the device's key, which isn't shown anywhere else.",
-                            skill::skill_name()
-                        )).text_size(px(11.5)))
-                        .child(
-                            div()
-                                .id("skill-text")
-                                .max_h(px(220.0))
-                                .overflow_y_scroll()
-                                .p_2()
-                                .rounded(px(6.0))
-                                .bg(rgb(p.deep_bg))
-                                .font_family("Menlo")
-                                .text_size(px(11.0))
-                                .child(skill.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(Button::new("copy-skill", "Copy").primary().on_click(cx.listener(move |s, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                                    if let Some(Panel::Issued { note, .. }) = &mut s.remote.panel {
-                                        *note = Some("Copied.".into());
-                                    }
-                                    cx.notify();
-                                })))
-                                .child(Button::new("save-skill", "Save to Downloads").on_click(cx.listener(move |s, _, _, cx| {
-                                    let msg = match remote::save_skill(&save) {
-                                        Ok(path) => {
-                                            let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
-                                            format!("Saved {}.", path.display())
-                                        }
-                                        Err(e) => format!("Couldn't save: {e:#}"),
-                                    };
-                                    if let Some(Panel::Issued { note, .. }) = &mut s.remote.panel {
-                                        *note = Some(msg);
-                                    }
-                                    cx.notify();
-                                })))
-                                .child(Button::new("done-skill", "Done").ghost().on_click(cx.listener(|s, _, _, cx| {
-                                    s.remote.panel = None;
-                                    cx.notify();
-                                })))
-                                .when_some(note.clone(), |d, n| d.child(dim(n).text_size(px(11.5)))),
-                        )
-                        .when(!http.enabled, |d| {
-                            d.child(
-                                div()
-                                    .text_color(rgb(p.warning))
-                                    .text_size(px(11.5))
-                                    .child("The HTTP server is off; turn on Serve over HTTP before the device connects."),
-                            )
-                        }),
-                )
-            }
-        };
+        // A key Regenerate Key just made, beside the device list.
+        if matches!(self.remote.panel, Some(Panel::Issued { regen: true, .. })) {
+            section = section.child(self.issued_panel(cx));
+        }
         section.when_some(self.remote.error.clone(), |d, e| {
             d.child(div().text_color(rgb(p.warning)).child(e))
         })
@@ -1220,14 +1309,14 @@ impl Render for Status {
                                     .items_center()
                                     .gap_3()
                                     .child(div().flex_1().min_w_0().font_weight(gpui::FontWeight::MEDIUM).child(client.label()))
-                                    .child(div().w(px(130.0)).flex_none().child(match (state.found, &state.registration, busy) {
+                                    .child(div().w(px(105.0)).flex_none().child(match (state.found, &state.registration, busy) {
                                         (_, _, true) => status("Working…", false),
                                         (false, _, _) => status("Not found", false),
                                         (true, clients::Registration::Current, _) => status("Installed", true),
                                         (true, clients::Registration::Elsewhere(_), _) => status("Points elsewhere", false),
                                         (true, clients::Registration::Absent, _) => status("Not installed", false),
                                     }))
-                                    .child(div().w(px(180.0)).flex_none().flex().justify_end().gap_2().when(state.found, |d| {
+                                    .child(div().flex_none().flex().justify_end().gap_2().when(state.found, |d| {
                                         d.child(
                                             Button::new(("install", client as usize), if installed { "Reinstall" } else { "Install" })
                                                 // A stale entry needs fixing as much as a missing one.
@@ -1243,7 +1332,26 @@ impl Render for Status {
                                                     .on_click(cx.listener(move |s, _, _, cx| s.install(client, false, cx))),
                                             )
                                         })
-                                    })),
+                                    }))
+                                    .when(state.skill_available, |d| {
+                                        d.child(div().flex_none().flex().justify_end().gap_2().child(
+                                            Button::new(("add-skill", client as usize), "Add skill")
+                                                .on_click(cx.listener(move |s, _, _, cx| {
+                                                    s.set_skill(client, true);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .when(state.skill_installed, |d| {
+                                            d.child(
+                                                Button::new(("remove-skill", client as usize), "Remove skill")
+                                                    .ghost()
+                                                    .on_click(cx.listener(move |s, _, _, cx| {
+                                                        s.set_skill(client, false);
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                        }))
+                                    })
                             )
                             .when_some(elsewhere, |d, path| {
                                 d.child(
@@ -1269,6 +1377,51 @@ impl Render for Status {
                                 cx.notify();
                             }))),
                     )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().text_color(rgb(p.text_dim)).child("Generic skill (any agent)"))
+                            .child(Button::new("preview-skill", if self.skill_preview.is_some() { "Hide preview" } else { "Preview" }).flex_none().on_click(cx.listener(|s, _, _, cx| {
+                                s.skill_preview = match s.skill_preview {
+                                    Some(_) => None,
+                                    None => Some(skill::render_generic(&crate::tools::list())),
+                                };
+                                cx.notify();
+                            })))
+                            .child(Button::new("copy-generic", "Copy skill").flex_none().on_click(cx.listener(|s, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(skill::render_generic(&crate::tools::list())));
+                                s.client_message = Some("Copied the skill.".into());
+                                cx.notify();
+                            })))
+                            .child(Button::new("save-generic", "Save skill").flex_none().on_click(cx.listener(|s, _, _, cx| {
+                                let text = skill::render_generic(&crate::tools::list());
+                                s.client_message = Some(match remote::save_download(skill::GENERIC_SKILL_NAME, "SKILL.md", &text) {
+                                    Ok(path) => {
+                                        let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
+                                        format!("Saved {}.", path.display())
+                                    }
+                                    Err(e) => format!("Couldn't save: {e:#}"),
+                                });
+                                cx.notify();
+                            }))),
+                    )
+                    .when_some(self.skill_preview.clone(), |d, text| {
+                        d.child(
+                            div()
+                                .id("generic-preview")
+                                .max_h(px(260.0))
+                                .overflow_y_scroll()
+                                .p_2()
+                                .rounded(px(6.0))
+                                .bg(rgb(p.deep_bg))
+                                .font_family("Menlo")
+                                .text_size(px(11.0))
+                                .child(text),
+                        )
+                    })
+                    .child(self.skill_section(cx))
                     // Sessions.
                     .child(Self::section("Sessions"))
                     .when(self.sessions.is_empty(), |d| {
@@ -1415,7 +1568,7 @@ impl Render for Status {
 
 pub fn open(service: Arc<Service>, cx: &mut App) -> Option<gpui::WindowHandle<Status>> {
     use gpui::{size, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
-    let bounds = Bounds::centered(None, size(px(560.0), px(720.0)), cx);
+    let bounds = Bounds::centered(None, size(px(640.0), px(720.0)), cx);
     super::native::set_regular(true);
     let handle = cx
         .open_window(
