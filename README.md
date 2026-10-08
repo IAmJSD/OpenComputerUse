@@ -118,6 +118,19 @@ docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm ocu-l
   the focused control.
 - **Tree and element actions:** UI Automation.
 
+## Install with Homebrew
+
+On macOS, install the app and the `opencomputeruse` command from the tap:
+
+```sh
+brew tap IAmJSD/OpenComputerUse https://github.com/IAmJSD/OpenComputerUse
+brew install --cask opencomputeruse
+opencomputeruse --version
+```
+
+The cask puts `OpenComputerUse.app` in `/Applications` and links the
+`opencomputeruse` command into Homebrew's `bin`.
+
 ## Install into a client
 
 From the app's window, or:
