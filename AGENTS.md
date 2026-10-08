@@ -1,5 +1,3 @@
-# Agents
-
 ## Cutting a release
 
 1. Bump the version in `Cargo.toml` (`[workspace.package]`) and
