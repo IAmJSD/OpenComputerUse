@@ -14,10 +14,12 @@ On macOS, install with Homebrew:
 
 ```sh
 brew tap IAmJSD/OpenComputerUse https://github.com/IAmJSD/OpenComputerUse
+brew trust iamjsd/opencomputeruse
 brew install --cask opencomputeruse
 ```
 
-The cask puts `OpenComputerUse.app` in `/Applications` and links the
+Homebrew won't load casks from a third-party tap until you trust it, which is
+what `brew trust` is for. The cask puts `OpenComputerUse.app` in `/Applications` and links the
 `opencomputeruse` command into Homebrew's `bin`. The app updates itself, so
 `brew upgrade` leaves it alone. Or download `OpenComputerUse.dmg` from the
 [latest release](https://github.com/IAmJSD/OpenComputerUse/releases/latest).
