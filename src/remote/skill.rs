@@ -295,28 +295,29 @@ claude mcp add --transport http {name} {url_q}/mcp --header "Authorization: Bear
 }
 
 /// A message to paste into the device's agent, which then sets itself up
-/// to drive this computer: it installs the generic `skill` (if it isn't
-/// already there) and adds this computer's `entry` to the hosts file.
+/// to drive this computer: it adds this computer's `entry`, with the key,
+/// to the hosts file, and installs the generic `skill`. The entry comes
+/// first, where it is seen without scrolling past the skill.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn agent_prompt(skill: &str, entry: &str) -> String {
     let computer = computer_name();
     format!(
         r#"Set yourself up to drive apps on {computer}, another computer, through its OpenComputerUse HTTP API. Two steps:
 
-1. Save everything between the BEGIN SKILL and END SKILL lines, exactly as it is, as `{GENERIC_SKILL_NAME}/SKILL.md` in your skills folder, replacing any older copy:
+1. Add the lines between BEGIN HOSTS and END HOSTS to {HOSTS_FILE}, under its `hosts:` line. If the file doesn't exist, create it with `hosts:` as its first line. If it already has an entry with the same name, replace that entry. The entry holds this computer's key, so make the file readable by this user only (chmod 600 on macOS and Linux) and don't repeat the key back to me.
+2. Save everything between the BEGIN SKILL and END SKILL lines, exactly as it is, as `{GENERIC_SKILL_NAME}/SKILL.md` in your skills folder, replacing any older copy:
    - Claude Code: ~/.claude/skills/{GENERIC_SKILL_NAME}/SKILL.md
    - Codex: ~/.codex/skills/{GENERIC_SKILL_NAME}/SKILL.md
    - OpenCode: ~/.config/opencode/skills/{GENERIC_SKILL_NAME}/SKILL.md
    - Anything else: wherever you keep skills, or your instructions file if you have no skills.
-2. Add the lines between BEGIN HOSTS and END HOSTS to {HOSTS_FILE}, under its `hosts:` line. If the file doesn't exist, create it with `hosts:` as its first line. If it already has an entry with the same name, replace that entry. The entry holds a key, so make the file readable by this user only (chmod 600 on macOS and Linux) and don't repeat the key back to me.
 
 Then tell me what you changed, and that a new session picks the skill up.
 
------BEGIN SKILL-----
-{skill}-----END SKILL-----
-
 -----BEGIN HOSTS-----
 {entry}-----END HOSTS-----
+
+-----BEGIN SKILL-----
+{skill}-----END SKILL-----
 "#
     )
 }
@@ -375,6 +376,7 @@ mod tests {
         assert!(p.contains(&format!("-----BEGIN HOSTS-----\n{entry}-----END HOSTS-----\n")));
         assert!(p.contains("~/.claude/skills/opencomputeruse-remote/SKILL.md"));
         assert!(p.contains(HOSTS_FILE));
+        assert!(p.find("BEGIN HOSTS") < p.find("BEGIN SKILL"));
     }
 
     #[test]
