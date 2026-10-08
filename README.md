@@ -8,6 +8,23 @@ that id, then end the session. The app works behind your other windows,
 and your pointer, keyboard focus and frontmost app stay where they are.
 Sessions end when the MCP server exits, including when it is killed.
 
+## Install
+
+On macOS, install with Homebrew:
+
+```sh
+brew tap IAmJSD/OpenComputerUse https://github.com/IAmJSD/OpenComputerUse
+brew install --cask opencomputeruse
+```
+
+The cask puts `OpenComputerUse.app` in `/Applications` and links the
+`opencomputeruse` command into Homebrew's `bin`. The app updates itself, so
+`brew upgrade` leaves it alone. Or download `OpenComputerUse.dmg` from the
+[latest release](https://github.com/IAmJSD/OpenComputerUse/releases/latest).
+Linux and Windows releases have plain binaries of the MCP server.
+
+Then add it to your client (see [Install into a client](#install-into-a-client)).
+
 ## Tools
 
 | Tool | What it does |
@@ -181,6 +198,10 @@ Bump `version` in `Cargo.toml`, commit, and push a matching tag (`v0.2.0`).
 installs) and plain Linux and Windows binaries of the MCP server, then
 publishes them as a GitHub release. The app checks for releases daily and from
 its menu, and installs them in place when they are signed by the same team.
+
+After the release is published, bump `version` and `sha256` in
+`Casks/opencomputeruse.rb` to the new `OpenComputerUse.zip`
+(`shasum -a 256 OpenComputerUse.zip`) so new Homebrew installs get it.
 
 The macOS job signs and notarizes with these repository secrets, and builds
 unsigned without them: `MACOS_CERT_P12_BASE64`, `MACOS_CERT_P12_PASSWORD`
