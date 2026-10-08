@@ -166,23 +166,24 @@ starts again at login, so it survives reboots.
 
 Each device needs a key. **Generate Skill** asks for the device's name and the
 URL it reaches this computer at (this computer's Tailscale name by default),
-and gives back the key once, as an entry for the device's hosts file and as a
-keyed `SKILL.md`. Keys are stored only as hashes, so that is the one place a
-key appears. Devices are listed in the app with **Regenerate Key** and
-**Remove**, and in the local MCP server as `list_devices`, `generate_skill`,
-`regenerate_key` and `remove_device`. Regenerating or removing a key ends
-that device's sessions. None of this management is reachable over HTTP.
+and shows the key once, in a dialog with two tabs:
 
-### The generic skill
+- **Prompt for an agent**: one prompt to paste into an agent on the device
+  (Claude Code, Codex, OpenCode, …). It holds the skill and this computer's
+  hosts-file entry, and asks the agent to install the one and add the other.
+- **Skill file**: the hosts-file entry and the skill, to put in place by
+  hand. The skill is the same for every computer, so a device needs it only
+  once; each computer it drives adds an entry.
 
-The app's client list has **Add skill** and **Remove skill** buttons for
-Claude Code (`~/.claude/skills`), Codex (`~/.codex/skills`), OpenCode
-(`~/.config/opencode/skills`) and Kimi (`~/.kimi-code/skills`). They write or
-delete one file, `opencomputeruse-remote/SKILL.md`, in that folder, and never
-touch another skill. For any other agent, **Preview**, **Copy skill** and
-**Save skill** under the client list give the same file. After **Generate
-Skill**, **Copy hosts.yaml** and **Save hosts.yaml** give a hosts file with
-the new key for that device (saved readable by you alone). The skill holds no key. It teaches the agent to read
+Keys are stored only as hashes, so that is the one place a key appears.
+Devices are listed in the app with **Regenerate Key** and **Remove**, and in
+the local MCP server as `list_devices`, `generate_skill`, `regenerate_key`
+and `remove_device`. Regenerating or removing a key ends that device's
+sessions. None of this management is reachable over HTTP.
+
+### The skill and the hosts file
+
+The skill (`opencomputeruse-remote`) holds no key. It teaches the agent to read
 host names, URLs and keys from `~/.config/opencomputeruse/hosts.yaml` on the
 device that drives the others, so one file serves several computers:
 

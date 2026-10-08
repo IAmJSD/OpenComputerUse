@@ -11,7 +11,6 @@ mod mcp;
 mod recipe;
 mod remote;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-mod skills;
 mod tools;
 mod update;
 mod vision;

@@ -294,6 +294,33 @@ claude mcp add --transport http {name} {url_q}/mcp --header "Authorization: Bear
     s
 }
 
+/// A message to paste into the device's agent, which then sets itself up
+/// to drive this computer: it installs the generic `skill` (if it isn't
+/// already there) and adds this computer's `entry` to the hosts file.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn agent_prompt(skill: &str, entry: &str) -> String {
+    let computer = computer_name();
+    format!(
+        r#"Set yourself up to drive apps on {computer}, another computer, through its OpenComputerUse HTTP API. Two steps:
+
+1. Save everything between the BEGIN SKILL and END SKILL lines, exactly as it is, as `{GENERIC_SKILL_NAME}/SKILL.md` in your skills folder, replacing any older copy:
+   - Claude Code: ~/.claude/skills/{GENERIC_SKILL_NAME}/SKILL.md
+   - Codex: ~/.codex/skills/{GENERIC_SKILL_NAME}/SKILL.md
+   - OpenCode: ~/.config/opencode/skills/{GENERIC_SKILL_NAME}/SKILL.md
+   - Anything else: wherever you keep skills, or your instructions file if you have no skills.
+2. Add the lines between BEGIN HOSTS and END HOSTS to {HOSTS_FILE}, under its `hosts:` line. If the file doesn't exist, create it with `hosts:` as its first line. If it already has an entry with the same name, replace that entry. The entry holds a key, so make the file readable by this user only (chmod 600 on macOS and Linux) and don't repeat the key back to me.
+
+Then tell me what you changed, and that a new session picks the skill up.
+
+-----BEGIN SKILL-----
+{skill}-----END SKILL-----
+
+-----BEGIN HOSTS-----
+{entry}-----END HOSTS-----
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +365,16 @@ mod tests {
         // The helper lives in the private config folder, not in /tmp.
         assert!(s.contains(". ~/.config/opencomputeruse/ocu.sh"));
         assert!(!s.contains("TMPDIR") && !s.contains("{{"));
+    }
+
+    #[test]
+    fn the_agent_prompt_carries_the_skill_and_the_entry() {
+        let entry = host_entry(&device("Laptop", "http://x.ts.net:8642"), "ocu_k");
+        let p = agent_prompt("---\nname: x\n---\n", &entry);
+        assert!(p.contains("-----BEGIN SKILL-----\n---\nname: x\n---\n-----END SKILL-----\n"));
+        assert!(p.contains(&format!("-----BEGIN HOSTS-----\n{entry}-----END HOSTS-----\n")));
+        assert!(p.contains("~/.claude/skills/opencomputeruse-remote/SKILL.md"));
+        assert!(p.contains(HOSTS_FILE));
     }
 
     #[test]

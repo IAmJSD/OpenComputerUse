@@ -95,19 +95,6 @@ pub fn find(client: Client) -> Option<PathBuf> {
     find_cli(client.binary())
 }
 
-/// The folder a client keeps its config in, and its skills folder under it.
-/// Claude Desktop has no skills folder.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn config_root(client: Client) -> Option<PathBuf> {
-    match client {
-        Client::ClaudeCode => Some(home().join(".claude")),
-        Client::Codex => Some(home().join(".codex")),
-        Client::OpenCode => Some(opencode::config_dir()),
-        Client::Kimi => Some(kimi::dir()),
-        Client::ClaudeDesktop => None,
-    }
-}
-
 fn find_cli(name: &str) -> Option<PathBuf> {
     let exe = if cfg!(windows) {
         format!("{name}.exe")

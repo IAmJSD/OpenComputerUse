@@ -19,7 +19,8 @@ use devices::Devices;
 pub struct Issued {
     pub device: devices::Device,
     pub skill: String,
-    /// What the device adds under `hosts:` in its hosts file.
+    /// What the device adds under `hosts:` in its hosts file, for the
+    /// generic skill: this computer's name, URL and the key.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub host_entry: String,
 }
