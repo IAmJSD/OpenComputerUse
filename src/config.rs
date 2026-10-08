@@ -78,8 +78,10 @@ impl RecipeConfig {
 pub struct HttpConfig {
     pub enabled: bool,
     pub port: u16,
-    /// Every interface by default, so devices on the network (or the
-    /// tailnet) can reach it; every request still needs a device's key.
+    /// Loopback by default. The server controls the mouse, keyboard and
+    /// screen, so reaching it from the network is opt-in: set this to a
+    /// tailnet or LAN address, or "0.0.0.0" for every interface. There is
+    /// no TLS; every request still needs a device's key.
     pub bind: String,
 }
 
@@ -88,8 +90,27 @@ impl Default for HttpConfig {
         Self {
             enabled: false,
             port: 8642,
-            bind: "0.0.0.0".into(),
+            bind: "127.0.0.1".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_binds_loopback_by_default() {
+        assert_eq!(HttpConfig::default().bind, "127.0.0.1");
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.http.bind, "127.0.0.1");
+    }
+
+    #[test]
+    fn http_bind_can_be_set_in_the_config_file() {
+        let config: Config = serde_json::from_str(r#"{"http":{"bind":"0.0.0.0"}}"#).unwrap();
+        assert_eq!(config.http.bind, "0.0.0.0");
+        assert_eq!(config.http.port, 8642);
     }
 }
 

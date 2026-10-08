@@ -448,7 +448,7 @@ impl Status {
             .flex_col()
             .gap_3()
             .child(dim(
-                "Let other devices, on your network or over Tailscale, drive apps on this computer through an HTTP API. Each device gets its own key, inside a skill you install on it.".into(),
+                "Let other devices, on your network or over Tailscale, drive apps on this computer through an HTTP API. Each device gets its own key, inside a skill you install on it. The server listens on this computer only until \"http\".\"bind\" in the settings file names a network address; that exposes control of this computer to the network.".into(),
             ))
             .child(
                 div()

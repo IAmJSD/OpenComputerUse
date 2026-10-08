@@ -97,7 +97,7 @@ pub fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "http_server",
-            "description": "Show, or turn on and off, the HTTP server that lets other devices drive this computer with a key (off by default). While on, it starts again after a reboot. Devices reach it at the URL in their skill, usually over Tailscale.",
+            "description": "Show, or turn on and off, the HTTP server that lets other devices drive this computer with a key (off by default). While on, it starts again after a reboot. It listens on 127.0.0.1 unless http.bind in the settings file (or `serve --bind`) names another address, which other devices need before they can reach it; a non-loopback address exposes control of this computer to the network. Devices reach it at the URL in their skill, usually over Tailscale.",
             "inputSchema": { "type": "object", "properties": {
                 "enabled": { "type": "boolean", "description": "Turn the server on or off. Leave out to only show its state." },
                 "port": { "type": "integer", "description": format!("The port to listen on. Currently {port}.") },

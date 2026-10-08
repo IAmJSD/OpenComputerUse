@@ -29,7 +29,10 @@ USAGE:
     opencomputeruse install <client>      Register the MCP server with claude, claude-desktop, codex or opencode
     opencomputeruse uninstall <client>    Remove it again
     opencomputeruse clients               Show which clients run this copy
-    opencomputeruse serve [--port N]      Run the HTTP server for other devices (the app does this on macOS)
+    opencomputeruse serve [--port N] [--bind ADDR]
+                                          Run the HTTP server for other devices (the app does this on macOS).
+                                          Listens on 127.0.0.1 unless told otherwise; a non-loopback ADDR
+                                          (such as 0.0.0.0) exposes computer control to the network
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse agent [--background]  Run the macOS agent app (opening the app does this)
@@ -190,13 +193,7 @@ fn run_serve(args: &[String]) -> Result<()> {
     }
     init_stderr_log();
     let config = config::Config::load();
-    let port = match args.iter().position(|a| a == "--port") {
-        Some(i) => args
-            .get(i + 1)
-            .and_then(|p| p.parse().ok())
-            .ok_or_else(|| anyhow::anyhow!("--port takes a number"))?,
-        None => config.http.port,
-    };
+    let (bind, port) = serve_target(args, &config.http)?;
     #[cfg(target_os = "macos")]
     let platform = std::sync::Arc::new(ocu_macos::MacPlatform);
     #[cfg(target_os = "linux")]
@@ -204,7 +201,7 @@ fn run_serve(args: &[String]) -> Result<()> {
     #[cfg(windows)]
     let platform = std::sync::Arc::new(ocu_windows::WindowsPlatform::new());
     let service = ocu_core::Service::new(platform, None);
-    let server = remote::server::HttpServer::start(service, &config.http.bind, port)?;
+    let server = remote::server::HttpServer::start(service, &bind, port)?;
     eprintln!(
         "Serving on {} for the devices in {}.",
         server.addr,
@@ -212,6 +209,64 @@ fn run_serve(args: &[String]) -> Result<()> {
     );
     server.wait();
     Ok(())
+}
+
+/// The address and port `serve` listens on: `--bind` and `--port` over the
+/// config file's `http.bind` and `http.port`.
+fn serve_target(args: &[String], http: &config::HttpConfig) -> Result<(String, u16)> {
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args.get(i + 1))
+    };
+    let port = match value("--port") {
+        Some(p) => p
+            .and_then(|p| p.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("--port takes a number"))?,
+        None => http.port,
+    };
+    let bind = match value("--bind") {
+        Some(b) => b
+            .filter(|b| !b.starts_with("--"))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("--bind takes an address, like 127.0.0.1"))?,
+        None => http.bind.clone(),
+    };
+    Ok((bind, port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn serve_defaults_to_loopback() {
+        let http = config::HttpConfig::default();
+        let (bind, port) = serve_target(&args(&["serve"]), &http).unwrap();
+        assert_eq!((bind.as_str(), port), ("127.0.0.1", 8642));
+    }
+
+    #[test]
+    fn serve_bind_flag_overrides_config() {
+        let mut http = config::HttpConfig::default();
+        http.bind = "100.64.0.1".into();
+        let (bind, _) = serve_target(&args(&["serve"]), &http).unwrap();
+        assert_eq!(bind, "100.64.0.1");
+        let (bind, port) =
+            serve_target(&args(&["serve", "--bind", "0.0.0.0", "--port", "9000"]), &http).unwrap();
+        assert_eq!((bind.as_str(), port), ("0.0.0.0", 9000));
+    }
+
+    #[test]
+    fn serve_bind_flag_needs_a_value() {
+        let http = config::HttpConfig::default();
+        assert!(serve_target(&args(&["serve", "--bind"]), &http).is_err());
+        assert!(serve_target(&args(&["serve", "--bind", "--port", "9000"]), &http).is_err());
+    }
 }
 
 /// The command-line update: report, and on macOS install over this bundle.

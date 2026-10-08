@@ -184,6 +184,14 @@ There is no TLS, so use it over Tailscale or another trusted network. On
 Linux and Windows, `opencomputeruse serve` runs the server, and
 `serve --install` starts it at login.
 
+The server listens on `127.0.0.1` by default, so only this computer can
+reach it. To let other devices in, set the address with
+`opencomputeruse serve --bind <address>` or the `http.bind` key in the
+settings file: this computer's Tailscale or LAN address, or `0.0.0.0` for
+every interface. **Any non-loopback address exposes control of this
+computer's mouse, keyboard and screen to the network**, protected only by
+the device keys, so bind to the narrowest address that works.
+
 ## Settings
 
 The settings file is at `opencomputeruse config-path`. On macOS it is
