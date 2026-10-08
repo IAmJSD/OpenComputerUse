@@ -15,8 +15,8 @@ use gpui::{
 use ocu_core::{Permission, Service, SessionInfo};
 
 use super::ui::{
-    icon, palette, Badge, Button, Checkbox, Divider, Heading, LineEdit, LineEditKey, TextInput,
-    TextPress,
+    icon, palette, Badge, Button, Checkbox, Divider, DropdownButton, Heading, LineEdit,
+    LineEditKey, MenuItem, Popover, TextInput, TextPress,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -112,6 +112,8 @@ struct Remote {
     confirm_remove: Option<String>,
     url_placeholder: String,
     error: Option<String>,
+    /// The listen-address dropdown is open.
+    bind_open: bool,
     /// The server's state as last drawn, to redraw when it changes.
     server_seen: (Option<String>, Option<String>),
 }
@@ -348,7 +350,7 @@ impl Status {
     }
 
     fn set_http(&mut self, on: bool) {
-        match remote::set_server(Some(on), None) {
+        match remote::set_server(Some(on), None, None) {
             Ok(config) => {
                 self.config.http = config.http;
                 self.remote.error = None;
@@ -359,7 +361,7 @@ impl Status {
 
     fn apply_port(&mut self) {
         match self.text(Field::HttpPort).parse::<u16>() {
-            Ok(port) => match remote::set_server(None, Some(port)) {
+            Ok(port) => match remote::set_server(None, Some(port), None) {
                 Ok(config) => {
                     self.config.http = config.http;
                     self.remote.error = None;
@@ -369,6 +371,72 @@ impl Status {
             },
             Err(_) => self.remote.error = Some("The port is a number, like 8642.".into()),
         }
+    }
+
+    fn set_bind(&mut self, addr: &str) {
+        match remote::set_server(None, None, Some(addr)) {
+            Ok(config) => {
+                self.config.http = config.http;
+                self.remote.error = None;
+            }
+            Err(e) => self.remote.error = Some(format!("{e:#}")),
+        }
+        self.remote.bind_open = false;
+    }
+
+    /// The "Listen on" row: this computer's addresses in a dropdown.
+    fn bind_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        let current = self.config.http.bind.clone();
+        let open = self.remote.bind_open;
+        let choices = remote::interfaces::choices();
+        let label = choices
+            .iter()
+            .find(|c| c.addr == current)
+            .map(|c| c.label.clone())
+            .unwrap_or_else(|| current.clone());
+        let mut list = Popover::new("http-bind-list")
+            .in_flow()
+            .on_dismiss(cx.listener(|s, _, _, cx| {
+                s.remote.bind_open = false;
+                cx.notify();
+            }));
+        for (i, c) in choices.into_iter().enumerate() {
+            let addr = c.addr.clone();
+            list = list.child(
+                MenuItem::new(("http-bind", i), c.label)
+                    .checked(Some(c.addr == current))
+                    .on_click(cx.listener(move |s, _, _, cx| {
+                        s.set_bind(&addr);
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().text_color(rgb(p.text_dim)).child("Listen on"))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            DropdownButton::new("http-bind-button", label).on_press(
+                                // A press outside the list closes it first, so
+                                // the open state is read at render time: a press
+                                // on the button while open must leave it closed.
+                                cx.listener(move |s, _, _, cx| {
+                                    s.remote.bind_open = !open;
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                    ),
+            )
+            .when(self.remote.bind_open, |d| d.child(list))
     }
 
     fn open_form(&mut self) {
@@ -448,7 +516,7 @@ impl Status {
             .flex_col()
             .gap_3()
             .child(dim(
-                "Let other devices, on your network or over Tailscale, drive apps on this computer through an HTTP API. Each device gets its own key, inside a skill you install on it. The server listens on this computer only until \"http\".\"bind\" in the settings file names a network address; that exposes control of this computer to the network.".into(),
+                "Let other devices, on your network or over Tailscale, drive apps on this computer through an HTTP API. Each device gets its own key, inside a skill you install on it. It listens on 127.0.0.1, this computer only. Any other address, such as 0.0.0.0, exposes control of this computer to the network.".into(),
             ))
             .child(
                 div()
@@ -467,6 +535,7 @@ impl Status {
                     .child(div().text_color(rgb(p.text_dim)).child("Port"))
                     .child(div().w(px(80.0)).flex_none().child(self.input(Field::HttpPort, "8642", cx))),
             )
+            .child(self.bind_picker(cx))
             .child(status_line);
 
         // The devices.

@@ -122,9 +122,17 @@ pub struct HttpServer {
     pub addr: String,
 }
 
+/// `bind:port`, with an IPv6 address in brackets.
+pub fn listen_addr(bind: &str, port: u16) -> String {
+    match bind.parse::<std::net::IpAddr>() {
+        Ok(ip) => std::net::SocketAddr::new(ip, port).to_string(),
+        Err(_) => format!("{bind}:{port}"),
+    }
+}
+
 impl HttpServer {
     pub fn start(service: Arc<Service>, bind: &str, port: u16) -> Result<Self> {
-        let addr = format!("{bind}:{port}");
+        let addr = listen_addr(bind, port);
         let server =
             Arc::new(Server::http(&addr).map_err(|e| anyhow!("can't listen on {addr}: {e}"))?);
         let state = Arc::new(State {

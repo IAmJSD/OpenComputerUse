@@ -4,6 +4,7 @@
 //! local MCP server's device tools.
 
 pub mod devices;
+pub mod interfaces;
 pub mod server;
 pub mod skill;
 
@@ -58,9 +59,22 @@ pub fn save_skill(skill: &str) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
+/// A listen address from the user: an IP address, so a typo fails here
+/// rather than when the server tries to listen.
+pub fn parse_bind(bind: &str) -> Result<String> {
+    let ip: std::net::IpAddr = bind.trim().parse().map_err(|_| {
+        anyhow::anyhow!("the listen address must be an IP address, like 127.0.0.1 or 0.0.0.0")
+    })?;
+    Ok(ip.to_string())
+}
+
 /// Turns the server on or off (and moves it), and has it start at login
 /// while it is on.
-pub fn set_server(enabled: Option<bool>, port: Option<u16>) -> Result<Config> {
+pub fn set_server(
+    enabled: Option<bool>,
+    port: Option<u16>,
+    bind: Option<&str>,
+) -> Result<Config> {
     let mut config = Config::load();
     if let Some(on) = enabled {
         config.http.enabled = on;
@@ -68,6 +82,9 @@ pub fn set_server(enabled: Option<bool>, port: Option<u16>) -> Result<Config> {
     if let Some(port) = port {
         anyhow::ensure!(port >= 1024, "use a port from 1024 up");
         config.http.port = port;
+    }
+    if let Some(bind) = bind {
+        config.http.bind = parse_bind(bind)?;
     }
     config.save()?;
     if cfg!(target_os = "macos") {
@@ -93,14 +110,16 @@ pub fn is_tool(name: &str) -> bool {
 }
 
 pub fn tool_definitions() -> Vec<Value> {
-    let port = Config::load().http.port;
+    let http = Config::load().http;
+    let (port, bind) = (http.port, http.bind);
     vec![
         json!({
             "name": "http_server",
-            "description": "Show, or turn on and off, the HTTP server that lets other devices drive this computer with a key (off by default). While on, it starts again after a reboot. It listens on 127.0.0.1 unless http.bind in the settings file (or `serve --bind`) names another address, which other devices need before they can reach it; a non-loopback address exposes control of this computer to the network. Devices reach it at the URL in their skill, usually over Tailscale.",
+            "description": "Show, or turn on and off, the HTTP server that lets other devices drive this computer with a key (off by default). While on, it starts again after a reboot. It listens on 127.0.0.1 (this computer only) unless `bind` names another address, which other devices need before they can reach it; any non-loopback address, such as 0.0.0.0, exposes control of this computer to the network. Devices reach it at the URL in their skill, usually over Tailscale.",
             "inputSchema": { "type": "object", "properties": {
                 "enabled": { "type": "boolean", "description": "Turn the server on or off. Leave out to only show its state." },
                 "port": { "type": "integer", "description": format!("The port to listen on. Currently {port}.") },
+                "bind": { "type": "string", "description": format!("The IP address to listen on. Currently {bind}. 127.0.0.1 reaches this computer only; this computer's Tailscale or LAN address, or 0.0.0.0 for every interface, exposes control of it to the network.") },
             } },
         }),
         json!({
@@ -152,8 +171,8 @@ fn server_state(config: &Config) -> String {
         "`opencomputeruse serve` serves it; `opencomputeruse serve --install` keeps it running after a reboot"
     };
     format!(
-        "The HTTP server is on, listening on {}:{}; {how}.",
-        h.bind, h.port
+        "The HTTP server is on, listening on {}; {how}.",
+        server::listen_addr(&h.bind, h.port)
     )
 }
 
@@ -163,8 +182,9 @@ pub fn call(name: &str, args: &Value) -> Result<Output> {
         "http_server" => {
             let enabled = args.get("enabled").and_then(Value::as_bool);
             let port = args.get("port").and_then(Value::as_u64).map(|p| p as u16);
-            let config = if enabled.is_some() || port.is_some() {
-                set_server(enabled, port)?
+            let bind = s("bind");
+            let config = if enabled.is_some() || port.is_some() || bind.is_some() {
+                set_server(enabled, port, bind.as_deref())?
             } else {
                 Config::load()
             };
@@ -374,5 +394,20 @@ pub mod autostart {
         };
         anyhow::ensure!(status.success() || !on, "reg failed");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bind;
+
+    #[test]
+    fn bind_takes_ip_addresses_only() {
+        assert_eq!(parse_bind("127.0.0.1").unwrap(), "127.0.0.1");
+        assert_eq!(parse_bind(" 0.0.0.0 ").unwrap(), "0.0.0.0");
+        assert_eq!(parse_bind("::1").unwrap(), "::1");
+        assert!(parse_bind("").is_err());
+        assert!(parse_bind("localhost").is_err());
+        assert!(parse_bind("127.0.0.1:8642").is_err());
     }
 }
