@@ -69,6 +69,45 @@ static CRITICAL_SECTION g_lock;
 static char g_reply[64 * 1024];
 static wchar_t g_picks[MAX_PATHS][MAX_PATH_LEN];
 
+/* --------------------------------------------------------------- debug */
+
+/* Appends "<msg> <value>" to the file named by OCU_PANEL_LOG, when it is
+   set. For bringing up the hook on a real machine: it tells which step a
+   dialog reached without the hook needing to reach the agent first. Off (no
+   variable) it does nothing, so it costs a shipped hook one env lookup. */
+static void dbg(const char *msg, long value)
+{
+    static wchar_t path[260];
+    static int enabled = -1;
+    if (enabled < 0) {
+        DWORD n = GetEnvironmentVariableW(L"OCU_PANEL_LOG", path, 260);
+        enabled = (n > 0 && n < 260) ? 1 : 0;
+    }
+    if (enabled != 1) return;
+
+    HANDLE f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+
+    char line[256];
+    size_t n = 0;
+    for (const char *s = msg; *s && n < 200; s++) line[n++] = *s;
+    line[n++] = ' ';
+    char num[21];
+    int ni = 0;
+    unsigned long v = value < 0 ? (line[n++] = '-', (unsigned long)-value) : (unsigned long)value;
+    do {
+        num[ni++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v && ni < 20);
+    while (ni) line[n++] = num[--ni];
+    line[n++] = '\n';
+
+    DWORD wrote = 0;
+    WriteFile(f, line, (DWORD)n, &wrote, NULL);
+    CloseHandle(f);
+}
+
 /* ---------------------------------------------------------------- JSON */
 
 /* Just enough string and memory handling to read one reply, so the hook
@@ -353,7 +392,11 @@ static int read_line(void)
    caller holds g_lock. */
 static int ask(const char *kind, BOOL multiple, BOOL folders, wchar_t out[][MAX_PATH_LEN])
 {
-    if (!connect_agent()) return -1;
+    if (!connect_agent()) {
+        dbg("connect failed err=", (long)GetLastError());
+        return -1;
+    }
+    dbg("connected", 0);
 
     /* Built by hand rather than with the CRT, so the hook needs no runtime
        of its own inside someone else's process. Every part but the pid is a
@@ -472,6 +515,7 @@ static HRESULT STDMETHODCALLTYPE hook_Show(IFileDialog *d, HWND owner)
     FILEOPENDIALOGOPTIONS opts = 0;
     int n;
 
+    dbg("show save=", h->is_save);
     /* A dialog shown again starts over, so a real dialog shown this time
        never hands back what the agent chose last time. */
     forget_answer(h);
@@ -684,18 +728,15 @@ static HRESULT WINAPI hook_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnk, DWO
     else
         return hr; /* some other COM object entirely */
 
-    /* Whatever the app asked for, the dialog interface is what Show is
-       called through, and asking for the most derived one gives the
-       pointer whose table is that long. It is the same pointer the app gets
-       for IFileDialog too. */
-    IUnknown *unk = *(IUnknown **)ppv;
-    IFileDialog *dlg = NULL;
-    if (SUCCEEDED(IUnknown_QueryInterface(unk, is_save ? &IID_IFileSaveDialog : &IID_IFileOpenDialog,
-                                          (void **)&dlg)) &&
-        dlg) {
-        patch_dialog(dlg, is_save);
-        IFileDialog_Release(dlg);
-    }
+    /* The pointer the app was handed is the one it calls Show through, so
+       that is the vtable to patch. The dialog interfaces are one inheritance
+       chain over a single vtable, so this pointer carries IFileDialog's
+       methods whichever of them `riid` named; the CLSID, not the pointer,
+       says how long the table is. Patching a pointer fetched through a fresh
+       QueryInterface would miss, since COM may hand that back as a different
+       one. */
+    dbg("cocreate matched save=", is_save);
+    patch_dialog((IFileDialog *)*(void **)ppv, is_save);
     return hr;
 }
 
@@ -721,25 +762,31 @@ static void write_slot(void **slot, void *value)
    can be caught. Delay-loaded imports are not covered: an app that reaches
    for a dialog through one gets its own dialog, which is the fail-open
    outcome everywhere else here. */
-static void patch_imports(HMODULE mod, const char *module, const char *name, void *replacement)
+static int patch_imports(HMODULE mod, const char *module, const char *name, void *replacement)
 {
-    if (!mod) return;
+    if (!mod) return 0;
     PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)mod;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
     PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((BYTE *)mod + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
 
     IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!dir.VirtualAddress) return;
+    if (!dir.VirtualAddress) return 0;
     PIMAGE_IMPORT_DESCRIPTOR imports =
         (PIMAGE_IMPORT_DESCRIPTOR)((BYTE *)mod + dir.VirtualAddress);
 
     for (PIMAGE_IMPORT_DESCRIPTOR d = imports; d->Name; d++) {
         const char *dll_name = (const char *)((BYTE *)mod + d->Name);
         if (!same_str_nocase(dll_name, module)) continue;
-        if (!d->OriginalFirstThunk || !d->FirstThunk) continue;
+        if (!d->FirstThunk) continue;
 
-        PIMAGE_THUNK_DATA lookup = (PIMAGE_THUNK_DATA)((BYTE *)mod + d->OriginalFirstThunk);
+        /* Names come from the lookup table (the original first thunk); the
+           loader overwrites the first thunk with addresses, so it is no use
+           for names. Where there is no lookup table, the first thunk still
+           held names until the loader bound it, so it is the one source
+           left: read names there and patch there too. */
+        DWORD names_rva = d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk;
+        PIMAGE_THUNK_DATA lookup = (PIMAGE_THUNK_DATA)((BYTE *)mod + names_rva);
         PIMAGE_THUNK_DATA patch = (PIMAGE_THUNK_DATA)((BYTE *)mod + d->FirstThunk);
         for (; lookup->u1.AddressOfData; lookup++, patch++) {
             /* Ordinals have no name to match against. */
@@ -748,9 +795,10 @@ static void patch_imports(HMODULE mod, const char *module, const char *name, voi
                 (PIMAGE_IMPORT_BY_NAME)((BYTE *)mod + lookup->u1.AddressOfData);
             if (!same_str((const char *)n->Name, name)) continue;
             write_slot((void **)&patch->u1.Function, replacement);
-            return;
+            return 1;
         }
     }
+    return 0;
 }
 
 /* ------------------------------------------------------------- entry */
@@ -780,11 +828,16 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved)
     if (!got || got >= cap) return TRUE; /* not ours to do anything with */
 
     InitializeCriticalSection(&g_lock);
+    dbg("dllmain pipe-name-len", (long)got);
 
     HMODULE exe = GetModuleHandleW(NULL);
+    int co = 0;
     for (size_t i = 0; i < sizeof(com_modules) / sizeof(com_modules[0]); i++)
-        patch_imports(exe, com_modules[i], "CoCreateInstance", (void *)hook_CoCreateInstance);
-    patch_imports(exe, "comdlg32.dll", "GetOpenFileNameW", (void *)hook_GetOpenFileNameW);
-    patch_imports(exe, "comdlg32.dll", "GetSaveFileNameW", (void *)hook_GetSaveFileNameW);
+        co += patch_imports(exe, com_modules[i], "CoCreateInstance", (void *)hook_CoCreateInstance);
+    int open = patch_imports(exe, "comdlg32.dll", "GetOpenFileNameW", (void *)hook_GetOpenFileNameW);
+    int save = patch_imports(exe, "comdlg32.dll", "GetSaveFileNameW", (void *)hook_GetSaveFileNameW);
+    dbg("dllmain patched cocreate=", co);
+    dbg("dllmain patched legacy-open=", open);
+    dbg("dllmain patched legacy-save=", save);
     return TRUE;
 }
