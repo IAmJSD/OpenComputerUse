@@ -19,6 +19,8 @@ use crate::uia::Uia;
 /// The file name box: the same automation id in the modern dialog and the
 /// older one.
 const FILE_NAME_ID: &str = "1148";
+/// The ids a file name edit goes by: 1148, or 1001 in a modern save dialog.
+const FILE_NAME_IDS: [&str; 2] = [FILE_NAME_ID, "1001"];
 /// `IDOK`, the Open or Save button.
 const ACCEPT_ID: &str = "1";
 /// `IDCANCEL`.
@@ -134,15 +136,26 @@ fn open(uia: &Uia, window: u64) -> Option<Dialog> {
     })
 }
 
-/// The file name box, by automation id, then by its label. Never just any
-/// edit: an app's own window has those too, and is no file dialog.
+/// The file name box: an edit with the shell's id for it (1148, or 1001 in
+/// a save dialog) or its label, and one that is showing, since a dialog can
+/// carry a hidden edit with the same id. Never just any edit: an app's own
+/// window has those too, and is no file dialog.
 fn file_name(uia: &Uia, window: u64) -> Option<IUIAutomationElement> {
-    // The edit, not the combo box around it with the same id: the dialog
-    // reads the edit, and setting the combo box's value leaves it alone.
-    // A save dialog's edit has another id, so its label comes before any
-    // element with the id.
-    uia.find_by_id_and_type(window, FILE_NAME_ID, UIA_EditControlTypeId)
-        .or_else(|| uia.find_by_type(window, UIA_EditControlTypeId, "File name:"))
+    let edits = uia.all_of_type(window, UIA_EditControlTypeId);
+    let named = |el: &&IUIAutomationElement| unsafe {
+        el.CurrentAutomationId()
+            .is_ok_and(|id| FILE_NAME_IDS.contains(&id.to_string().as_str()))
+            || el.CurrentName().is_ok_and(|n| n == "File name:")
+    };
+    let showing = |el: &&IUIAutomationElement| {
+        unsafe { el.CurrentIsOffscreen() }.is_ok_and(|off| !off.as_bool())
+    };
+    edits
+        .iter()
+        .filter(named)
+        .find(showing)
+        .or_else(|| edits.iter().find(named))
+        .cloned()
         .or_else(|| uia.find_by_id(window, FILE_NAME_ID))
 }
 

@@ -243,29 +243,6 @@ impl Uia {
         )
     }
 
-    /// The first element under `window` with automation id `id` and control
-    /// type `ty`, where controls nest under one id (a combo box and its edit).
-    pub fn find_by_id_and_type(
-        &self,
-        window: u64,
-        id: &str,
-        ty: UIA_CONTROLTYPE_ID,
-    ) -> Option<IUIAutomationElement> {
-        let root = self.root(window)?;
-        let by_id = unsafe {
-            self.automation
-                .CreatePropertyCondition(UIA_AutomationIdPropertyId, &VARIANT::from(BSTR::from(id)))
-        }
-        .ok()?;
-        let by_type = unsafe {
-            self.automation
-                .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(ty.0))
-        }
-        .ok()?;
-        let cond = unsafe { self.automation.CreateAndCondition(&by_id, &by_type) }.ok()?;
-        unsafe { root.FindFirst(TreeScope_Descendants, &cond) }.ok()
-    }
-
     /// The first element under `window` of a control type, optionally with a
     /// given name, where an empty `name` matches any.
     pub fn find_by_type(
@@ -274,22 +251,28 @@ impl Uia {
         ty: UIA_CONTROLTYPE_ID,
         name: &str,
     ) -> Option<IUIAutomationElement> {
-        let root = self.root(window)?;
-        let cond = unsafe {
+        self.all_of_type(window, ty)
+            .into_iter()
+            .find(|el| name.is_empty() || unsafe { el.CurrentName() }.is_ok_and(|n| n == name))
+    }
+
+    /// Every element under `window` of a control type.
+    pub fn all_of_type(&self, window: u64, ty: UIA_CONTROLTYPE_ID) -> Vec<IUIAutomationElement> {
+        let Some(root) = self.root(window) else {
+            return Vec::new();
+        };
+        let Ok(cond) = (unsafe {
             self.automation
                 .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(ty.0))
-        }
-        .ok()?;
-        let all = unsafe { root.FindAll(TreeScope_Descendants, &cond) }.ok()?;
-        for i in 0..unsafe { all.Length() }.unwrap_or(0) {
-            let Ok(el) = (unsafe { all.GetElement(i) }) else {
-                continue;
-            };
-            if name.is_empty() || unsafe { el.CurrentName() }.is_ok_and(|n| n == name) {
-                return Some(el);
-            }
-        }
-        None
+        }) else {
+            return Vec::new();
+        };
+        let Ok(all) = (unsafe { root.FindAll(TreeScope_Descendants, &cond) }) else {
+            return Vec::new();
+        };
+        (0..unsafe { all.Length() }.unwrap_or(0))
+            .filter_map(|i| unsafe { all.GetElement(i) }.ok())
+            .collect()
     }
 
     pub fn perform(&self, id: &str, action: &str) -> Result<()> {

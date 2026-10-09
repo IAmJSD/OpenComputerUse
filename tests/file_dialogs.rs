@@ -203,7 +203,7 @@ fn answer(
 
     let notice = wait(Duration::from_secs(30), || session.notice())
         .context("the app never asked for a file")?;
-    println!("  asked: {notice}");
+    println!("  asked: {notice}\n  {}", diagnose(session));
     let hidden = notice.contains("nothing shows") || notice.contains("nothing is shown");
     ensure!(
         hidden == hook,
