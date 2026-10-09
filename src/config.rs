@@ -112,9 +112,23 @@ pub struct Config {
     /// Off unless turned on; also needs the one-time `install-lock` setup.
     #[serde(default)]
     pub allow_unlock: bool,
+    /// Drive phones, iOS simulators and Android emulators: their tools are
+    /// offered only while this is on. Off unless turned on.
+    #[serde(default)]
+    pub mobile: bool,
 }
 
 impl Config {
+    /// Whether the phone, simulator and emulator tools are on: the
+    /// setting, or `OCU_MOBILE` (1 or 0) where there is no app to set it.
+    pub fn mobile_enabled() -> bool {
+        match std::env::var("OCU_MOBILE").ok().as_deref().map(str::trim) {
+            Some("1" | "true" | "yes" | "on") => true,
+            Some("0" | "false" | "no" | "off") => false,
+            _ => Self::load().mobile,
+        }
+    }
+
     pub fn path() -> PathBuf {
         if let Some(p) = std::env::var_os("OCU_CONFIG") {
             return PathBuf::from(p);

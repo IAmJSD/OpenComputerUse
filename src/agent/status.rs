@@ -1667,6 +1667,23 @@ impl Render for Status {
                                 }),
                             ))
                     }))
+                    // Mobile devices.
+                    .child(Self::section("Phones and simulators"))
+                    .child(
+                        Checkbox::new("mobile", "Phones, simulators and emulators", self.config.mobile)
+                            .on_change(cx.listener(|s, checked: &bool, _, cx| {
+                                s.config.mobile = *checked;
+                                s.save();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(
+                            "Lets agents start apps on connected phones and tablets, iOS \
+                             simulators and Android emulators. While it is off, their tools \
+                             aren't offered.",
+                        ),
+                    )
                     // Overlay.
                     .child(Self::section("While working"))
                     .child(

@@ -8,6 +8,7 @@ use ocu_core::{
     Request, Response, Screenshot, TreeOptions, UiNode,
 };
 
+use crate::config::Config;
 use crate::recipe;
 
 /// A tool's answer: text, and optionally a picture.
@@ -55,16 +56,20 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 const COORDS: &str =
     "Coordinates are points from the window's top-left: the pixel grid of its screenshot.";
 
-/// The tools this server offers.
+/// The tools this server offers. Those for phones, simulators and
+/// emulators only while they are turned on in the settings.
 pub fn list() -> Vec<Value> {
     let mut tools = base_tools();
     if cfg!(target_os = "macos") {
         tools.push(unlock_tool());
     }
-    tools.extend(device_tools(
-        cfg!(target_os = "macos"),
-        ocu_mobile::android_emulator_installed(),
-    ));
+    if Config::mobile_enabled() {
+        mention_devices(&mut tools);
+        tools.extend(device_tools(
+            cfg!(target_os = "macos"),
+            ocu_mobile::android_emulator_installed(),
+        ));
+    }
     if recipe::available() {
         tools.push(recipe::tool_definition());
     }
@@ -77,9 +82,31 @@ pub fn list() -> Vec<Value> {
 pub fn catalog() -> Vec<Value> {
     let mut tools = base_tools();
     tools.push(unlock_tool());
+    mention_devices(&mut tools);
     tools.extend(device_tools(true, true));
     tools.push(recipe::tool_definition());
     tools
+}
+
+/// Tells the base tools about devices, when their tools are offered.
+fn mention_devices(tools: &mut [Value]) {
+    for t in tools.iter_mut() {
+        let extra = match t["name"].as_str() {
+            Some("start_session") => " For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.",
+            Some("press_key") => " On phones and simulators, also the device's buttons: home, back (Android), recents (Android), power, volume_up, volume_down.",
+            _ => continue,
+        };
+        if let Some(d) = t["description"].as_str() {
+            t["description"] = Value::String(format!("{d}{extra}"));
+        }
+    }
+}
+
+/// Whether `name` is one of the phone, simulator and emulator tools.
+pub fn is_device_tool(name: &str) -> bool {
+    ["phone_", "ios_simulator_", "android_emulator_"]
+        .iter()
+        .any(|p| name.starts_with(p))
 }
 
 fn unlock_tool() -> Value {
@@ -218,7 +245,7 @@ fn base_tools() -> Vec<Value> {
     vec![
         tool(
             "start_session",
-            "Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front, unless `foreground` is set. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows. For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.",
+            "Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front, unless `foreground` is set. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows.",
             json!({
                 "app": { "type": "string", "description": "The app to start. Required unless `active_window` is set." },
                 "args": { "type": "array", "items": { "type": "string" } },
@@ -302,7 +329,7 @@ fn base_tools() -> Vec<Value> {
         ),
         tool(
             "press_key",
-            "Press keys: chords joined with +, several separated by spaces. Modifiers: cmd (meta/win/super), ctrl, alt (option), shift. Named keys: enter, tab, escape, backspace, delete, space, up, down, left, right, home, end, pageup, pagedown, f1-f24. Examples: \"cmd+s\", \"ctrl+shift+tab\", \"down down enter\". On phones and simulators, also the device's buttons: home, back (Android), recents (Android), power, volume_up, volume_down.",
+            "Press keys: chords joined with +, several separated by spaces. Modifiers: cmd (meta/win/super), ctrl, alt (option), shift. Named keys: enter, tab, escape, backspace, delete, space, up, down, left, right, home, end, pageup, pagedown, f1-f24. Examples: \"cmd+s\", \"ctrl+shift+tab\", \"down down enter\".",
             action_props(json!({ "keys": { "type": "string" } })),
             &["session_id", "keys"],
         ),
@@ -514,6 +541,13 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
             image: None,
         })
     };
+    if is_device_tool(name) && !Config::mobile_enabled() {
+        bail!(
+            "phones, simulators and emulators are turned off: turn on \"Phones, simulators and \
+             emulators\" in the OpenComputerUse app (or set \"mobile\": true in its settings \
+             file, or OCU_MOBILE=1)"
+        );
+    }
     if let Some(action) = action_for(name, args)? {
         let session = str_arg(args, "session_id")?.to_string();
         let observe = Observe {
@@ -726,5 +760,44 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
             })
         }
         _ => bail!("unknown tool \"{name}\""),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoHandler;
+
+    impl Handler for NoHandler {
+        fn handle(&mut self, _: Request) -> Result<Response> {
+            bail!("no handler in this test")
+        }
+    }
+
+    fn names() -> Vec<String> {
+        list()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    // One test, so nothing else reads OCU_MOBILE while it changes.
+    #[test]
+    fn device_tools_follow_the_setting() {
+        std::env::set_var("OCU_MOBILE", "0");
+        let off = names();
+        assert!(!off.iter().any(|n| is_device_tool(n)), "{off:?}");
+        let start = &list()[0];
+        assert!(!start["description"].as_str().unwrap().contains("phone_start_session"));
+        let err = call(&mut NoHandler, "phone_list", &json!({})).err().unwrap();
+        assert!(format!("{err}").contains("turned off"), "{err}");
+
+        std::env::set_var("OCU_MOBILE", "1");
+        let on = names();
+        assert!(on.iter().any(|n| n == "phone_list" && is_device_tool(n)));
+        let start = &list()[0];
+        assert!(start["description"].as_str().unwrap().contains("phone_start_session"));
+        std::env::remove_var("OCU_MOBILE");
     }
 }

@@ -41,9 +41,9 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 | `wait` | Let the app catch up |
 | `run_recipe` | Run a fixed list of steps with a decision model (see below) |
 | `permissions` | What the OS needs granted, and whether it is |
-| `phone_list`, `phone_apps`, `phone_start_session` | Phones and tablets connected to this computer (Android over adb; iPhones and iPads on macOS) |
-| `ios_simulator_list`, `ios_simulator_apps`, `ios_simulator_start_session` | iOS simulators (macOS only) |
-| `android_emulator_list`, `android_emulator_apps`, `android_emulator_start_session` | Android emulators (listed when the emulator is installed) |
+| `phone_list`, `phone_apps`, `phone_start_session` | Phones and tablets connected to this computer (Android over adb; iPhones and iPads on macOS), when turned on |
+| `ios_simulator_list`, `ios_simulator_apps`, `ios_simulator_start_session` | iOS simulators (macOS only), when turned on |
+| `android_emulator_list`, `android_emulator_apps`, `android_emulator_start_session` | Android emulators (when the emulator is installed), when turned on |
 
 Every action returns a fresh screenshot unless you pass `screenshot: false`.
 Pass `ui_tree: true` to also get the tree. Coordinates are points from the
@@ -145,6 +145,11 @@ docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm ocu-l
 - **Tree and element actions:** UI Automation.
 
 ### Phones, tablets, simulators and emulators (`crates/ocu-mobile`)
+
+Off by default: none of these tools are offered until **Phones, simulators
+and emulators** is turned on in the app (elsewhere, `"mobile": true` in the
+settings file or `OCU_MOBILE=1`). Clients are told when the tool list
+changes, and sessions already running carry on when it is turned off.
 
 Sessions on devices take the same tools as desktop ones. Coordinates are
 points (iOS) or density-independent pixels (Android), and screenshots are
@@ -331,7 +336,8 @@ Tailscale connects.
 
 The settings file is at `opencomputeruse config-path`. On macOS it is
 edited from the app. Elsewhere, edit it by hand or set `TYPESAFE_API_KEY`,
-`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and `OCU_RECIPE_PROVIDER`.
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `OCU_RECIPE_PROVIDER` and
+`OCU_MOBILE` (`1` turns the mobile tools on, `0` off).
 Set `OCU_LOG=debug` for logs on stderr. The macOS agent logs to
 `~/Library/Application Support/OpenComputerUse/agent.log`.
 
