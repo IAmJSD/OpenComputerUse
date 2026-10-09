@@ -91,6 +91,32 @@ else
     codesign --force --options runtime --timestamp=none --sign - "$plugin_app"
 fi
 
+# The panel hook, which apps that allow it load to hand the agent their
+# open and save panels (crates/ocu-macos/src/hook.rs). Every architecture
+# the app is built for: a hooked app of any of them must find its slice.
+hook="$app/Contents/Frameworks/OcuPanelHook.dylib"
+mkdir -p "$app/Contents/Frameworks"
+hslices=()
+for target in $archs; do
+    case "$target" in
+        aarch64-*) a=arm64 ;;
+        x86_64-*) a=x86_64 ;;
+        *) continue ;;
+    esac
+    slice="$target_dir/ocu-panelhook.$a"
+    clang -dynamiclib -arch "$a" -framework AppKit -fobjc-arc \
+        -mmacosx-version-min=14.0 -o "$slice" packaging/macos/panelhook/hook.m
+    hslices+=("$slice")
+done
+lipo -create "${hslices[@]}" -output "$hook"
+rm -f "${hslices[@]}"
+if [ -n "$identity" ]; then
+    codesign --force --options runtime --timestamp \
+        ${keychain[@]+"${keychain[@]}"} --sign "$identity" "$hook"
+else
+    codesign --force --options runtime --timestamp=none --sign - "$hook"
+fi
+
 # The iOS simulator's WebDriverAgent runner, so simulator sessions need no
 # download. Signed on its own, like the plugin, before the app seals it.
 scripts/wda-sim-runner.sh "$app/Contents/Resources" "$identity"

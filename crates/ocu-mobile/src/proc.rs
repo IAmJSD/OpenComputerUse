@@ -155,7 +155,9 @@ pub fn log_tail(path: &Path, max: usize) -> String {
     String::from_utf8_lossy(&text[start..]).trim().to_string()
 }
 
-/// A TCP port nothing on this machine is listening on right now.
+/// A TCP port nothing on this machine is listening on right now. Only the
+/// iOS simulator path uses it, so it is macOS-only.
+#[cfg(target_os = "macos")]
 pub fn free_port() -> Result<u16> {
     let l = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     Ok(l.local_addr()?.port())

@@ -43,18 +43,18 @@ fn quote(arg: &str, out: &mut String) {
         match c {
             '\\' => backslashes += 1,
             '"' => {
-                out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
                 out.push('"');
                 backslashes = 0;
             }
             c => {
-                out.extend(std::iter::repeat('\\').take(backslashes));
+                out.extend(std::iter::repeat_n('\\', backslashes));
                 out.push(c);
                 backslashes = 0;
             }
         }
     }
-    out.extend(std::iter::repeat('\\').take(backslashes * 2));
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
     out.push('"');
 }
 
@@ -90,12 +90,14 @@ pub struct Job {
     pub handle: HANDLE,
     pub pid: u32,
     process: HANDLE,
+    /// Whether the panel hook was queued into the app before it started.
+    pub hooked: bool,
 }
 
 unsafe impl Send for Job {}
 
 impl Job {
-    pub fn spawn(spec: &LaunchSpec) -> Result<Self> {
+    pub fn spawn(spec: &LaunchSpec, hook: bool) -> Result<Self> {
         unsafe {
             let job = CreateJobObjectW(None, PCWSTR::null())?;
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -116,10 +118,20 @@ impl Job {
             }
             let mut cmdline = wide(OsStr::new(&cmdline));
 
-            let env_block: Option<Vec<u16>> = (!spec.env.is_empty()).then(|| {
+            // Settled first: the hook's pipe name reaches the app through
+            // the environment.
+            let hook = if hook { Self::plan_hook() } else { None };
+
+            let mut env = spec.env.clone();
+            if let Some((_, pipe)) = &hook {
+                // The hook clears it as it loads, so the app's children
+                // do not inherit it.
+                env.insert(crate::hook::PIPE_VAR.into(), (*pipe).to_string());
+            }
+            let env_block: Option<Vec<u16>> = (!env.is_empty()).then(|| {
                 let mut vars: std::collections::BTreeMap<String, String> =
                     std::env::vars().collect();
-                vars.extend(spec.env.clone());
+                vars.extend(env);
                 let mut block = Vec::new();
                 for (k, v) in vars {
                     block.extend(OsStr::new(&format!("{k}={v}")).encode_wide());
@@ -163,14 +175,40 @@ impl Job {
             // In the job before it runs a single instruction, so nothing it
             // starts can slip out.
             AssignProcessToJobObject(job, pi.hProcess)?;
+            // A failed hook is no reason not to start the app.
+            let hooked = match hook {
+                Some((dll, _)) => crate::inject::queue_load(&dll, pi.hProcess, pi.hThread)
+                    .inspect_err(|e| log::warn!("no panel hook in {exe}: {e}"))
+                    .is_ok(),
+                None => false,
+            };
             ResumeThread(pi.hThread);
             let _ = CloseHandle(pi.hThread);
             Ok(Self {
                 handle: job,
                 pid: pi.dwProcessId,
                 process: pi.hProcess,
+                hooked,
             })
         }
+    }
+
+    /// The hook to load and the pipe it answers on, or `None` with a warning
+    /// if either is missing. The app starts either way: UI Automation answers
+    /// its dialogs instead.
+    fn plan_hook() -> Option<(std::path::PathBuf, &'static str)> {
+        let Some(dll) = crate::hook::dll() else {
+            log::warn!(
+                "the panel hook is on but this build has no {}",
+                crate::hook::DLL
+            );
+            return None;
+        };
+        let Some(pipe) = crate::hook::pipe() else {
+            log::warn!("the panel hook could not open its pipe");
+            return None;
+        };
+        Some((dll, pipe))
     }
 
     /// Every process in the job: the app and whatever it started.
@@ -202,7 +240,7 @@ impl Job {
     pub fn alive(&self) -> bool {
         let mut code = 0u32;
         unsafe { GetExitCodeProcess(self.process, &mut code) }.is_ok() && code == 259 // STILL_ACTIVE
-            || self.pids().len() > 0
+            || !self.pids().is_empty()
     }
 
     pub fn kill(&mut self) {

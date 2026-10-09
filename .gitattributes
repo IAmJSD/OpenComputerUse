@@ -1,0 +1,3 @@
+# LF everywhere: the skill's shell helper is a raw string in Rust source and
+# android/res/raw/skill.md is byte-compared, so a CRLF checkout breaks both.
+* text=auto eol=lf

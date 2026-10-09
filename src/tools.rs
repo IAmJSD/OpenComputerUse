@@ -335,7 +335,7 @@ fn base_tools() -> Vec<Value> {
         ),
         tool(
             "set_value",
-            "Set an element's value directly (a text field's contents, a slider's position) through accessibility. On a web page's dropdown (a PopUpButton) the value is the option's text, picked without opening the menu.",
+            "Set an element's value directly (a text field's contents, a slider's position) through accessibility. On a dropdown (a PopUpButton) the value is the option's text: a web page's is picked without opening its menu, an app's through its menu, which shows for a moment.",
             action_props(json!({
                 "element": { "type": "string", "description": "Element id from get_ui_tree." },
                 "value": { "type": "string" },
@@ -350,6 +350,18 @@ fn base_tools() -> Vec<Value> {
                 "action": { "type": "string", "description": "Default press." },
             })),
             &["session_id", "element"],
+        ),
+        tool(
+            "choose_file",
+            "Answer the open or save panel (file picker) the app is showing, without clicking through it: give `paths` to pick those files or folders (one path for a save panel: where to save), or leave `paths` empty to cancel. Actions say when a panel is waiting. macOS only.",
+            action_props(json!({
+                "paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Absolute paths (or starting with ~). Several only where the panel lets you pick several. Empty or left out: cancel.",
+                },
+            })),
+            &["session_id"],
         ),
         tool(
             "wait",
@@ -496,6 +508,14 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
         "wait" => Action::Wait {
             ms: opt_u64(args, "ms").unwrap_or(1000),
         },
+        "choose_file" => Action::ChooseFile {
+            paths: match args.get("paths") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::String(p)) => vec![p.clone()],
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|_| anyhow!("\"paths\" is a list of file paths"))?,
+            },
+        },
         _ => return Ok(None),
     }))
 }
@@ -558,6 +578,7 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
         let Response::Performed {
             screenshot,
             ui_tree,
+            notice,
         } = handler.handle(Request::Perform {
             session,
             window: opt_u64(args, "window_id"),
@@ -575,6 +596,10 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
                 s.width,
                 s.height
             ));
+        }
+        if let Some(n) = &notice {
+            out.push(' ');
+            out.push_str(n);
         }
         if let Some(t) = &ui_tree {
             out.push('\n');

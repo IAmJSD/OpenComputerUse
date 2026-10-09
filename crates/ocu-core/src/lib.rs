@@ -5,8 +5,13 @@
 //! and answers [`Request`]s, whichever front end they come from.
 
 mod backend;
+pub mod bidi;
 pub mod image;
 pub mod keys;
+pub mod pages;
+pub mod paths;
+#[cfg(unix)]
+pub mod portal;
 mod service;
 mod types;
 

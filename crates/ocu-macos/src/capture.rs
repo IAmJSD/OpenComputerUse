@@ -11,12 +11,13 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::AllocAnyThread as _;
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect,
+    CGSize,
 };
 use objc2_core_graphics::{
     CGDataProvider, CGImage, CGImageAlphaInfo, CGWindowListCopyWindowInfo, CGWindowListOption,
 };
-use objc2_foundation::NSError;
+use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow,
 };
@@ -149,15 +150,76 @@ pub(crate) fn shareable_content() -> Result<Retained<SCShareableContent>> {
 /// action coordinates are the same grid.
 pub fn capture(window: &WindowInfo) -> Result<Screenshot> {
     let content = shareable_content()?;
-    let windows = unsafe { content.windows() };
-    let sc_window: Retained<SCWindow> = windows
-        .iter()
-        .find(|w| unsafe { w.windowID() } as u64 == window.id)
-        .ok_or_else(|| anyhow!("ScreenCaptureKit cannot see window {}", window.id))?;
+    let sc_window = find_window(&content, window.id)?;
     let filter = unsafe {
         SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &sc_window)
     };
     let config = unsafe { SCStreamConfiguration::new() };
+    unsafe { config.setIgnoreShadowsSingleWindow(true) };
+    shoot(window, &filter, &config)
+}
+
+/// Captures a window as the screen composes it, leaving out every other
+/// window. A window that shows another process's content (an open panel
+/// inside its app's window) captures empty or garbled on its own; composed
+/// with the display, the other process's layers are drawn in. Windows in
+/// `with` (sheets over it) are drawn too.
+pub fn capture_composed(window: &WindowInfo, with: &[u64]) -> Result<Screenshot> {
+    let content = shareable_content()?;
+    let mut shown = vec![find_window(&content, window.id)?];
+    shown.extend(with.iter().filter_map(|&id| find_window(&content, id).ok()));
+    let f = &window.frame;
+    let (cx, cy) = (f.x + f.width / 2.0, f.y + f.height / 2.0);
+    let displays = unsafe { content.displays() };
+    let display = displays
+        .iter()
+        .find(|d| {
+            let r = unsafe { d.frame() };
+            cx >= r.origin.x
+                && cx < r.origin.x + r.size.width
+                && cy >= r.origin.y
+                && cy < r.origin.y + r.size.height
+        })
+        .or_else(|| displays.iter().next())
+        .ok_or_else(|| anyhow!("ScreenCaptureKit lists no displays"))?;
+    let windows = NSArray::from_retained_slice(&shown);
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_includingWindows(
+            SCContentFilter::alloc(),
+            &display,
+            &windows,
+        )
+    };
+    let origin = unsafe { display.frame() }.origin;
+    let config = unsafe { SCStreamConfiguration::new() };
+    unsafe {
+        config.setSourceRect(CGRect {
+            origin: CGPoint {
+                x: f.x - origin.x,
+                y: f.y - origin.y,
+            },
+            size: CGSize {
+                width: f.width,
+                height: f.height,
+            },
+        })
+    };
+    shoot(window, &filter, &config)
+}
+
+fn find_window(content: &SCShareableContent, id: u64) -> Result<Retained<SCWindow>> {
+    let windows = unsafe { content.windows() };
+    windows
+        .iter()
+        .find(|w| unsafe { w.windowID() } as u64 == id)
+        .ok_or_else(|| anyhow!("ScreenCaptureKit cannot see window {id}"))
+}
+
+fn shoot(
+    window: &WindowInfo,
+    filter: &SCContentFilter,
+    config: &SCStreamConfiguration,
+) -> Result<Screenshot> {
     let (w, h) = (
         window.frame.width.round().max(1.0) as usize,
         window.frame.height.round().max(1.0) as usize,
@@ -166,7 +228,6 @@ pub fn capture(window: &WindowInfo) -> Result<Screenshot> {
         config.setWidth(w);
         config.setHeight(h);
         config.setShowsCursor(false);
-        config.setIgnoreShadowsSingleWindow(true);
     }
 
     let (tx, rx) = mpsc::channel();
@@ -185,8 +246,8 @@ pub fn capture(window: &WindowInfo) -> Result<Screenshot> {
     });
     unsafe {
         SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
-            &filter,
-            &config,
+            filter,
+            config,
             Some(&block),
         )
     };

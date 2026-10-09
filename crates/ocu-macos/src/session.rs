@@ -25,7 +25,11 @@ use ocu_core::{
 
 use crate::ax::{self, Element, ElementTable};
 use crate::capture;
+use crate::cdp::{self, Cdp};
+use crate::hook;
 use crate::input::{self, Target};
+use crate::panel;
+use ocu_core::pages::PageFiles;
 
 enum Resolved {
     Bundle(PathBuf),
@@ -95,6 +99,34 @@ fn bundle_id(bundle: &Path) -> Option<String> {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
     let b = objc2_foundation::NSBundle::bundleWithURL(&url)?;
     b.bundleIdentifier().map(|s| s.to_string())
+}
+
+pub(crate) fn bundle_executable(bundle: &Path) -> Option<PathBuf> {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
+    let b = objc2_foundation::NSBundle::bundleWithURL(&url)?;
+    b.executableURL()?
+        .path()
+        .map(|p| PathBuf::from(p.to_string()))
+}
+
+/// Starts a Chromium browser with a DevTools pipe, so a page's file
+/// chooser is answered without the open panel showing. Only for a profile
+/// of its own: Chrome refuses remote debugging of the user's default
+/// profile, and with that profile already open the new process would hand
+/// over to the running one. `None` when it does not apply or fails.
+fn spawn_with_devtools(bundle: &Path, spec: &LaunchSpec, running: bool) -> Option<(Child, Cdp)> {
+    let own_profile = spec.args.iter().any(|a| a.starts_with("--user-data-dir"));
+    if !own_profile || (running && !spec.new_instance) {
+        return None;
+    }
+    let exe = bundle_executable(bundle)?;
+    match cdp::spawn(&exe, spec) {
+        Ok(started) => Some(started),
+        Err(e) => {
+            log::warn!("starting {} with DevTools: {e:#}", bundle.display());
+            None
+        }
+    }
 }
 
 fn frontmost_pid() -> Option<i32> {
@@ -208,6 +240,8 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
     let resolved = resolve(&spec.app)?;
     let mut successor_of: Option<(String, Vec<i32>)> = None;
     let mut gecko = false;
+    let mut pages: Option<Box<dyn PageFiles>> = None;
+    let mut bidi_profile = None;
     let (pid, launched, child, name) = match resolved {
         Resolved::Bundle(bundle) => {
             let already: Vec<i32> = bundle_id(&bundle)
@@ -235,17 +269,56 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
             // Known from the bundle rather than the process: Firefox
             // relaunches itself, so the process we start may be gone already.
             gecko = is_gecko_bundle(&bundle);
-            let pid = open_bundle(&bundle, &spec)?;
             let name = bundle
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if let Some(id) = bundle_id(&bundle) {
-                let mut known = already.clone();
-                known.push(pid);
-                successor_of = Some((id, known));
+            let piped = is_chromium_bundle(&bundle)
+                .then(|| spawn_with_devtools(&bundle, &spec, !already.is_empty()))
+                .flatten();
+            // Firefox with a profile of its own takes WebDriver BiDi, which
+            // hands us its pages' file choosers; it is connected to once it
+            // has started.
+            if gecko && (already.is_empty() || spec.new_instance) {
+                if let Some(profile) = ocu_core::bidi::profile_dir(&spec.args) {
+                    ocu_core::bidi::clear(&profile);
+                    spec.args.push(ocu_core::bidi::ARG.to_string());
+                    bidi_profile = Some(profile);
+                }
             }
-            (pid, !already.contains(&pid), None, name)
+            // An app that lets our panel hook in hands us its open and save
+            // panels instead of showing them; only once the user has turned
+            // on App Management, the permission for touching other apps.
+            if piped.is_none()
+                && (already.is_empty() || spec.new_instance)
+                && crate::app_management_granted()
+            {
+                if let (Some(dylib), Some(socket)) = (hook::dylib(), hook::socket()) {
+                    if hook::injectable(&bundle) {
+                        log::info!("{} takes the panel hook", bundle.display());
+                        spec.env.insert(
+                            "DYLD_INSERT_LIBRARIES".into(),
+                            dylib.to_string_lossy().into_owned(),
+                        );
+                        spec.env.insert(
+                            "OCU_PANEL_SOCKET".into(),
+                            socket.to_string_lossy().into_owned(),
+                        );
+                    }
+                }
+            }
+            if let Some((child, c)) = piped {
+                pages = Some(Box::new(c));
+                (child.id() as i32, true, Some(child), name)
+            } else {
+                let pid = open_bundle(&bundle, &spec)?;
+                if let Some(id) = bundle_id(&bundle) {
+                    let mut known = already.clone();
+                    known.push(pid);
+                    successor_of = Some((id, known));
+                }
+                (pid, !already.contains(&pid), None, name)
+            }
         }
         Resolved::Binary(path) => {
             let mut cmd = Command::new(&path);
@@ -280,6 +353,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         launched_at: Instant::now(),
         foreground: spec.foreground,
         pinned: None,
+        pages,
     };
     session.chromium = is_chromium(session.pid);
     // Wait for a window, putting the user's app back in front if this one
@@ -298,6 +372,12 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         sleep(Duration::from_millis(150));
     }
     sleep(Duration::from_millis(300));
+    if let Some(profile) = bidi_profile {
+        match ocu_core::bidi::connect(&profile, Duration::from_secs(10)) {
+            Ok(b) => session.pages = Some(Box::new(b)),
+            Err(e) => log::warn!("Firefox's WebDriver BiDi: {e:#}"),
+        }
+    }
     if session.foreground {
         let first = app_windows(session.pid).into_iter().next();
         session.bring_forward(first.as_ref());
@@ -336,6 +416,7 @@ pub fn attach_active(spec: &LaunchSpec) -> Result<MacSession> {
         launched_at: Instant::now(),
         foreground: spec.foreground,
         pinned: Some(window.id),
+        pages: None,
     };
     if session.foreground {
         session.bring_forward(Some(&window));
@@ -417,6 +498,9 @@ pub struct MacSession {
     /// The window the session was attached to, which comes first in its
     /// window list while it exists.
     pinned: Option<u64>,
+    /// A browser's link that takes its pages' file choosers: the DevTools
+    /// pipe of a Chromium browser, or Firefox's WebDriver BiDi.
+    pages: Option<Box<dyn PageFiles>>,
 }
 
 impl MacSession {
@@ -494,10 +578,16 @@ impl MacSession {
         }
     }
 
-    /// The app's windows, best first, with the pinned one leading.
+    /// The app's windows, best first, with an open or save panel leading
+    /// (it holds up the window it belongs to), then the pinned one.
     fn listed(&self) -> Vec<WindowInfo> {
         let mut windows = app_windows(self.pid);
         if let Some(i) = windows.iter().position(|w| Some(w.id) == self.pinned) {
+            let w = windows.remove(i);
+            windows.insert(0, w);
+        }
+        let panels = panel::remotes(&windows);
+        if let Some(i) = windows.iter().position(|w| panels.contains_key(&w.id)) {
             let w = windows.remove(i);
             windows.insert(0, w);
         }
@@ -509,10 +599,17 @@ impl MacSession {
         pick_window(&windows, window).cloned()
     }
 
+    /// Where input for `w` goes: the app, or the panel service when `w`
+    /// shows an open or save panel.
     fn target(&self, w: &WindowInfo) -> Target {
+        let (pid, window_id) = match panel::remotes(std::slice::from_ref(w)).get(&w.id) {
+            Some(r) => (r.pid, r.window),
+            None => (self.pid, w.id as u32),
+        };
         Target {
-            pid: self.pid,
-            window_id: w.id as u32,
+            pid,
+            window_id,
+            paced: pid != self.pid,
             origin: CGPoint {
                 x: w.frame.x,
                 y: w.frame.y,
@@ -562,6 +659,56 @@ impl MacSession {
         el.perform("AXPress")
     }
 
+    /// The window showing an open or save panel: `window` when it does,
+    /// else the first that does.
+    fn panel_window(&self, window: Option<u64>) -> Option<WindowInfo> {
+        let windows = self.listed();
+        let panels = panel::remotes(&windows);
+        let mut shown: Vec<WindowInfo> = windows
+            .into_iter()
+            .filter(|w| panels.contains_key(&w.id))
+            .collect();
+        let i = shown.iter().position(|w| Some(w.id) == window).unwrap_or(0);
+        (!shown.is_empty()).then(|| shown.swap_remove(i))
+    }
+
+    /// The browser link with a page's file chooser waiting on it, and
+    /// whether it takes several files.
+    fn page_chooser(&self) -> Option<(&dyn PageFiles, bool)> {
+        let p = self.pages.as_deref().filter(|p| p.is_alive())?;
+        Some((p, p.waiting()?))
+    }
+
+    /// Answers whatever is asking for files: a page's chooser held by the
+    /// browser link, a panel held back by the hook, or a panel on screen.
+    fn choose_file(&mut self, window: Option<u64>, paths: &[String]) -> Result<()> {
+        let paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| ocu_core::paths::absolute(p))
+            .collect::<Result<_>>()?;
+        // What asked may still be on its way: a click's chooser or panel
+        // comes a moment after the click.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let w = loop {
+            if let Some((pages, _)) = self.page_chooser() {
+                return pages.answer(&paths);
+            }
+            if hook::waiting(self.pid).is_some() {
+                return hook::answer(self.pid, &paths);
+            }
+            if let Some(w) = self.panel_window(window) {
+                break w;
+            }
+            if Instant::now() > deadline {
+                bail!("the app is not showing an open or save panel, and no page is asking for a file: do what opens one first (an upload button, File → Open)");
+            }
+            sleep(Duration::from_millis(100));
+        };
+        let t = self.target(&w);
+        let _focus = t.prepare(user_focus());
+        panel::answer(self.pid, &w, &t, &paths)
+    }
+
     /// Picks an option of a pop-up button (a web page's <select>) by its
     /// text. Firefox says its AXValue was set and ignores it, and neither
     /// it nor Chrome opens the menu in the background, so the option is
@@ -600,6 +747,61 @@ impl MacSession {
             el.string("AXValue").unwrap_or_default()
         )
     }
+}
+
+/// Picks an option of an AppKit pop-up button by its text. Its AXValue
+/// says it was set and changes nothing, and it lists its items only while
+/// its menu is open: so the menu is opened, the item pressed, and the menu
+/// is gone again a moment later.
+fn choose_native(el: &Element, value: &str) -> Result<()> {
+    let is = |s: &str| s.trim().eq_ignore_ascii_case(value.trim());
+    if el.string("AXValue").is_some_and(|v| is(&v)) {
+        return Ok(());
+    }
+    let menu_items = || -> Vec<Element> {
+        el.elements("AXChildren")
+            .into_iter()
+            .filter(|c| c.string("AXRole").as_deref() == Some("AXMenu"))
+            .flat_map(|m| m.elements("AXChildren"))
+            .filter(|i| i.string("AXRole").as_deref() == Some("AXMenuItem"))
+            .collect()
+    };
+    let close = || {
+        for m in el.elements("AXChildren") {
+            let _ = m.perform("AXCancel");
+        }
+    };
+    let _ = el.perform("AXPress");
+    let Some(items) = panel::wait_for(Duration::from_secs(1), || {
+        Some(menu_items()).filter(|i| !i.is_empty())
+    }) else {
+        bail!("the pop-up button did not open its menu");
+    };
+    let Some(item) = items
+        .iter()
+        .find(|i| i.string("AXTitle").is_some_and(|t| is(&t)))
+    else {
+        let options: Vec<String> = items.iter().filter_map(|i| i.string("AXTitle")).collect();
+        close();
+        bail!("{value:?} is not one of the options: {options:?}");
+    };
+    item.perform("AXPress")?;
+    if panel::wait_for(Duration::from_secs(1), || {
+        el.string("AXValue").filter(|v| is(v))
+    })
+    .is_none()
+    {
+        close();
+        bail!(
+            "{value:?} did not select: the pop-up button shows {:?}",
+            el.string("AXValue").unwrap_or_default()
+        );
+    }
+    // The button acts on the choice once its menu has closed.
+    let _ = panel::wait_for(Duration::from_secs(1), || {
+        menu_items().is_empty().then_some(())
+    });
+    Ok(())
 }
 
 impl Session for MacSession {
@@ -642,6 +844,14 @@ impl Session for MacSession {
 
     fn screenshot(&mut self, window: Option<u64>) -> Result<Screenshot> {
         let w = self.window(window)?;
+        // The app's window around a panel only hosts the panel service's
+        // drawing, which a capture of either window alone misses.
+        let windows = self.listed();
+        let panels = panel::remotes(&windows);
+        if panels.contains_key(&w.id) {
+            let with: Vec<u64> = panels.keys().copied().filter(|&id| id != w.id).collect();
+            return capture::capture_composed(&w, &with);
+        }
         capture::capture(&w)
     }
 
@@ -721,10 +931,11 @@ impl Session for MacSession {
             }
             Action::SetValue { element, value } => {
                 let el = self.elements.get(element)?.clone();
-                if (self.chromium || self.gecko)
-                    && el.string("AXRole").as_deref() == Some("AXPopUpButton")
-                {
-                    return self.choose(window, &el, value);
+                if el.string("AXRole").as_deref() == Some("AXPopUpButton") {
+                    if (self.chromium || self.gecko) && ax::in_web_area(&el) {
+                        return self.choose(window, &el, value);
+                    }
+                    return choose_native(&el, value);
                 }
                 if el.settable("AXFocused") {
                     let _ = el.set("AXFocused", CFBoolean::new(true));
@@ -744,6 +955,7 @@ impl Session for MacSession {
                 sleep(Duration::from_millis(*ms));
                 return Ok(());
             }
+            Action::ChooseFile { paths } => return self.choose_file(window, paths),
             _ => {}
         }
         let w = self.window(window)?;
@@ -766,7 +978,9 @@ impl Session for MacSession {
                     Some(s) => parse_chord(s)?.modifiers,
                     None => Default::default(),
                 };
-                if (self.chromium || self.gecko) && *button == MouseButton::Left {
+                // A panel is AppKit's own, whatever the app is built on.
+                let in_app = t.pid == self.pid;
+                if (self.chromium || self.gecko) && in_app && *button == MouseButton::Left {
                     let clicked = input::click_chromium(&t, Self::point(&w, *x, *y), *count, m);
                     // Keep the window focused while the page handles it.
                     sleep(PAGE_HANDLER_GRACE);
@@ -800,10 +1014,42 @@ impl Session for MacSession {
             Action::ElementAction { .. }
             | Action::SetValue { .. }
             | Action::Focus { .. }
-            | Action::Wait { .. } => {
+            | Action::Wait { .. }
+            | Action::ChooseFile { .. } => {
                 unreachable!()
             }
         }
+    }
+
+    fn notice(&mut self) -> Option<String> {
+        if let Some((_, multiple)) = self.page_chooser() {
+            return Some(format!(
+                "The page is asking for {} (a file input; no panel is shown): answer it with choose_file, giving the paths, or no paths to cancel.",
+                if multiple { "files" } else { "a file" }
+            ));
+        }
+        if let Some(r) = hook::waiting(self.pid) {
+            return Some(format!(
+                "The app is asking for {} (its {} panel is held back, so nothing shows): answer it with choose_file, giving the {}, or no paths to cancel.",
+                match (r.save, r.folders, r.multiple) {
+                    (true, ..) => "a place to save",
+                    (false, true, true) => "folders",
+                    (false, true, false) => "a folder",
+                    (false, false, true) => "files",
+                    (false, false, false) => "a file",
+                },
+                if r.save { "save" } else { "open" },
+                if r.save { "path to save to" } else { "paths" },
+            ));
+        }
+        let w = self.panel_window(None)?;
+        let kind = panel::loaded(self.pid, &w, Duration::from_secs(1))
+            .map(|el| panel::kind(&el))
+            .ok()?;
+        Some(match kind {
+            panel::Kind::Open => format!("An open panel is showing (window {}): answer it with choose_file, giving the paths to pick, or no paths to cancel.", w.id),
+            panel::Kind::Save => format!("A save panel is showing (window {}): answer it with choose_file, giving the path to save to, or no paths to cancel.", w.id),
+        })
     }
 
     fn is_alive(&mut self) -> bool {
@@ -817,7 +1063,11 @@ impl Session for MacSession {
     }
 
     fn close(&mut self) {
-        if std::mem::replace(&mut self.closed, true) || !self.launched {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        hook::forget(self.pid);
+        if !self.launched {
             return;
         }
         if let Some(mut child) = self.child.take() {

@@ -236,7 +236,7 @@ Press keys: chords joined with +, several separated by spaces. Modifiers: cmd (m
 
 ### `set_value`
 
-Set an element's value directly (a text field's contents, a slider's position) through accessibility. On a web page's dropdown (a PopUpButton) the value is the option's text, picked without opening the menu.
+Set an element's value directly (a text field's contents, a slider's position) through accessibility. On a dropdown (a PopUpButton) the value is the option's text: a web page's is picked without opening its menu, an app's through its menu, which shows for a moment.
 
   - `session_id` (string, required): The id start_session returned.
   - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
@@ -253,6 +253,16 @@ Perform an accessibility action on an element: press, focus, showmenu, increment
   - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
   - `element` (string, required): Element id from get_ui_tree.
   - `action` (string): Default press.
+  - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
+  - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
+
+### `choose_file`
+
+Answer the open or save panel (file picker) the app is showing, without clicking through it: give `paths` to pick those files or folders (one path for a save panel: where to save), or leave `paths` empty to cancel. Actions say when a panel is waiting. macOS only.
+
+  - `session_id` (string, required): The id start_session returned.
+  - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
+  - `paths` (array): Absolute paths (or starting with ~). Several only where the panel lets you pick several. Empty or left out: cancel.
   - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
   - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
 

@@ -1,0 +1,215 @@
+//! An app's open or save dialog, answered through UI Automation by setting
+//! the file name box and pressing the dialog's own button.
+//!
+//! The shell draws both `IFileDialog` and `GetOpenFileNameW` with the same
+//! automation ids, so nothing here is per app. Controls are found by id,
+//! then by their English names.
+
+use std::path::PathBuf;
+
+use anyhow::{anyhow, Result};
+use windows::Win32::UI::Accessibility::*;
+use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+
+use ocu_core::WindowInfo;
+
+use crate::capture::hwnd;
+use crate::uia::Uia;
+
+/// The file name box: the same automation id in the modern dialog and the
+/// older one.
+const FILE_NAME_ID: &str = "1148";
+/// The ids a file name edit goes by: 1148, or 1001 in a modern save dialog.
+const FILE_NAME_IDS: [&str; 2] = [FILE_NAME_ID, "1001"];
+/// `IDOK`, the Open or Save button.
+const ACCEPT_ID: &str = "1";
+/// `IDCANCEL`.
+const CANCEL_ID: &str = "2";
+
+/// What the shell's buttons are called, save dialogs and open ones apart.
+const SAVE_NAMES: [&str; 2] = ["Save", "Save As"];
+const OPEN_NAMES: [&str; 1] = ["Open"];
+
+/// A file dialog that is up, with the controls that answer it.
+pub struct Dialog {
+    pub window: u64,
+    /// A save dialog takes one path, where an open one may take several.
+    pub save: bool,
+    name: IUIAutomationElement,
+    accept: Option<IUIAutomationElement>,
+    cancel: Option<IUIAutomationElement>,
+}
+
+impl Dialog {
+    /// What the app is waiting for and how to answer it, worded like the
+    /// macOS backend's notice.
+    pub fn notice(&self) -> String {
+        format!(
+            "{} (window {}): answer it with choose_file, giving the {}, or no paths to cancel.",
+            if self.save {
+                "A save dialog is showing"
+            } else {
+                "An open dialog is showing"
+            },
+            self.window,
+            if self.save {
+                "path to save to"
+            } else {
+                "paths to pick"
+            },
+        )
+    }
+
+    /// Types `paths` into the file name box and presses the dialog's own
+    /// button. No paths cancels it instead.
+    pub fn answer(&self, uia: &Uia, paths: &[PathBuf]) -> Result<()> {
+        if paths.is_empty() {
+            return self.cancel(uia);
+        }
+        // An open dialog's own multi-select setting is not visible here, so
+        // the dialog itself refuses a second file it does not take.
+        ocu_core::paths::check_answer(paths, self.save, true)?;
+        let text = if paths.len() == 1 {
+            paths[0].to_string_lossy().into_owned()
+        } else {
+            // The shell's own way of naming several files in one go.
+            paths
+                .iter()
+                .map(|p| format!("\"{}\"", p.to_string_lossy()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let _ = unsafe { self.name.SetFocus() };
+        if self.save {
+            // A save dialog keeps the name it was given unless the box is
+            // typed into: a value set on it shows, but Save ignores it.
+            self.type_name(&text)?;
+        } else {
+            uia.set_element_value(&self.name, &text, "the dialog's file name box")?;
+        }
+        // The dialog reads the box as it closes, so it needs the button
+        // rather than anything we could do to the text alone.
+        let accept = self
+            .accept
+            .as_ref()
+            .ok_or_else(|| anyhow!("the dialog has no Open or Save button to press"))?;
+        uia.invoke(accept)
+    }
+
+    /// What the file name box holds now.
+    fn name_text(&self) -> Option<String> {
+        let p = unsafe {
+            self.name
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        }
+        .ok()?;
+        unsafe { p.CurrentValue() }.ok().map(|v| v.to_string())
+    }
+
+    /// Replaces the file name box's text as typing would: everything in it
+    /// selected, then `text` sent as characters, which the box and the
+    /// dialog both see as input. Waits until the box shows it.
+    fn type_name(&self, text: &str) -> Result<()> {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SendMessageW, WM_CHAR};
+        const EM_SETSEL: u32 = 0x00B1;
+        let edit = unsafe { self.name.CurrentNativeWindowHandle() }
+            .ok()
+            .filter(|h| !h.is_invalid())
+            .ok_or_else(|| anyhow!("the dialog's file name box has no window to type into"))?;
+        unsafe { SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1))) };
+        for unit in text.encode_utf16() {
+            unsafe { PostMessageW(Some(edit), WM_CHAR, WPARAM(unit as usize), LPARAM(1)) }?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while self.name_text().as_deref() != Some(text) {
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!(
+                    "the dialog's file name box shows {:?}, not what was typed",
+                    self.name_text()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
+    fn cancel(&self, uia: &Uia) -> Result<()> {
+        let cancel = self
+            .cancel
+            .as_ref()
+            .ok_or_else(|| anyhow!("the dialog has no Cancel button to press"))?;
+        uia.invoke(cancel)
+    }
+}
+
+/// The file dialog among a session's windows, if one is up. Searched from
+/// the last window, since a dialog comes up after its owner.
+pub fn locate(uia: &Uia, windows: &[WindowInfo]) -> Option<Dialog> {
+    windows
+        .iter()
+        .rev()
+        .filter(|w| is_dialog(w.id))
+        .find_map(|w| open(uia, w.id))
+}
+
+/// Whether `window` has the dialog class (`#32770`) both file dialogs use.
+/// Checked first so an app's own windows are never searched, which is slow
+/// for a large tree and could match an app's own "File name:" box.
+fn is_dialog(window: u64) -> bool {
+    let mut class = [0u16; 16];
+    let n = unsafe { GetClassNameW(hwnd(window), &mut class) };
+    n > 0 && String::from_utf16_lossy(&class[..n as usize]) == "#32770"
+}
+
+fn open(uia: &Uia, window: u64) -> Option<Dialog> {
+    let name = file_name(uia, window)?;
+    let accept = accept(uia, window);
+    // Which kind it is shows in the button: Open or Save.
+    let save = accept
+        .as_ref()
+        .and_then(|a| unsafe { a.CurrentName() }.ok())
+        .is_some_and(|n| SAVE_NAMES.contains(&n.to_string().as_str()));
+    Some(Dialog {
+        window,
+        save,
+        name,
+        accept,
+        cancel: uia
+            .find_by_id(window, CANCEL_ID)
+            .or_else(|| uia.find_by_type(window, UIA_ButtonControlTypeId, "Cancel")),
+    })
+}
+
+/// The file name box: an edit with the shell's id for it (1148, or 1001 in
+/// a save dialog) or its label, and one that is showing, since a dialog can
+/// carry a hidden edit with the same id. Never just any edit: an app's own
+/// window has those too, and is no file dialog.
+fn file_name(uia: &Uia, window: u64) -> Option<IUIAutomationElement> {
+    let edits = uia.all_of_type(window, UIA_EditControlTypeId);
+    let named = |el: &&IUIAutomationElement| unsafe {
+        el.CurrentAutomationId()
+            .is_ok_and(|id| FILE_NAME_IDS.contains(&id.to_string().as_str()))
+            || el.CurrentName().is_ok_and(|n| n == "File name:")
+    };
+    let showing = |el: &&IUIAutomationElement| {
+        unsafe { el.CurrentIsOffscreen() }.is_ok_and(|off| !off.as_bool())
+    };
+    edits
+        .iter()
+        .filter(named)
+        .find(showing)
+        .or_else(|| edits.iter().find(named))
+        .cloned()
+        .or_else(|| uia.find_by_id(window, FILE_NAME_ID))
+}
+
+/// The Open or Save button, by automation id, then by name.
+fn accept(uia: &Uia, window: u64) -> Option<IUIAutomationElement> {
+    uia.find_by_id(window, ACCEPT_ID).or_else(|| {
+        SAVE_NAMES
+            .iter()
+            .chain(&OPEN_NAMES)
+            .find_map(|n| uia.find_by_type(window, UIA_ButtonControlTypeId, n))
+    })
+}

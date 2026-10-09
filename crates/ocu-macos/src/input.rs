@@ -22,6 +22,9 @@ pub struct Target {
     pub window_id: u32,
     /// The window's top-left in screen points.
     pub origin: CGPoint,
+    /// Space each key's press and release apart. AppKit's panel service
+    /// drops a key whose release comes with its press.
+    pub paced: bool,
 }
 
 impl Target {
@@ -415,6 +418,9 @@ pub fn type_text(target: &Target, text: &str) -> Result<()> {
                     ..Default::default()
                 };
                 post(target, &*key_event(code, true, m, Some(c))?);
+                if target.paced {
+                    sleep(Duration::from_millis(10));
+                }
                 post(target, &*key_event(code, false, m, Some(c))?);
             }
         }

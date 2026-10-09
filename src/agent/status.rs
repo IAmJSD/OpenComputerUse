@@ -100,8 +100,11 @@ pub struct Status {
     remote: Remote,
     /// "Work while the Mac is locked": whether the privileged pieces are in
     /// place, whether a change is running, and the last message.
+    #[cfg(target_os = "macos")]
     lock_installed: bool,
+    #[cfg(target_os = "macos")]
     lock_busy: bool,
+    #[cfg(target_os = "macos")]
     lock_message: Option<String>,
 }
 
@@ -191,7 +194,36 @@ struct ClientState {
 
 const GOOD: u32 = 0x2E7D4F;
 
+/// Opens a web page with the system's handler.
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new("explorer");
+    #[cfg(target_os = "linux")]
+    let mut cmd = std::process::Command::new("xdg-open");
+    let _ = cmd.arg(url).spawn();
+}
+
+/// Shows a saved file in the file manager.
+fn reveal(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+    #[cfg(target_os = "linux")]
+    if let Some(dir) = path.parent() {
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
+}
+
 /// The .app this is running from, if it is.
+#[cfg(target_os = "macos")]
 fn bundle() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     exe.ancestors()
@@ -199,6 +231,7 @@ fn bundle() -> Option<std::path::PathBuf> {
         .map(Into::into)
 }
 
+#[cfg(target_os = "macos")]
 fn reveal_app() {
     if let Some(b) = bundle() {
         let _ = std::process::Command::new("/usr/bin/open")
@@ -210,6 +243,7 @@ fn reveal_app() {
 
 /// Runs `install-lock` / `uninstall-lock` as root behind the macOS admin
 /// prompt, passing the owner uid and the bundled plugin.
+#[cfg(target_os = "macos")]
 fn run_privileged_lock(
     enable: bool,
     exe: &std::path::Path,
@@ -261,6 +295,7 @@ fn run_privileged_lock(
 
 /// Quits and opens again, which is when macOS applies a new Screen
 /// Recording grant. Sessions end with the quit.
+#[cfg(target_os = "macos")]
 fn reopen(cx: &mut App) {
     if let Some(b) = bundle() {
         let script = format!("sleep 1; /usr/bin/open {:?}", b.display().to_string());
@@ -269,6 +304,40 @@ fn reopen(cx: &mut App) {
             .spawn();
     }
     cx.quit();
+}
+
+/// What a permission's row offers: its state, or a way to grant it. Off a
+/// Mac nothing grants one from here; its help says what to install.
+fn grant(i: usize, perm: &Permission) -> gpui::AnyElement {
+    if perm.granted {
+        return status(if perm.optional { "On" } else { "Granted" }, true).into_any_element();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = i;
+        status("Missing", false).into_any_element()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let name = perm.name.clone();
+        if perm.optional {
+            // Only the Settings pane: nothing asks for it unless the user
+            // goes there and turns it on.
+            Button::new(("grant", i), "Turn On…")
+                .flex_none()
+                .on_click(move |_, _, _| ocu_macos::open_settings(&name))
+                .into_any_element()
+        } else {
+            Button::new(("grant", i), "Grant…")
+                .primary()
+                .flex_none()
+                .on_click(move |_, _, _| {
+                    ocu_macos::request_permissions();
+                    ocu_macos::open_settings(&name);
+                })
+                .into_any_element()
+        }
+    }
 }
 
 /// A status as a coloured dot and a word, which reads the same at any
@@ -351,8 +420,11 @@ impl Status {
             },
             busy: None,
             client_message: None,
+            #[cfg(target_os = "macos")]
             lock_installed: ocu_macos::lock::installed(),
+            #[cfg(target_os = "macos")]
             lock_busy: false,
+            #[cfg(target_os = "macos")]
             lock_message: None,
         };
         s.saved = true;
@@ -834,7 +906,7 @@ impl Status {
                     .action(Button::new("save-skill", "Save to Downloads").on_click(cx.listener(move |s, _, _, cx| {
                         let msg = match remote::save_download(skill::GENERIC_SKILL_NAME, "SKILL.md", &save) {
                             Ok(path) => {
-                                let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
+                                reveal(&path);
                                 format!("Saved {}.", path.display())
                             }
                             Err(e) => format!("Couldn't save: {e:#}"),
@@ -930,6 +1002,22 @@ impl Status {
     }
 
     fn remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Only the Mac app stays running with its window closed.
+        #[cfg(target_os = "macos")]
+        let listening_line = |addr: &str| {
+            if remote::autostart::is_set() {
+                format!("Listening on {addr}; starts at login")
+            } else {
+                format!("Listening on {addr}")
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let listening_line = |addr: &str| {
+            format!(
+                "Listening on {addr} while this window is open; \
+                 `opencomputeruse serve --install` serves at login instead"
+            )
+        };
         let p = palette();
         let http = &self.config.http;
         let state = super::http::state();
@@ -937,14 +1025,7 @@ impl Status {
         let status_line = match (http.enabled, &state.listening, &state.error) {
             (false, _, _) => status("Off", false),
             (true, _, Some(e)) => div().text_color(rgb(p.warning)).child(e.clone()),
-            (true, Some(addr), _) => status(
-                &if remote::autostart::is_set() {
-                    format!("Listening on {addr}; starts at login")
-                } else {
-                    format!("Listening on {addr}")
-                },
-                true,
-            ),
+            (true, Some(addr), _) => status(&listening_line(addr), true),
             (true, None, None) => status("Starting…", false),
         };
         let mut section = div()
@@ -1120,11 +1201,7 @@ impl Status {
                         Some(installer) => {
                             let _ = this.update(cx, |s, cx| s.install_update(installer, cx));
                         }
-                        None => {
-                            let _ = std::process::Command::new("/usr/bin/open")
-                                .arg(&up.page)
-                                .spawn();
-                        }
+                        None => open_url(&up.page),
                     }
                 })
                 .detach();
@@ -1243,11 +1320,7 @@ impl Status {
                     row.child(
                         Button::new("release-page", "Open Release Page")
                             .flex_none()
-                            .on_click(move |_, _, _| {
-                                let _ = std::process::Command::new("/usr/bin/open")
-                                    .arg(&page)
-                                    .spawn();
-                            }),
+                            .on_click(move |_, _, _| open_url(&page)),
                     )
                 }
             },
@@ -1295,6 +1368,7 @@ impl Status {
 
     /// Turns "work while locked" on or off. Both need root, so this runs the
     /// CLI behind the admin prompt, then flips the config flag.
+    #[cfg(target_os = "macos")]
     fn set_locked_use(&mut self, enable: bool, cx: &mut Context<Self>) {
         self.lock_busy = true;
         self.lock_message = None;
@@ -1502,6 +1576,117 @@ impl Status {
             }))
     }
 
+    /// The settings for how sessions work: on a Mac the overlay and working
+    /// while locked, elsewhere how apps' file dialogs are answered.
+    #[cfg(target_os = "macos")]
+    fn while_working(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                Checkbox::new(
+                    "overlay",
+                    "Show a halo and cursor over windows being driven",
+                    self.config.show_overlay(),
+                )
+                .on_change(cx.listener(|s, checked: &bool, _, cx| {
+                    s.config.show_overlay = Some(*checked);
+                    s.save();
+                    cx.notify();
+                })),
+            )
+            // Work while locked.
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child("Work while the Mac is locked"),
+                            )
+                            .child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(
+                                "Lets agents unlock the Mac to keep working. Asks for \
+                                         your password to set up. A key press or click relocks it.",
+                            )),
+                    )
+                    .child(if self.lock_busy {
+                        status("Working…", false).into_any_element()
+                    } else {
+                        Checkbox::new(
+                            "locked-use",
+                            "",
+                            self.config.allow_unlock && self.lock_installed,
+                        )
+                        .on_change(cx.listener(|s, on: &bool, _, cx| s.set_locked_use(*on, cx)))
+                        .into_any_element()
+                    }),
+            )
+            .when_some(self.lock_message.clone(), |d, m| {
+                d.child(
+                    div()
+                        .text_color(rgb(p.text_dim))
+                        .text_size(px(11.5))
+                        .child(m),
+                )
+            })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn while_working(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        #[cfg(windows)]
+        let (label, help, on) = (
+            "Hand open and save dialogs to agents",
+            "Loads a small hook into the apps sessions start, so their file dialogs never show. \
+             Endpoint protection may object. Off, dialogs are answered on screen instead.",
+            self.config.windows_panel_hook,
+        );
+        #[cfg(target_os = "linux")]
+        let (label, help, on) = (
+            "Answer open and save dialogs through a portal",
+            "Starts each app on a private session bus whose file chooser is the agent, so its \
+             dialogs never show. Everything else is forwarded to your own bus. Needs dbus-daemon.",
+            self.config.linux_file_portal,
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                Checkbox::new("file-dialogs", label, on).on_change(cx.listener(
+                    |s, on: &bool, _, cx| {
+                        #[cfg(windows)]
+                        {
+                            s.config.windows_panel_hook = *on;
+                        }
+                        #[cfg(target_os = "linux")]
+                        {
+                            s.config.linux_file_portal = *on;
+                        }
+                        s.save();
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                div()
+                    .text_color(rgb(p.text_dim))
+                    .text_size(px(11.5))
+                    .child(format!("{help} Applies to apps started from now on.")),
+            )
+    }
+
     fn row(label: &str, child: impl IntoElement) -> impl IntoElement {
         let p = palette();
         div()
@@ -1528,7 +1713,7 @@ impl Status {
 impl Render for Status {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
-        let all_granted = self.permissions.iter().all(|p| p.granted);
+        let all_granted = self.permissions.iter().all(|p| p.granted || p.optional);
         let provider = self.config.recipe.provider;
 
         let modal = self.issued_modal(cx).map(IntoElement::into_any_element);
@@ -1573,8 +1758,8 @@ impl Render for Status {
                     .child(Divider::horizontal())
                     // Permissions.
                     .child(Self::section("Permissions"))
-                    .children(self.permissions.iter().enumerate().map(|(i, perm)| {
-                        let name = perm.name.clone();
+                    // Off a Mac the optional ones are settings, offered below.
+                    .children(self.permissions.iter().enumerate().filter(|(_, perm)| cfg!(target_os = "macos") || !perm.optional).map(|(i, perm)| {
                         div()
                             .flex()
                             .items_center()
@@ -1586,23 +1771,19 @@ impl Render for Status {
                                     .flex()
                                     .flex_col()
                                     .gap_0p5()
-                                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child(perm.name.clone()))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(div().font_weight(gpui::FontWeight::MEDIUM).child(perm.name.clone()))
+                                            .when(perm.optional, |d| d.child(Badge::new("Optional").colors(p.text_faint, 0xFFFFFF))),
+                                    )
                                     .child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(perm.help.clone())),
                             )
-                            .child(if perm.granted {
-                                status("Granted", true).into_any_element()
-                            } else {
-                                Button::new(("grant", i), "Grant…")
-                                    .primary()
-                                    .flex_none()
-                                    .on_click(move |_, _, _| {
-                                        ocu_macos::request_permissions();
-                                        ocu_macos::open_settings(&name);
-                                    })
-                                    .into_any_element()
-                            })
+                            .child(grant(i, perm))
                     }))
-                    .when(!all_granted, |d| {
+                    .when(cfg!(target_os = "macos") && !all_granted, |d| {
                         d.child(
                             div()
                                 .flex()
@@ -1611,8 +1792,14 @@ impl Render for Status {
                                 .child(div().flex_1().min_w_0().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(
                                     "If OpenComputerUse is missing from the list in System Settings, press + there and add it (Show in Finder finds it). macOS applies Screen Recording after the app reopens.",
                                 ))
-                                .child(Button::new("reveal", "Show in Finder").flex_none().on_click(|_, _, _| reveal_app()))
-                                .child(Button::new("reopen", "Reopen").flex_none().on_click(|_, _, cx| reopen(cx))),
+                                .child(Button::new("reveal", "Show in Finder").flex_none().on_click(|_, _, _| {
+                                    #[cfg(target_os = "macos")]
+                                    reveal_app();
+                                }))
+                                .child(Button::new("reopen", "Reopen").flex_none().on_click(|_, _, _cx| {
+                                    #[cfg(target_os = "macos")]
+                                    reopen(_cx);
+                                })),
                         )
                     })
                     // MCP setup.
@@ -1748,51 +1935,8 @@ impl Render for Status {
                              aren't offered.",
                         ),
                     )
-                    // Overlay.
                     .child(Self::section("While working"))
-                    .child(
-                        Checkbox::new("overlay", "Show a halo and cursor over windows being driven", self.config.show_overlay())
-                            .on_change(cx.listener(|s, checked: &bool, _, cx| {
-                                s.config.show_overlay = Some(*checked);
-                                s.save();
-                                cx.notify();
-                            })),
-                    )
-                    // Work while locked.
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Work while the Mac is locked"))
-                                    .child(
-                                        div()
-                                            .text_color(rgb(p.text_dim))
-                                            .text_size(px(11.5))
-                                            .child(
-                                                "Lets agents unlock the Mac to keep working. Asks for \
-                                                 your password to set up. A key press or click relocks it.",
-                                            ),
-                                    ),
-                            )
-                            .child(if self.lock_busy {
-                                status("Working…", false).into_any_element()
-                            } else {
-                                Checkbox::new("locked-use", "", self.config.allow_unlock && self.lock_installed)
-                                    .on_change(cx.listener(|s, on: &bool, _, cx| s.set_locked_use(*on, cx)))
-                                    .into_any_element()
-                            }),
-                    )
-                    .when_some(self.lock_message.clone(), |d, m| {
-                        d.child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(m))
-                    })
+                    .child(self.while_working(cx))
                     // Other devices.
                     .child(Self::section("Other devices"))
                     .child(self.remote_section(cx))
@@ -1864,6 +2008,7 @@ impl Render for Status {
 pub fn open(service: Arc<Service>, cx: &mut App) -> Option<gpui::WindowHandle<Status>> {
     use gpui::{size, Bounds, TitlebarOptions, WindowBounds, WindowOptions};
     let bounds = Bounds::centered(None, size(px(640.0), px(720.0)), cx);
+    #[cfg(target_os = "macos")]
     super::native::set_regular(true);
     let handle = cx
         .open_window(

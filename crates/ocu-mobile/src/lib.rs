@@ -292,6 +292,8 @@ fn list(kind: DeviceKind) -> Result<Value> {
         }
         DeviceKind::AndroidEmulator => json!(android::emulator::list()?),
         DeviceKind::Phone => {
+            // Only the iOS branch below adds to it, and only on macOS.
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
             let mut all = android::phones()?;
             #[cfg(target_os = "macos")]
             all.extend(ios::list_phones()?);

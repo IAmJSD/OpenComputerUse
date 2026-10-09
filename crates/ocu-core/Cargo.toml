@@ -13,3 +13,13 @@ serde_json.workspace = true
 base64.workspace = true
 png.workspace = true
 log.workspace = true
+tungstenite.workspace = true
+
+# The file chooser portal, which only a Unix app asks on.
+[target.'cfg(unix)'.dependencies]
+zbus.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
+futures-util = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }

@@ -1,33 +1,49 @@
-//! The macOS agent app. It owns the sessions, because the Accessibility and
-//! Screen Recording permissions belong to it, and serves the MCP servers
-//! that clients start over a Unix socket. It has no Dock icon unless its
-//! window is open; while sessions work it draws their overlays.
+//! The app and its window.
+//!
+//! On macOS it owns the sessions, because the Accessibility and Screen
+//! Recording permissions belong to it, and serves the MCP servers that
+//! clients start over a Unix socket. It has no Dock icon unless its window
+//! is open; while sessions work it draws their overlays.
+//!
+//! On Windows and Linux, where each MCP server drives apps itself, it is the
+//! settings window, hosting the HTTP server while open. Closing it quits.
 
 mod assets;
 mod http;
 mod menu;
+#[cfg(target_os = "macos")]
 mod native;
+#[cfg(target_os = "macos")]
 mod overlay;
 mod status;
 pub mod ui;
 
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 use anyhow::Result;
+#[cfg(target_os = "macos")]
 use gpui::{
-    point, px, size, App, AppContext as _, Application, Bounds, Context, Entity,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    point, px, size, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
 };
+use gpui::{App, AppContext as _, Application, Context, Entity, WindowHandle};
 
-use ocu_core::{Observer, Service, SessionInfo, WindowInfo};
+#[cfg(target_os = "macos")]
+use ocu_core::WindowInfo;
+use ocu_core::{Observer, Service, SessionInfo};
 
+#[cfg(target_os = "macos")]
 use crate::config::Config;
+#[cfg(target_os = "macos")]
 use overlay::{Overlay, MARGIN};
 
 /// Where the agent listens. `OCU_SOCKET` moves it, so a development build
 /// can run beside an installed app.
+#[cfg(target_os = "macos")]
 pub fn socket_path() -> std::path::PathBuf {
     std::env::var_os("OCU_SOCKET")
         .map(Into::into)
@@ -37,6 +53,7 @@ pub fn socket_path() -> std::path::PathBuf {
 enum UiEvent {
     Started,
     Ended(String),
+    #[cfg(target_os = "macos")]
     Pointer {
         session: String,
         window: WindowInfo,
@@ -44,6 +61,7 @@ enum UiEvent {
         y: f64,
         click: bool,
     },
+    #[cfg(target_os = "macos")]
     Acted {
         session: String,
         window: WindowInfo,
@@ -62,6 +80,7 @@ impl Observer for Bus {
     fn session_ended(&self, id: &str) {
         let _ = self.0.try_send(UiEvent::Ended(id.to_string()));
     }
+    #[cfg(target_os = "macos")]
     fn pointer(&self, session: &str, window: &WindowInfo, x: f64, y: f64, click: bool) {
         let _ = self.0.try_send(UiEvent::Pointer {
             session: session.into(),
@@ -74,6 +93,7 @@ impl Observer for Bus {
         // sees matches what happens.
         std::thread::sleep(Duration::from_millis(if click { 260 } else { 120 }));
     }
+    #[cfg(target_os = "macos")]
     fn acted(&self, session: &str, window: &WindowInfo) {
         let _ = self.0.try_send(UiEvent::Acted {
             session: session.into(),
@@ -82,6 +102,7 @@ impl Observer for Bus {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct OverlayEntry {
     handle: WindowHandle<Overlay>,
     target: u64,
@@ -90,10 +111,12 @@ struct OverlayEntry {
 }
 
 /// How long an idle session keeps its cursor on screen.
+#[cfg(target_os = "macos")]
 const OVERLAY_IDLE: Duration = Duration::from_secs(30);
 
 struct Agent {
     service: Arc<Service>,
+    #[cfg(target_os = "macos")]
     overlays: HashMap<String, OverlayEntry>,
     status: Option<WindowHandle<status::Status>>,
     http: http::HttpHost,
@@ -116,13 +139,17 @@ impl Agent {
         match ev {
             UiEvent::Started => self.refresh_status(cx),
             UiEvent::Ended(id) => {
+                #[cfg(target_os = "macos")]
                 if let Some(entry) = self.overlays.remove(&id) {
                     let _ = entry
                         .handle
                         .update(cx, |_, window, _| window.remove_window());
                 }
+                #[cfg(not(target_os = "macos"))]
+                let _ = id; // No overlay to put away off macOS.
                 self.refresh_status(cx);
             }
+            #[cfg(target_os = "macos")]
             UiEvent::Pointer {
                 session,
                 window,
@@ -143,6 +170,7 @@ impl Agent {
                     let _ = h.update(cx, |s, _, cx| s.show_update(status, cx));
                 }
             }
+            #[cfg(target_os = "macos")]
             UiEvent::Acted { session, window } => {
                 if let Some(h) = self.overlay(&session, &window, cx) {
                     let _ = h.update(cx, |o, _, cx| {
@@ -169,6 +197,7 @@ impl Agent {
     }
 
     /// The session's overlay over `window`, made or moved as needed.
+    #[cfg(target_os = "macos")]
     fn overlay(
         &mut self,
         session: &str,
@@ -240,6 +269,7 @@ impl Agent {
 
     /// Keeps overlays glued to their windows as they move, resize, hide and
     /// get covered, and puts idle ones away.
+    #[cfg(target_os = "macos")]
     fn track(&mut self, cx: &mut Context<Self>) {
         for entry in self.overlays.values_mut() {
             let info = ocu_macos::window_info(entry.target);
@@ -311,23 +341,35 @@ fn log_to_file() {
     let _ = builder.try_init();
 }
 
-/// Runs the agent. `show` opens the window (a launch from Finder); a launch
-/// by an MCP server stays out of sight unless permissions are missing.
+/// Runs the agent. `show` opens the window (a launch from Finder); on macOS
+/// a launch by an MCP server stays out of sight unless permissions are
+/// missing. Elsewhere the window always opens, since it is the whole app.
 pub fn run(show: bool) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        anyhow::bail!(
+            "no display to open the window on; run `opencomputeruse serve` or `opencomputeruse mcp`"
+        );
+    }
+    #[cfg(windows)]
+    detach_console();
     log_to_file();
     let (tx, rx) = async_channel::unbounded();
     let updates_tx = tx.clone();
     let service = Service::with_devices(
-        Arc::new(ocu_macos::MacPlatform),
+        crate::platform(),
         Some(crate::mobile_platform()),
         Some(Arc::new(Bus(tx))),
     );
-    if let Err(e) = crate::ipc::listen(service.clone(), &socket_path()) {
-        // Another copy already serves; it will show itself if reopened.
-        log::info!("not starting a second agent: {e:#}");
-        return Ok(());
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(e) = crate::ipc::listen(service.clone(), &socket_path()) {
+            // Another copy already serves; it will show itself if reopened.
+            log::info!("not starting a second agent: {e:#}");
+            return Ok(());
+        }
+        log::info!("agent listening on {}", socket_path().display());
     }
-    log::info!("agent listening on {}", socket_path().display());
     {
         let service = service.clone();
         std::thread::spawn(move || loop {
@@ -352,20 +394,26 @@ pub fn run(show: bool) -> Result<()> {
     }
     app.run(move |cx: &mut App| {
         menu::install(cx);
+        #[cfg(target_os = "macos")]
         native::set_regular(false);
         ui::set_light(matches!(
             cx.window_appearance(),
             gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight
         ));
-        let missing = service.platform().permissions().iter().any(|p| !p.granted);
+        let missing = service
+            .platform()
+            .permissions()
+            .iter()
+            .any(|p| !p.granted && !p.optional);
         let agent = cx.new(|_| Agent {
             service: service.clone(),
+            #[cfg(target_os = "macos")]
             overlays: HashMap::new(),
             status: None,
             http: Default::default(),
         });
         *agent_slot.borrow_mut() = Some(agent.clone());
-        if show || missing {
+        if show || missing || cfg!(not(target_os = "macos")) {
             agent.update(cx, |a, cx| a.show_status(cx));
         }
         {
@@ -391,7 +439,12 @@ pub fn run(show: bool) -> Result<()> {
                         .is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
                     if !open {
                         agent.update(cx, |a, _| a.status = None);
+                        // Without a Dock or menu bar there is no way back
+                        // to a hidden app, so closing the window quits.
+                        #[cfg(target_os = "macos")]
                         native::set_regular(false);
+                        #[cfg(not(target_os = "macos"))]
+                        cx.quit();
                     }
                 });
             }
@@ -415,7 +468,9 @@ pub fn run(show: bool) -> Result<()> {
             cx.background_executor().timer(Duration::from_secs(2)).await;
         })
         .detach();
+        #[cfg(target_os = "macos")]
         let tracker = agent.clone();
+        #[cfg(target_os = "macos")]
         cx.spawn(async move |cx| loop {
             cx.background_executor()
                 .timer(Duration::from_millis(120))
@@ -432,4 +487,16 @@ pub fn run(show: bool) -> Result<()> {
         .detach();
     });
     Ok(())
+}
+
+/// Lets go of the console Windows gives a console program started from
+/// Explorer, so a double-click shows the window alone. A console the user
+/// started us from is shared with their shell, and kept.
+#[cfg(windows)]
+fn detach_console() {
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut pids = [0u32; 2];
+    if unsafe { GetConsoleProcessList(&mut pids) } == 1 {
+        let _ = unsafe { FreeConsole() };
+    }
 }

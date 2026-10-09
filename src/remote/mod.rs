@@ -22,7 +22,6 @@ pub struct Issued {
     /// computer's name, URL and the key.
     pub host_entry: String,
     /// The generic skill, the same for every computer (no key).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub skill: String,
     /// Both, inside a message asking the device's agent to set them up.
     pub prompt: String,
@@ -58,6 +57,8 @@ pub fn regenerate(id: &str, url: Option<&str>) -> Result<Issued> {
 /// link at the folder or file is never written through; an existing regular
 /// file is replaced.
 fn write_private(dir: &std::path::Path, file: &str, text: &str) -> Result<std::path::PathBuf> {
+    // Only the Unix branch below writes through a handle.
+    #[cfg(unix)]
     use std::io::Write as _;
 
     let path = dir.join(file);
@@ -99,7 +100,6 @@ fn write_private(dir: &std::path::Path, file: &str, text: &str) -> Result<std::p
 
 /// Saves a file to `~/Downloads/<folder>/<file>`, created readable by the
 /// user alone (it may hold a key), and returns where it went.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::PathBuf> {
     let dir = crate::clients::home().join("Downloads").join(folder);
     write_private(&dir, file, text)
@@ -382,10 +382,13 @@ pub mod autostart {
     //! keeps its own permissions). Linux: a systemd user service. Windows:
     //! a Run key. The last two are for `opencomputeruse serve`.
 
-    use anyhow::{Context as _, Result};
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "macos")]
+    use anyhow::Context as _;
+    use anyhow::Result;
+    #[cfg(target_os = "linux")]
     use std::path::PathBuf;
 
+    #[cfg(target_os = "macos")]
     const LABEL: &str = "com.infrawrench.opencomputeruse";
 
     #[cfg(target_os = "macos")]
