@@ -1,0 +1,5 @@
+# Check every text file out with LF on every platform. Line endings are
+# load-bearing here: the skill's shell helper is a raw string in Rust source,
+# and android/res/raw/skill.md is byte-compared against generated output, so a
+# CRLF checkout on Windows would break both. Binary files are left untouched.
+* text=auto eol=lf
