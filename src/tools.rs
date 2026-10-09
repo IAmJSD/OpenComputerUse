@@ -789,15 +789,23 @@ mod tests {
         let off = names();
         assert!(!off.iter().any(|n| is_device_tool(n)), "{off:?}");
         let start = &list()[0];
-        assert!(!start["description"].as_str().unwrap().contains("phone_start_session"));
-        let err = call(&mut NoHandler, "phone_list", &json!({})).err().unwrap();
+        assert!(!start["description"]
+            .as_str()
+            .unwrap()
+            .contains("phone_start_session"));
+        let err = call(&mut NoHandler, "phone_list", &json!({}))
+            .err()
+            .unwrap();
         assert!(format!("{err}").contains("turned off"), "{err}");
 
         std::env::set_var("OCU_MOBILE", "1");
         let on = names();
         assert!(on.iter().any(|n| n == "phone_list" && is_device_tool(n)));
         let start = &list()[0];
-        assert!(start["description"].as_str().unwrap().contains("phone_start_session"));
+        assert!(start["description"]
+            .as_str()
+            .unwrap()
+            .contains("phone_start_session"));
         std::env::remove_var("OCU_MOBILE");
     }
 }
