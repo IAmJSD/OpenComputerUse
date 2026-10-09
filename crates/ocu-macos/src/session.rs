@@ -1064,7 +1064,11 @@ impl Session for MacSession {
     }
 
     fn close(&mut self) {
-        if std::mem::replace(&mut self.closed, true) || !self.launched {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        hook::forget(self.pid);
+        if !self.launched {
             return;
         }
         if let Some(mut child) = self.child.take() {

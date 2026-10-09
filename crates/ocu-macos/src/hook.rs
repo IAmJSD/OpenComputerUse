@@ -39,11 +39,45 @@ fn pending() -> &'static Mutex<HashMap<i32, Pending>> {
     P.get_or_init(Default::default)
 }
 
-/// Where hooked apps reach us, listening from the first call on.
+const SOCKET_PREFIX: &str = "ocu-panel-";
+
+/// Removes the sockets of agents that are no longer running, which leave
+/// theirs behind when they are killed or crash.
+fn sweep(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(SOCKET_PREFIX))
+            .and_then(|n| n.strip_suffix(".sock"))
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let alive = unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if !alive {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Where hooked apps reach us, listening from the first call on. The
+/// socket is removed as the agent exits.
 pub fn socket() -> Option<&'static Path> {
     static S: OnceLock<Option<PathBuf>> = OnceLock::new();
+    extern "C" fn remove_socket() {
+        if let Some(Some(path)) = S.get() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     S.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("ocu-panel-{}.sock", std::process::id()));
+        let dir = std::env::temp_dir();
+        sweep(&dir);
+        let path = dir.join(format!("{SOCKET_PREFIX}{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)
             .map_err(|e| log::warn!("panel hook socket {}: {e}", path.display()))
@@ -56,9 +90,16 @@ pub fn socket() -> Option<&'static Path> {
                 }
             })
             .ok()?;
+        unsafe { libc::atexit(remove_socket) };
         Some(path)
     })
     .as_deref()
+}
+
+/// Drops app `pid`'s waiting panel, as its session ends. The app sees it
+/// cancelled.
+pub fn forget(pid: i32) {
+    pending().lock().unwrap().remove(&pid);
 }
 
 fn receive(stream: UnixStream) {
