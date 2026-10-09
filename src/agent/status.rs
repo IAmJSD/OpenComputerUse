@@ -1464,7 +1464,7 @@ impl Status {
 impl Render for Status {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette();
-        let all_granted = self.permissions.iter().all(|p| p.granted);
+        let all_granted = self.permissions.iter().all(|p| p.granted || p.optional);
         let provider = self.config.recipe.provider;
 
         let modal = self.issued_modal(cx).map(IntoElement::into_any_element);
@@ -1522,11 +1522,25 @@ impl Render for Status {
                                     .flex()
                                     .flex_col()
                                     .gap_0p5()
-                                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child(perm.name.clone()))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(div().font_weight(gpui::FontWeight::MEDIUM).child(perm.name.clone()))
+                                            .when(perm.optional, |d| d.child(Badge::new("Optional").colors(p.text_faint, 0xFFFFFF))),
+                                    )
                                     .child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(perm.help.clone())),
                             )
                             .child(if perm.granted {
-                                status("Granted", true).into_any_element()
+                                status(if perm.optional { "On" } else { "Granted" }, true).into_any_element()
+                            } else if perm.optional {
+                                // Only the Settings pane: nothing asks for it
+                                // unless the user goes there and turns it on.
+                                Button::new(("grant", i), "Turn On…")
+                                    .flex_none()
+                                    .on_click(move |_, _, _| ocu_macos::open_settings(&name))
+                                    .into_any_element()
                             } else {
                                 Button::new(("grant", i), "Grant…")
                                     .primary()

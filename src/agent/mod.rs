@@ -357,7 +357,11 @@ pub fn run(show: bool) -> Result<()> {
             cx.window_appearance(),
             gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight
         ));
-        let missing = service.platform().permissions().iter().any(|p| !p.granted);
+        let missing = service
+            .platform()
+            .permissions()
+            .iter()
+            .any(|p| !p.granted && !p.optional);
         let agent = cx.new(|_| Agent {
             service: service.clone(),
             overlays: HashMap::new(),

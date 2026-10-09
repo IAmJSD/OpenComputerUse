@@ -288,8 +288,12 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
                 }
             }
             // An app that lets our panel hook in hands us its open and save
-            // panels instead of showing them.
-            if piped.is_none() && (already.is_empty() || spec.new_instance) {
+            // panels instead of showing them; only once the user has turned
+            // on App Management, the permission for touching other apps.
+            if piped.is_none()
+                && (already.is_empty() || spec.new_instance)
+                && crate::app_management_granted()
+            {
                 if let (Some(dylib), Some(socket)) = (hook::dylib(), hook::socket()) {
                     if hook::injectable(&bundle) {
                         log::info!("{} takes the panel hook", bundle.display());

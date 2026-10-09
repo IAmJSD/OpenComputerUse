@@ -103,7 +103,9 @@ cleanup, the MCP tools and recipes.
   - Firefox started with its own `-profile` opens WebDriver BiDi on a
     local port, and OCU takes its only session at once. File pickers are
     held back and answered with `input.setFiles`.
-  - Apps whose signature lets `DYLD_INSERT_LIBRARIES` through (no hardened
+  - With the optional App Management permission turned on (the app never
+    asks for it; its Turn On button opens System Settings), apps whose
+    signature lets `DYLD_INSERT_LIBRARIES` through (no hardened
     runtime, or both `allow-dyld-environment-variables` and
     `disable-library-validation`; never sandboxed ones) load
     `OcuPanelHook.dylib` (`packaging/macos/panelhook`), which hands their

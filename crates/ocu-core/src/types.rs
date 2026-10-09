@@ -384,4 +384,8 @@ pub struct Permission {
     pub name: String,
     pub granted: bool,
     pub help: String,
+    /// Not needed to work: it turns on something extra, and its absence
+    /// is never reported as a problem.
+    #[serde(default)]
+    pub optional: bool,
 }

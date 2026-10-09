@@ -77,6 +77,7 @@ impl Platform for LinuxPlatform {
             name: "Xvfb".into(),
             granted: self.xvfb.is_some(),
             help: "Sessions run on a private virtual X display. Install Xvfb (Debian/Ubuntu: apt install xvfb; Fedora: dnf install xorg-x11-server-Xvfb) or set OCU_XVFB.".into(),
+            optional: false,
         }]
     }
 
