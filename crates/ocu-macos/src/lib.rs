@@ -8,6 +8,7 @@
 #![cfg(target_os = "macos")]
 
 mod ax;
+mod bidi;
 mod capture;
 mod cdp;
 mod input;

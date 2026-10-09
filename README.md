@@ -100,6 +100,9 @@ cleanup, the MCP tools and recipes.
     DevTools pipe (`--remote-debugging-pipe`, so no port is opened). A
     page's `<input type=file>` then never shows a panel; its files are set
     over the pipe. `showOpenFilePicker` and kin still open the panel.
+  - Firefox started with its own `-profile` opens WebDriver BiDi on a
+    local port, and OCU takes its only session at once. File pickers are
+    held back and answered with `input.setFiles`.
   - Everything else shows AppKit's panel, which is drawn by a separate
     process (`openAndSavePanelService`). Input goes to that process, the
     path goes in through the panel's Go to sheet, and screenshots compose

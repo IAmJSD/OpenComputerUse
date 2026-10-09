@@ -24,6 +24,7 @@ use ocu_core::{
 };
 
 use crate::ax::{self, Element, ElementTable};
+use crate::bidi;
 use crate::capture;
 use crate::cdp::{self, Cdp};
 use crate::input::{self, Target};
@@ -240,6 +241,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
     let mut successor_of: Option<(String, Vec<i32>)> = None;
     let mut gecko = false;
     let mut pages: Option<Box<dyn PageFiles>> = None;
+    let mut bidi_profile = None;
     let (pid, launched, child, name) = match resolved {
         Resolved::Bundle(bundle) => {
             let already: Vec<i32> = bundle_id(&bundle)
@@ -274,6 +276,16 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
             let piped = is_chromium_bundle(&bundle)
                 .then(|| spawn_with_devtools(&bundle, &spec, !already.is_empty()))
                 .flatten();
+            // Firefox with a profile of its own takes WebDriver BiDi, which
+            // hands us its pages' file choosers; it is connected to once it
+            // has started.
+            if gecko && (already.is_empty() || spec.new_instance) {
+                if let Some(profile) = bidi::profile_dir(&spec.args) {
+                    bidi::clear(&profile);
+                    spec.args.push(bidi::ARG.to_string());
+                    bidi_profile = Some(profile);
+                }
+            }
             if let Some((child, c)) = piped {
                 pages = Some(Box::new(c));
                 (child.id() as i32, true, Some(child), name)
@@ -339,6 +351,12 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         sleep(Duration::from_millis(150));
     }
     sleep(Duration::from_millis(300));
+    if let Some(profile) = bidi_profile {
+        match bidi::connect(&profile, Duration::from_secs(10)) {
+            Ok(b) => session.pages = Some(Box::new(b)),
+            Err(e) => log::warn!("Firefox's WebDriver BiDi: {e:#}"),
+        }
+    }
     if session.foreground {
         let first = app_windows(session.pid).into_iter().next();
         session.bring_forward(first.as_ref());
@@ -460,7 +478,7 @@ pub struct MacSession {
     /// window list while it exists.
     pinned: Option<u64>,
     /// A browser's link that takes its pages' file choosers: the DevTools
-    /// pipe of a Chromium browser.
+    /// pipe of a Chromium browser, or Firefox's WebDriver BiDi.
     pages: Option<Box<dyn PageFiles>>,
 }
 

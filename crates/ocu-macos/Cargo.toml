@@ -12,6 +12,8 @@ anyhow.workspace = true
 log.workspace = true
 libc.workspace = true
 serde_json.workspace = true
+# The WebDriver BiDi link to Firefox, for its pages' file choosers.
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSString", "NSValue", "NSURL", "NSError", "NSEnumerator", "NSObject", "NSBundle", "block2"] }

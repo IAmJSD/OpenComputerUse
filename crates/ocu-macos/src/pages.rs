@@ -1,6 +1,6 @@
 //! A browser link that hands us its pages' file choosers, so they are
 //! answered without a panel showing: Chromium's DevTools pipe
-//! ([`crate::cdp`]).
+//! ([`crate::cdp`]) or Firefox's WebDriver BiDi ([`crate::bidi`]).
 
 use std::path::PathBuf;
 
