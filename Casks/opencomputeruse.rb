@@ -13,7 +13,7 @@ cask "opencomputeruse" do
   end
 
   auto_updates true
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "OpenComputerUse.app"
   binary "#{appdir}/OpenComputerUse.app/Contents/MacOS/opencomputeruse"
