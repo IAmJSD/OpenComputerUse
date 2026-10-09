@@ -116,17 +116,38 @@ pub struct Config {
     /// offered only while this is on. Off unless turned on.
     #[serde(default)]
     pub mobile: bool,
+    /// Load the panel hook into the apps a Windows session starts, so their
+    /// open and save dialogs never show. Off unless turned on: it loads code
+    /// into other processes, which endpoint protection may object to.
+    #[serde(default)]
+    pub windows_panel_hook: bool,
+    /// Give the apps a Linux session starts a private session bus with a
+    /// file chooser portal, so their dialogs never show. Calls the portal
+    /// does not answer are forwarded to the user's own bus, so the keyring
+    /// and notifications still work. Off unless turned on.
+    #[serde(default)]
+    pub linux_file_portal: bool,
 }
 
 impl Config {
+    /// Whether to load the panel hook into the apps Windows sessions start:
+    /// the setting, or `OCU_WINDOWS_PANEL_HOOK` (1 or 0).
+    #[cfg(windows)]
+    pub fn windows_panel_hook() -> bool {
+        env_flag("OCU_WINDOWS_PANEL_HOOK").unwrap_or_else(|| Self::load().windows_panel_hook)
+    }
+
+    /// Whether Linux sessions answer file choosers through a portal: the
+    /// setting, or `OCU_LINUX_FILE_PORTAL` (1 or 0).
+    #[cfg(target_os = "linux")]
+    pub fn linux_file_portal() -> bool {
+        env_flag("OCU_LINUX_FILE_PORTAL").unwrap_or_else(|| Self::load().linux_file_portal)
+    }
+
     /// Whether the phone, simulator and emulator tools are on: the
     /// setting, or `OCU_MOBILE` (1 or 0) where there is no app to set it.
     pub fn mobile_enabled() -> bool {
-        match std::env::var("OCU_MOBILE").ok().as_deref().map(str::trim) {
-            Some("1" | "true" | "yes" | "on") => true,
-            Some("0" | "false" | "no" | "off") => false,
-            _ => Self::load().mobile,
-        }
+        env_flag("OCU_MOBILE").unwrap_or_else(|| Self::load().mobile)
     }
 
     pub fn path() -> PathBuf {
@@ -184,6 +205,7 @@ impl Config {
         std::fs::rename(&tmp, &path).with_context(|| format!("saving {}", path.display()))
     }
 
+    #[cfg(target_os = "macos")]
     pub fn show_overlay(&self) -> bool {
         self.show_overlay.unwrap_or(true)
     }
@@ -200,5 +222,14 @@ pub fn config_dir() -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| home().join(".config"))
             .join("opencomputeruse")
+    }
+}
+
+/// An on/off environment override, or `None` when unset or unreadable.
+fn env_flag(var: &str) -> Option<bool> {
+    match std::env::var(var).ok().as_deref().map(str::trim) {
+        Some("1" | "true" | "yes" | "on") => Some(true),
+        Some("0" | "false" | "no" | "off") => Some(false),
+        _ => None,
     }
 }

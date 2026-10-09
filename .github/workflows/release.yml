@@ -90,6 +90,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install the window's libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev
       - name: Build
         run: |
           cargo build --release
@@ -108,9 +112,33 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build the panel hook
+        shell: pwsh
+        run: packaging\windows\panelhook\build.ps1 -Out target\panelhook\OcuPanelHook.dll
+      - name: Sign the panel hook
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PFX_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_PFX_BASE64) {
+            Write-Host "No WINDOWS_CERT_PFX_BASE64 secret; the hook is unsigned."
+            exit 0
+          }
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\release.pfx",
+            [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          # Timestamped, so it still validates after the certificate expires.
+          signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            /f "$env:RUNNER_TEMP\release.pfx" /p $env:WINDOWS_CERT_PFX_PASSWORD `
+            target\panelhook\OcuPanelHook.dll
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item "$env:RUNNER_TEMP\release.pfx" -Force
       - name: Build
         shell: pwsh
         run: |
+          # Embeds the signed hook in the exe (crates/ocu-windows/build.rs).
+          $env:OCU_PANEL_HOOK_DLL = "$PWD\target\panelhook\OcuPanelHook.dll"
           cargo build --release
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/opencomputeruse.exe dist/opencomputeruse-windows-x86_64.exe

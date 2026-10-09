@@ -316,7 +316,10 @@ mod tests {
     }
 
     /// Runs `script` in `sh` with the helpers loaded and `hosts` as the hosts
-    /// file: (exit code, stdout, stderr).
+    /// file: (exit code, stdout, stderr). Unix only: the helper is a POSIX
+    /// script the agent sources in its own shell, and this drives it with a
+    /// Unix path, which a Windows `sh` would not read.
+    #[cfg(unix)]
     fn sh(name: &str, hosts: &str, script: &str) -> (i32, String, String) {
         let dir =
             std::env::temp_dir().join(format!("ocu-skill-test-{}-{name}", std::process::id()));
@@ -337,8 +340,10 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     const HOSTS: &str = "# my computers\nhosts:\n  work-mac:   # the office one\n    url: \"http://work-mac.ts.net:8642\"\n    key: ocu_AAA111\n  \"studio\":\n    url: 'https://studio.example.com'\n    key: 'ocu_BBB-222'  # rotated\n  work-mac:\n    url: http://work-mac.ts.net:9000\n    key: ocu_CCC333\nother: 1\n";
 
+    #[cfg(unix)]
     #[test]
     fn the_shell_helper_reads_the_hosts_file() {
         let (code, out, _) = sh("entry", HOSTS, "_ocu_entry studio");
@@ -358,6 +363,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn listing_hosts_never_shows_a_key() {
         let (code, out, _) = sh("list", HOSTS, "ocu_hosts");
@@ -369,6 +375,7 @@ mod tests {
         assert!(!out.contains("ocu_"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_shell_helper_refuses_unknown_and_unsafe_hosts() {
         let (code, out, err) = sh("missing", HOSTS, "_ocu_entry nowhere");

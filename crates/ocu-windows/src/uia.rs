@@ -7,6 +7,7 @@ use windows::core::{Interface as _, BSTR};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 
 use ocu_core::{Rect, TreeOptions, UiNode};
@@ -215,28 +216,70 @@ impl Uia {
             .ok_or_else(|| anyhow!("no element {id}; read the tree again"))
     }
 
+    /// The root of `window`, from which anything under it can be found.
+    fn root(&self, window: u64) -> Option<IUIAutomationElement> {
+        unsafe { self.automation.ElementFromHandle(hwnd(window)) }.ok()
+    }
+
+    fn find(
+        &self,
+        root: &IUIAutomationElement,
+        property: UIA_PROPERTY_ID,
+        value: VARIANT,
+    ) -> Option<IUIAutomationElement> {
+        let cond = unsafe { self.automation.CreatePropertyCondition(property, &value) }.ok()?;
+        unsafe { root.FindFirst(TreeScope_Descendants, &cond) }.ok()
+    }
+
+    /// The first element anywhere under `window` whose automation id is
+    /// `id`. Automation ids are fixed by the shell's own dialogs, so this
+    /// finds the same control whichever app put the dialog up.
+    pub fn find_by_id(&self, window: u64, id: &str) -> Option<IUIAutomationElement> {
+        let root = self.root(window)?;
+        self.find(
+            &root,
+            UIA_AutomationIdPropertyId,
+            VARIANT::from(BSTR::from(id)),
+        )
+    }
+
+    /// The first element under `window` of a control type, optionally with a
+    /// given name, where an empty `name` matches any.
+    pub fn find_by_type(
+        &self,
+        window: u64,
+        ty: UIA_CONTROLTYPE_ID,
+        name: &str,
+    ) -> Option<IUIAutomationElement> {
+        self.all_of_type(window, ty)
+            .into_iter()
+            .find(|el| name.is_empty() || unsafe { el.CurrentName() }.is_ok_and(|n| n == name))
+    }
+
+    /// Every element under `window` of a control type.
+    pub fn all_of_type(&self, window: u64, ty: UIA_CONTROLTYPE_ID) -> Vec<IUIAutomationElement> {
+        let Some(root) = self.root(window) else {
+            return Vec::new();
+        };
+        let Ok(cond) = (unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(ty.0))
+        }) else {
+            return Vec::new();
+        };
+        let Ok(all) = (unsafe { root.FindAll(TreeScope_Descendants, &cond) }) else {
+            return Vec::new();
+        };
+        (0..unsafe { all.Length() }.unwrap_or(0))
+            .filter_map(|i| unsafe { all.GetElement(i) }.ok())
+            .collect()
+    }
+
     pub fn perform(&self, id: &str, action: &str) -> Result<()> {
         let el = self.element(id)?;
         unsafe {
             match action.to_lowercase().trim_start_matches("ax") {
-                "press" | "invoke" | "click" => {
-                    if let Ok(p) =
-                        el.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-                    {
-                        return Ok(p.Invoke()?);
-                    }
-                    if let Ok(p) =
-                        el.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-                    {
-                        return Ok(p.Toggle()?);
-                    }
-                    if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                        UIA_SelectionItemPatternId,
-                    ) {
-                        return Ok(p.Select()?);
-                    }
-                    bail!("element {id} cannot be pressed; click its position instead")
-                }
+                "press" | "invoke" | "click" => self.invoke(el),
                 "showmenu" | "expand" => {
                     let p: IUIAutomationExpandCollapsePattern =
                         el.GetCurrentPatternAs(UIA_ExpandCollapsePatternId)?;
@@ -265,8 +308,39 @@ impl Uia {
         }
     }
 
+    /// Presses `el`, whichever way it takes a press.
+    pub fn invoke(&self, el: &IUIAutomationElement) -> Result<()> {
+        unsafe {
+            if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+            {
+                return Ok(p.Invoke()?);
+            }
+            if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+            {
+                return Ok(p.Toggle()?);
+            }
+            if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                UIA_SelectionItemPatternId,
+            ) {
+                return Ok(p.Select()?);
+            }
+        }
+        bail!("this element cannot be pressed; click its position instead")
+    }
+
     pub fn set_value(&self, id: &str, value: &str) -> Result<()> {
         let el = self.element(id)?;
+        self.set_element_value(el, value, id)
+    }
+
+    /// Sets `el`'s text, by whichever pattern it offers to be set by.
+    /// `label` names the element in the error.
+    pub fn set_element_value(
+        &self,
+        el: &IUIAutomationElement,
+        value: &str,
+        label: &str,
+    ) -> Result<()> {
         unsafe {
             if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
                 return Ok(p.SetValue(&BSTR::from(value))?);
@@ -277,11 +351,11 @@ impl Uia {
                 let v: f64 = value
                     .trim()
                     .parse()
-                    .map_err(|_| anyhow!("this element takes a number"))?;
+                    .map_err(|_| anyhow!("{label} takes a number"))?;
                 return Ok(p.SetValue(v)?);
             }
         }
-        bail!("element {id} has no settable value")
+        bail!("{label} has no settable value")
     }
 
     /// The element's centre in window coordinates, for clicking it.

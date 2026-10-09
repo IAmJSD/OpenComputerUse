@@ -70,6 +70,12 @@ pub trait Session: Send {
 
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()>;
 
+    /// Something about the app's state worth telling the caller after an
+    /// action, such as a file panel waiting for [`Action::ChooseFile`].
+    fn notice(&mut self) -> Option<String> {
+        None
+    }
+
     fn is_alive(&mut self) -> bool;
 
     /// Ends the app if the session started it. Idempotent.

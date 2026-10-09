@@ -651,6 +651,7 @@ impl Session for AndroidSession {
                 std::thread::sleep(Duration::from_millis(*ms));
                 Ok(())
             }
+            Action::ChooseFile { .. } => bail!("a phone has no file panels to answer"),
         }
     }
 

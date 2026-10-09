@@ -3,19 +3,18 @@
 //! `opencomputeruse mcp` is what MCP clients run. On Linux and Windows it
 //! drives apps itself; on macOS it forwards to the OpenComputerUse agent
 //! app (`opencomputeruse agent`), which holds the Accessibility and Screen
-//! Recording permissions and draws the overlays.
+//! Recording permissions and draws the overlays. Run with no arguments, it
+//! opens the app's window on every platform.
 
 mod clients;
 mod config;
 mod mcp;
 mod recipe;
 mod remote;
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod tools;
 mod update;
 mod vision;
 
-#[cfg(target_os = "macos")]
 mod agent;
 #[cfg(target_os = "macos")]
 mod ipc;
@@ -37,7 +36,7 @@ USAGE:
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse skill                 Print the skill other devices use to drive a host
-    opencomputeruse agent [--background]  Run the macOS agent app (opening the app does this)
+    opencomputeruse [agent]               Open the app's window (on macOS, --background starts it hidden)
     sudo opencomputeruse install-lock     Enable working while the Mac is locked (macOS; one-time)
     sudo opencomputeruse uninstall-lock   Undo install-lock, restoring the normal unlock
 
@@ -116,15 +115,12 @@ fn run() -> Result<()> {
             println!("opencomputeruse {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        #[cfg(target_os = "macos")]
         Some("agent") => agent::run(!args.iter().any(|a| a == "--background")),
-        // Opened from Finder: no arguments, or a legacy process serial number.
-        #[cfg(target_os = "macos")]
+        // Opened from Finder or Explorer: no arguments, or on macOS a legacy
+        // process serial number.
         None => agent::run(true),
         #[cfg(target_os = "macos")]
         Some(a) if a.starts_with("-psn_") => agent::run(true),
-        #[cfg(not(target_os = "macos"))]
-        None => run_mcp(),
         Some(other) => bail!("unknown command \"{other}\"\n\n{USAGE}"),
     }
 }
@@ -200,13 +196,7 @@ fn run_serve(args: &[String]) -> Result<()> {
     }
     init_stderr_log();
     let flags = ServeFlags::parse(args)?;
-    #[cfg(target_os = "macos")]
-    let platform = std::sync::Arc::new(ocu_macos::MacPlatform);
-    #[cfg(target_os = "linux")]
-    let platform = std::sync::Arc::new(ocu_linux::LinuxPlatform::new());
-    #[cfg(windows)]
-    let platform = std::sync::Arc::new(ocu_windows::WindowsPlatform::new());
-    let service = ocu_core::Service::with_devices(platform, Some(mobile_platform()), None);
+    let service = ocu_core::Service::with_devices(platform(), Some(mobile_platform()), None);
     let mut server = remote::server::HttpServer::new(service);
     let mut shown: Option<(Vec<_>, Vec<String>)> = None;
     // Follow the settings and the network: adapters gain and lose addresses.
@@ -333,6 +323,20 @@ fn run_update(check_only: bool) -> Result<()> {
     Ok(())
 }
 
+/// This computer's apps, through its own backend.
+pub fn platform() -> std::sync::Arc<dyn ocu_core::Platform> {
+    #[cfg(target_os = "macos")]
+    return std::sync::Arc::new(ocu_macos::MacPlatform);
+    #[cfg(target_os = "linux")]
+    return std::sync::Arc::new(ocu_linux::LinuxPlatform::with_portal(
+        config::Config::linux_file_portal,
+    ));
+    #[cfg(windows)]
+    return std::sync::Arc::new(ocu_windows::WindowsPlatform::with_hook(
+        config::Config::windows_panel_hook,
+    ));
+}
+
 /// Phones, tablets, simulators and emulators, beside this computer's apps.
 pub fn mobile_platform() -> std::sync::Arc<ocu_mobile::MobilePlatform> {
     // A development build uses the Android helper built in this checkout
@@ -361,13 +365,8 @@ fn run_mcp() -> Result<()> {
 
 #[cfg(not(target_os = "macos"))]
 fn run_mcp() -> Result<()> {
-    use std::sync::Arc;
     init_stderr_log();
-    #[cfg(target_os = "linux")]
-    let platform = Arc::new(ocu_linux::LinuxPlatform::new());
-    #[cfg(windows)]
-    let platform = Arc::new(ocu_windows::WindowsPlatform::new());
-    let service = ocu_core::Service::with_devices(platform, Some(mobile_platform()), None);
+    let service = ocu_core::Service::with_devices(platform(), Some(mobile_platform()), None);
     let client = service.client();
     let result = mcp::serve(Box::new(client));
     // The client is gone with `serve`'s box, ending its sessions; make sure.

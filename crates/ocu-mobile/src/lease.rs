@@ -62,6 +62,7 @@ impl<T: Clone + Send + 'static> Leases<T> {
         })
     }
 
+    #[cfg(test)]
     pub fn held(&self, key: &str) -> bool {
         self.map.lock().unwrap().contains_key(key)
     }
