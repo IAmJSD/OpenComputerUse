@@ -8,13 +8,11 @@
 #![cfg(target_os = "macos")]
 
 mod ax;
-mod bidi;
 mod capture;
 mod cdp;
 mod hook;
 mod input;
 pub mod lock;
-mod pages;
 mod panel;
 mod session;
 mod sky;

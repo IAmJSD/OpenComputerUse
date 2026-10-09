@@ -203,9 +203,13 @@ fn run_serve(args: &[String]) -> Result<()> {
     #[cfg(target_os = "macos")]
     let platform = std::sync::Arc::new(ocu_macos::MacPlatform);
     #[cfg(target_os = "linux")]
-    let platform = std::sync::Arc::new(ocu_linux::LinuxPlatform::new());
+    let platform = std::sync::Arc::new(ocu_linux::LinuxPlatform::with_portal(
+        config::Config::linux_file_portal(),
+    ));
     #[cfg(windows)]
-    let platform = std::sync::Arc::new(ocu_windows::WindowsPlatform::new());
+    let platform = std::sync::Arc::new(ocu_windows::WindowsPlatform::with_hook(
+        config::Config::windows_panel_hook(),
+    ));
     let service = ocu_core::Service::with_devices(platform, Some(mobile_platform()), None);
     let mut server = remote::server::HttpServer::new(service);
     let mut shown: Option<(Vec<_>, Vec<String>)> = None;
@@ -364,9 +368,13 @@ fn run_mcp() -> Result<()> {
     use std::sync::Arc;
     init_stderr_log();
     #[cfg(target_os = "linux")]
-    let platform = Arc::new(ocu_linux::LinuxPlatform::new());
+    let platform = Arc::new(ocu_linux::LinuxPlatform::with_portal(
+        config::Config::linux_file_portal(),
+    ));
     #[cfg(windows)]
-    let platform = Arc::new(ocu_windows::WindowsPlatform::new());
+    let platform = Arc::new(ocu_windows::WindowsPlatform::with_hook(
+        config::Config::windows_panel_hook(),
+    ));
     let service = ocu_core::Service::with_devices(platform, Some(mobile_platform()), None);
     let client = service.client();
     let result = mcp::serve(Box::new(client));

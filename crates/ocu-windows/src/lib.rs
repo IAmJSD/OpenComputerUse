@@ -6,6 +6,9 @@
 #![cfg(windows)]
 
 mod capture;
+mod dialog;
+mod hook;
+mod inject;
 mod input;
 mod launch;
 mod uia;
@@ -32,7 +35,10 @@ use ocu_core::{
     UiNode, WindowInfo,
 };
 
-pub struct WindowsPlatform;
+pub struct WindowsPlatform {
+    /// Whether to load the panel hook into the apps sessions start.
+    hook: bool,
+}
 
 impl WindowsPlatform {
     pub fn new() -> Self {
@@ -41,7 +47,17 @@ impl WindowsPlatform {
         let _ =
             unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         uia::com_init();
-        Self
+        let hook = hook::from_env();
+        hook::set_wanted(hook);
+        Self { hook }
+    }
+
+    /// A platform that loads the panel hook when `hook` is set. The agent
+    /// passes the user's own setting; [`new`] alone takes it from the
+    /// environment.
+    pub fn with_hook(hook: bool) -> Self {
+        hook::set_wanted(hook);
+        Self { hook }
     }
 }
 
@@ -54,6 +70,18 @@ impl Default for WindowsPlatform {
 impl Platform for WindowsPlatform {
     fn name(&self) -> &'static str {
         "windows"
+    }
+
+    fn permissions(&self) -> Vec<ocu_core::Permission> {
+        vec![ocu_core::Permission {
+            name: "Panel hook".into(),
+            granted: self.hook,
+            help: "Hands apps' open and save dialogs straight to the agent, so they never show. \
+                   Loads a small library into the apps a session starts, which endpoint protection \
+                   may object to; dialogs are answered on screen instead without it."
+                .into(),
+            optional: true,
+        }]
     }
 
     fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>> {
@@ -206,6 +234,12 @@ impl Owner {
             job.kill();
         }
     }
+
+    /// Whether the panel hook was loaded into the app before it started.
+    /// An attached app never can have one.
+    fn hooked(&self) -> bool {
+        matches!(self, Owner::Job(job) if job.hooked)
+    }
 }
 
 pub struct WindowsSession {
@@ -227,6 +261,41 @@ impl WindowsSession {
         pick_window(&windows, window).cloned()
     }
 
+    /// The open or save dialog among the app's windows, if one is up.
+    fn dialog(&mut self) -> Option<dialog::Dialog> {
+        let windows = self.windows().ok()?;
+        dialog::locate(&self.uia, &windows)
+    }
+
+    /// Answers whatever is asking for files: a dialog held back by the
+    /// panel hook, or a dialog on screen answered through UI Automation.
+    fn choose_file(&mut self, paths: &[String]) -> Result<()> {
+        let paths: Vec<std::path::PathBuf> = paths
+            .iter()
+            .map(|p| ocu_core::paths::absolute(p))
+            .collect::<Result<_>>()?;
+        // What asked may still be on its way: a menu item's dialog comes a
+        // moment after the click.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            // The hook first: a hooked app's dialog never shows, so it is
+            // the better answer where there is one.
+            if hook::waiting(self.owner.pid()).is_some() {
+                return hook::answer(self.owner.pid(), &paths);
+            }
+            if let Some(d) = self.dialog() {
+                return d.answer(&self.uia, &paths);
+            }
+            if Instant::now() > deadline {
+                bail!(
+                    "the app is not asking for a file: do what opens a dialog first (an upload \
+                     button, File → Open), or use clicks and keys"
+                );
+            }
+            sleep(Duration::from_millis(100));
+        }
+    }
+
     fn point(w: &WindowInfo, x: f64, y: f64) -> POINT {
         POINT {
             x: (w.frame.x + x).round() as i32,
@@ -243,6 +312,16 @@ impl Session for WindowsSession {
                 details.insert(
                     "job".into(),
                     "the app and its children run in a kill-on-close job".into(),
+                );
+                // Which route `choose_file` will take, which is worth saying
+                // out loud when the hook was asked for and did not arrive.
+                details.insert(
+                    "dialogs".into(),
+                    if self.owner.hooked() {
+                        "held by the panel hook; nothing shows on screen".into()
+                    } else {
+                        "answered on screen through UI Automation".into()
+                    },
                 );
             }
             Owner::Attached(_) => {
@@ -295,7 +374,7 @@ impl Session for WindowsSession {
                 sleep(Duration::from_millis(*ms));
                 return Ok(());
             }
-            Action::ChooseFile { .. } => bail!("choose_file answers macOS open and save panels; drive this platform's file dialog with clicks and keys"),
+            Action::ChooseFile { paths } => return self.choose_file(paths),
             _ => {}
         }
         let w = self.window(window)?;
@@ -362,12 +441,34 @@ impl Session for WindowsSession {
         Ok(())
     }
 
+    fn notice(&mut self) -> Option<String> {
+        if let Some(r) = hook::waiting(self.owner.pid()) {
+            return Some(format!(
+                "The app is asking for {} (its {} dialog is held back, so nothing shows): answer \
+                 it with choose_file, giving the {}, or no paths to cancel.",
+                match (r.save, r.folders, r.multiple) {
+                    (true, ..) => "a place to save",
+                    (false, true, true) => "folders",
+                    (false, true, false) => "a folder",
+                    (false, false, true) => "files",
+                    (false, false, false) => "a file",
+                },
+                if r.save { "save" } else { "open" },
+                if r.save { "path to save to" } else { "paths" },
+            ));
+        }
+        self.dialog().map(|d| d.notice())
+    }
+
     fn is_alive(&mut self) -> bool {
         self.owner.alive()
     }
 
     fn close(&mut self) {
         if !std::mem::replace(&mut self.closed, true) {
+            // A dialog the hook is holding is the app's own thread, blocked
+            // on us. Dropping it here is how the app sees a cancel.
+            hook::forget(self.owner.pid());
             self.owner.kill();
         }
     }

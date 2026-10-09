@@ -149,7 +149,7 @@ pub fn answer(pid: i32, paths: &[PathBuf]) -> Result<()> {
             _ => bail!("a save panel saves to one path"),
         }
     } else {
-        crate::pages::check(paths, request.multiple)?;
+        ocu_core::pages::check(paths, request.multiple)?;
     }
     let Some(mut p) = pending().lock().unwrap().remove(&pid) else {
         bail!("the app stopped asking for a file");

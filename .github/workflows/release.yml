@@ -108,6 +108,66 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: The tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            Write-Error "Tag $env:GITHUB_REF_NAME does not match Cargo.toml's version $version."
+            exit 1
+          }
+      - name: Build the panel hook
+        shell: pwsh
+        # The hook is loaded into the apps a session starts, so it must call
+        # nothing but Windows: a C runtime of its own inside someone else's
+        # process is a dependency we do not need to take. /MD is the usual
+        # choice, so check what the imports actually are.
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\panelhook | Out-Null
+          cl /nologo /W4 /WX /O2 /LD /std:c11 /DUNICODE /D_UNICODE `
+            /D_WIN32_WINNT=0x0601 /MD `
+            /Fe:dist\panelhook\OcuPanelHook.dll `
+            packaging\windows\panelhook\hook.c `
+            /link ole32.lib shell32.lib shlwapi.lib uuid.lib comdlg32.lib
+          $imports = (dumpbin /nologo /dependents dist\panelhook\OcuPanelHook.dll) |
+            Select-String -Pattern '\S+\.dll' | ForEach-Object {
+              ($_.Matches[0].Value -split '\.dll')[0] + '.dll'
+            }
+          $allowed = @('api-ms-win-crt-', 'kernel32.dll', 'ole32.dll', 'shell32.dll',
+            'shlwapi.dll', 'uuid.dll', 'comdlg32.dll')
+          $stray = $imports | Where-Object {
+            $i = $_
+            -not ($allowed | Where-Object { $i -like "$_*" })
+          }
+          if ($stray) {
+            Write-Error ("the hook wants $($stray -join ', '), which are not Windows")
+            exit 1
+          }
+          Write-Host "hook imports: $($imports -join ', ')"
+      - name: Sign the panel hook
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PFX_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_PFX_BASE64) {
+            Write-Host "No WINDOWS_CERT_PFX_BASE64 secret; the hook is unsigned."
+            Write-Host "An unsigned injected library is quarantined by most endpoint"
+            Write-Host "protection, so expect the setting to have no effect in the field."
+            exit 0
+          }
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\release.pfx",
+            [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          # A DLL loaded into other processes needs a timestamp, or it stops
+          # validating the moment the certificate expires.
+          signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            /f "$env:RUNNER_TEMP\release.pfx" /p $env:WINDOWS_CERT_PFX_PASSWORD `
+            dist\panelhook\OcuPanelHook.dll
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item "$env:RUNNER_TEMP\release.pfx" -Force
       - name: Build
         shell: pwsh
         run: |

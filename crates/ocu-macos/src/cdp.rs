@@ -25,7 +25,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde_json::{json, Value};
 
-use crate::pages::PageFiles;
+use ocu_core::pages::PageFiles;
 
 /// What a page calls (through [`PICKERS`]) before and after a File System
 /// Access picker.
@@ -235,7 +235,7 @@ impl PageFiles for Cdp {
             .unwrap()
             .clone()
             .ok_or_else(|| anyhow!("no page is asking for a file"))?;
-        crate::pages::check(paths, chooser.multiple)?;
+        ocu_core::pages::check(paths, chooser.multiple)?;
         let files: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into()).collect();
         self.call(
             "DOM.setFileInputFiles",

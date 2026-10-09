@@ -24,13 +24,12 @@ use ocu_core::{
 };
 
 use crate::ax::{self, Element, ElementTable};
-use crate::bidi;
 use crate::capture;
 use crate::cdp::{self, Cdp};
 use crate::hook;
 use crate::input::{self, Target};
-use crate::pages::PageFiles;
 use crate::panel;
+use ocu_core::pages::PageFiles;
 
 enum Resolved {
     Bundle(PathBuf),
@@ -281,9 +280,9 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
             // hands us its pages' file choosers; it is connected to once it
             // has started.
             if gecko && (already.is_empty() || spec.new_instance) {
-                if let Some(profile) = bidi::profile_dir(&spec.args) {
-                    bidi::clear(&profile);
-                    spec.args.push(bidi::ARG.to_string());
+                if let Some(profile) = ocu_core::bidi::profile_dir(&spec.args) {
+                    ocu_core::bidi::clear(&profile);
+                    spec.args.push(ocu_core::bidi::ARG.to_string());
                     bidi_profile = Some(profile);
                 }
             }
@@ -374,7 +373,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
     }
     sleep(Duration::from_millis(300));
     if let Some(profile) = bidi_profile {
-        match bidi::connect(&profile, Duration::from_secs(10)) {
+        match ocu_core::bidi::connect(&profile, Duration::from_secs(10)) {
             Ok(b) => session.pages = Some(Box::new(b)),
             Err(e) => log::warn!("Firefox's WebDriver BiDi: {e:#}"),
         }
@@ -685,7 +684,7 @@ impl MacSession {
     fn choose_file(&mut self, window: Option<u64>, paths: &[String]) -> Result<()> {
         let paths: Vec<PathBuf> = paths
             .iter()
-            .map(|p| panel::absolute(p))
+            .map(|p| ocu_core::paths::absolute(p))
             .collect::<Result<_>>()?;
         // What asked may still be on its way: a click's chooser or panel
         // comes a moment after the click.

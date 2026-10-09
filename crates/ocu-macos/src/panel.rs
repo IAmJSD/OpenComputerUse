@@ -174,24 +174,6 @@ fn name_field(panel: &Element) -> Option<Element> {
     })
 }
 
-/// Expands `~` and insists on an absolute path.
-pub(crate) fn absolute(path: &str) -> Result<PathBuf> {
-    let p = match path
-        .strip_prefix("~/")
-        .or(path.strip_prefix('~').filter(|r| r.is_empty()))
-    {
-        Some(rest) => {
-            let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
-            Path::new(&home).join(rest)
-        }
-        None => PathBuf::from(path),
-    };
-    if !p.is_absolute() {
-        bail!("{path:?} is not an absolute path (start it with / or ~)");
-    }
-    Ok(p)
-}
-
 /// Polls `f` until it gives something or `limit` passes.
 pub(crate) fn wait_for<T>(limit: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + limit;

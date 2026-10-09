@@ -18,6 +18,7 @@ use std::os::fd::FromRawFd as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -38,11 +39,22 @@ use ocu_core::{
 
 pub struct LinuxPlatform {
     xvfb: Option<PathBuf>,
+    /// Whether sessions get a private bus with a file chooser portal.
+    portal: bool,
 }
 
 impl LinuxPlatform {
     pub fn new() -> Self {
-        Self { xvfb: find_xvfb() }
+        Self::with_portal(false)
+    }
+
+    /// A platform whose sessions answer file choosers through a portal when
+    /// `portal` is set. The agent passes the user's setting.
+    pub fn with_portal(portal: bool) -> Self {
+        Self {
+            xvfb: find_xvfb(),
+            portal,
+        }
     }
 }
 
@@ -73,12 +85,24 @@ impl Platform for LinuxPlatform {
     }
 
     fn permissions(&self) -> Vec<ocu_core::Permission> {
-        vec![ocu_core::Permission {
-            name: "Xvfb".into(),
-            granted: self.xvfb.is_some(),
-            help: "Sessions run on a private virtual X display. Install Xvfb (Debian/Ubuntu: apt install xvfb; Fedora: dnf install xorg-x11-server-Xvfb) or set OCU_XVFB.".into(),
-            optional: false,
-        }]
+        vec![
+            ocu_core::Permission {
+                name: "Xvfb".into(),
+                granted: self.xvfb.is_some(),
+                help: "Sessions run on a private virtual X display. Install Xvfb (Debian/Ubuntu: apt install xvfb; Fedora: dnf install xorg-x11-server-Xvfb) or set OCU_XVFB.".into(),
+                optional: false,
+            },
+            ocu_core::Permission {
+                name: "File chooser portal".into(),
+                granted: self.portal,
+                help: "Answers apps' open and save dialogs without showing them. Each app runs on \
+                       a private session bus whose file chooser is the agent; everything else is \
+                       forwarded to the user's own bus, so the keyring and notifications still work. \
+                       Turn on with linux_file_portal in the config or OCU_LINUX_FILE_PORTAL=1."
+                    .into(),
+                optional: true,
+            },
+        ]
     }
 
     fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>> {
@@ -90,7 +114,7 @@ impl Platform for LinuxPlatform {
                 "Xvfb is not installed; install it (apt install xvfb) or set OCU_XVFB to its path"
             )
         })?;
-        Ok(Box::new(LinuxSession::start(xvfb, spec)?))
+        Ok(Box::new(LinuxSession::start(xvfb, spec, self.portal)?))
     }
 }
 
@@ -255,13 +279,17 @@ pub struct LinuxSession {
     conn: RustConnection,
     root: Window,
     keymap: keys::Keymap,
+    /// The session's private bus and the file chooser portal on it. Dropping
+    /// the bus ends its dbus-daemon.
+    bus: Option<Arc<ocu_core::portal::Bus>>,
+    portal: Option<Arc<ocu_core::portal::Portal>>,
     // Dropped last: the display outlives the connection and the app.
     display: Display,
     closed: bool,
 }
 
 impl LinuxSession {
-    fn start(xvfb: &Path, spec: &LaunchSpec) -> Result<Self> {
+    fn start(xvfb: &Path, spec: &LaunchSpec, portal: bool) -> Result<Self> {
         let size = spec.display_size.unwrap_or(Size {
             width: 1440,
             height: 900,
@@ -269,6 +297,25 @@ impl LinuxSession {
         let (display, cookie) = Display::start(xvfb, size)?;
         let (conn, root) = connect(&display, &cookie)?;
         let keymap = keys::Keymap::read(&conn)?;
+
+        // Started before the app so it finds the portal. Off, or without
+        // dbus-daemon, the app keeps the user's bus and draws its own dialogs.
+        let bus = portal
+            .then(|| {
+                ocu_core::portal::Bus::start()
+                    .inspect_err(|e| log::warn!("no private session bus: {e}"))
+                    .ok()
+            })
+            .flatten();
+        // The app's own bus is the user's real one, captured before it is
+        // replaced below. The portal forwards to it for everything but file
+        // choosers, so the app keeps the keyring, notifications and the rest.
+        let upstream = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
+        let portal = bus.as_ref().and_then(|bus| {
+            ocu_core::portal::Portal::start(bus.address(), upstream.clone())
+                .inspect_err(|e| log::warn!("the file chooser portal is not answering: {e}"))
+                .ok()
+        });
 
         let mut cmd = Command::new(&spec.app);
         cmd.args(&spec.args)
@@ -279,8 +326,15 @@ impl LinuxSession {
             .env("GDK_BACKEND", "x11")
             .env("QT_QPA_PLATFORM", "xcb")
             .env("SDL_VIDEODRIVER", "x11")
-            .env("ELECTRON_OZONE_PLATFORM_HINT", "x11")
-            .envs(&spec.env)
+            .env("ELECTRON_OZONE_PLATFORM_HINT", "x11");
+        if let (Some(bus), Some(_)) = (&bus, &portal) {
+            // Steers GTK (Firefox included) and Qt to ask the portal rather
+            // than draw a dialog.
+            cmd.env("DBUS_SESSION_BUS_ADDRESS", bus.address())
+                .env("GTK_USE_PORTAL", "1")
+                .env("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
+        }
+        cmd.envs(&spec.env)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -302,6 +356,8 @@ impl LinuxSession {
             conn,
             root,
             keymap,
+            bus,
+            portal,
             display,
             closed: false,
         };
@@ -315,6 +371,32 @@ impl LinuxSession {
         }
         sleep(Duration::from_millis(300));
         Ok(session)
+    }
+
+    /// Answers the file chooser the app is waiting on with `paths`; none
+    /// cancels it.
+    fn choose_file(&mut self, paths: &[String]) -> Result<()> {
+        let paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| ocu_core::paths::absolute(p))
+            .collect::<Result<_>>()?;
+        let Some(portal) = &self.portal else {
+            bail!("this session has no file chooser portal (it is off, or dbus-daemon is missing); drive the app's own dialog with clicks and keys")
+        };
+        // A menu item's chooser comes a moment after the click.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(waiting) = portal.waiting() {
+                return portal.answer(&waiting.token, &paths);
+            }
+            if Instant::now() > deadline {
+                bail!(
+                    "the app is not asking for a file: do what asks for one first (an upload \
+                     button, File → Open), or use clicks and keys"
+                );
+            }
+            sleep(Duration::from_millis(100));
+        }
     }
 
     fn title(&self, w: Window) -> String {
@@ -476,6 +558,17 @@ impl Session for LinuxSession {
             "xauthority".into(),
             self.display.auth_file().display().to_string(),
         );
+        details.insert(
+            "files".into(),
+            match (&self.bus, &self.portal) {
+                (Some(bus), Some(_)) => format!(
+                    "answered through a portal on a private bus at {} (other services forwarded \
+                     to the user's bus); nothing is shown",
+                    bus.address()
+                ),
+                _ => "the app draws its own dialogs".into(),
+            },
+        );
         Description {
             app: self.name.clone(),
             pid: Some(self.app.id()),
@@ -524,7 +617,7 @@ impl Session for LinuxSession {
             Action::ElementAction { .. } | Action::SetValue { .. } | Action::Focus { .. } => {
                 bail!("element actions need the accessibility tree, which the Linux backend does not read yet; use coordinates")
             }
-            Action::ChooseFile { .. } => bail!("choose_file answers macOS open and save panels; drive this platform's file dialog with clicks and keys"),
+            Action::ChooseFile { paths } => return self.choose_file(paths),
             _ => {}
         }
         let w = self.window(window)?;
@@ -633,6 +726,27 @@ impl Session for LinuxSession {
         Ok(())
     }
 
+    fn notice(&mut self) -> Option<String> {
+        let waiting = self.portal.as_ref()?.waiting()?;
+        Some(format!(
+            "The app is asking for {} through the file chooser portal (nothing is shown): answer \
+             it with choose_file, giving the {}, or no paths to cancel.",
+            match (waiting.save, waiting.folders, waiting.multiple) {
+                (true, true, _) => "a folder to save into",
+                (true, false, _) => "a place to save",
+                (false, true, true) => "folders",
+                (false, true, false) => "a folder",
+                (false, false, true) => "files",
+                (false, false, false) => "a file",
+            },
+            match (waiting.save, waiting.folders) {
+                (true, true) => "folder",
+                (true, false) => "path to save to",
+                _ => "paths",
+            },
+        ))
+    }
+
     fn is_alive(&mut self) -> bool {
         matches!(self.app.try_wait(), Ok(None))
     }
@@ -649,7 +763,7 @@ impl Session for LinuxSession {
         }
         unsafe { libc::kill(-pgid, libc::SIGKILL) };
         let _ = self.app.wait();
-        // The display goes when the session is dropped.
+        // The display and the bus go when the session is dropped.
     }
 }
 

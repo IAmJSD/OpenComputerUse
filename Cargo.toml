@@ -16,6 +16,9 @@ base64 = "0.22"
 png = "0.17"
 libc = "0.2"
 log = "0.4"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 ocu-core = { path = "crates/ocu-core" }
 
 [package]

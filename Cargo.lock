@@ -4207,10 +4207,14 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "futures-util",
  "log",
  "png 0.17.16",
  "serde",
  "serde_json",
+ "tokio",
+ "tungstenite",
+ "zbus",
 ]
 
 [[package]]
@@ -4241,7 +4245,6 @@ dependencies = [
  "objc2-screen-capture-kit",
  "ocu-core",
  "serde_json",
- "tungstenite",
 ]
 
 [[package]]
@@ -4267,6 +4270,7 @@ dependencies = [
  "anyhow",
  "log",
  "ocu-core",
+ "serde_json",
  "windows 0.61.3",
 ]
 
@@ -6297,8 +6301,22 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
+ "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -7894,6 +7912,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

@@ -43,18 +43,18 @@ fn quote(arg: &str, out: &mut String) {
         match c {
             '\\' => backslashes += 1,
             '"' => {
-                out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
                 out.push('"');
                 backslashes = 0;
             }
             c => {
-                out.extend(std::iter::repeat('\\').take(backslashes));
+                out.extend(std::iter::repeat_n('\\', backslashes));
                 out.push(c);
                 backslashes = 0;
             }
         }
     }
-    out.extend(std::iter::repeat('\\').take(backslashes * 2));
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
     out.push('"');
 }
 
@@ -90,6 +90,8 @@ pub struct Job {
     pub handle: HANDLE,
     pub pid: u32,
     process: HANDLE,
+    /// Whether the panel hook was queued into the app before it started.
+    pub hooked: bool,
 }
 
 unsafe impl Send for Job {}
@@ -116,10 +118,20 @@ impl Job {
             }
             let mut cmdline = wide(OsStr::new(&cmdline));
 
-            let env_block: Option<Vec<u16>> = (!spec.env.is_empty()).then(|| {
+            // Settled before the environment block is built, because the
+            // hook's pipe name has to reach the app through it.
+            let hook = Self::plan_hook(spec);
+
+            let mut env = spec.env.clone();
+            if let Some((_, pipe)) = &hook {
+                // The hook clears this again as it loads, so nothing the app
+                // starts inherits it.
+                env.insert(crate::hook::PIPE_VAR.into(), (*pipe).to_string());
+            }
+            let env_block: Option<Vec<u16>> = (!env.is_empty()).then(|| {
                 let mut vars: std::collections::BTreeMap<String, String> =
                     std::env::vars().collect();
-                vars.extend(spec.env.clone());
+                vars.extend(env);
                 let mut block = Vec::new();
                 for (k, v) in vars {
                     block.extend(OsStr::new(&format!("{k}={v}")).encode_wide());
@@ -163,14 +175,50 @@ impl Job {
             // In the job before it runs a single instruction, so nothing it
             // starts can slip out.
             AssignProcessToJobObject(job, pi.hProcess)?;
+            // And the hook in before it runs any at all.
+            let hooked = match hook {
+                // An app without the hook is one whose dialogs the UI
+                // Automation path answers instead, so a failure here is never
+                // a reason not to start it.
+                Some((dll, _)) => crate::inject::queue_load(&dll, pi.hProcess, pi.hThread)
+                    .inspect_err(|e| log::warn!("no panel hook in {exe}: {e}"))
+                    .is_ok(),
+                None => false,
+            };
             ResumeThread(pi.hThread);
             let _ = CloseHandle(pi.hThread);
             Ok(Self {
                 handle: job,
                 pid: pi.dwProcessId,
                 process: pi.hProcess,
+                hooked,
             })
         }
+    }
+
+    /// The hook to load into a new app, and the pipe it will answer on, if
+    /// the setting is on and the hook is there to load.
+    ///
+    /// Anything missing is a `None` and a warning rather than a failure:
+    /// dialogs are answered over UI Automation whether or not the hook
+    /// arrives, so the app starts either way.
+    fn plan_hook(spec: &LaunchSpec) -> Option<(std::path::PathBuf, &'static str)> {
+        // An app that was already running cannot be given a hook, and one
+        // being watched through `active_window` never can.
+        if !spec.active_window && crate::hook::wanted() {
+            match (crate::hook::dll(), crate::hook::pipe()) {
+                (Some(dll), Some(pipe)) if crate::hook::reachable(pipe) => {
+                    return Some((dll, pipe))
+                }
+                (None, _) => log::warn!(
+                    "the panel hook is on but {} was not found beside this executable",
+                    crate::hook::DLL
+                ),
+                (_, None) => log::warn!("the panel hook could not open its pipe"),
+                _ => log::warn!("nothing is listening on the panel hook's pipe"),
+            }
+        }
+        None
     }
 
     /// Every process in the job: the app and whatever it started.
@@ -202,7 +250,7 @@ impl Job {
     pub fn alive(&self) -> bool {
         let mut code = 0u32;
         unsafe { GetExitCodeProcess(self.process, &mut code) }.is_ok() && code == 259 // STILL_ACTIVE
-            || self.pids().len() > 0
+            || !self.pids().is_empty()
     }
 
     pub fn kill(&mut self) {
