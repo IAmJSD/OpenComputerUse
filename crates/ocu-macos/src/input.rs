@@ -39,12 +39,23 @@ fn post(target: &Target, event: &CGEvent) {
     sky::post(target.pid, event);
 }
 
-/// One gesture id shared by every event of a click, so double clicks
-/// coalesce.
+/// The value for field 58, shared by every event of a click.
+///
+/// Field 58 is the event's timestamp in nanoseconds since boot (a real
+/// click carries `CLOCK_UPTIME_RAW` there). A background window takes a
+/// click only when that time is long past, as if it were the click that
+/// activated the window; a current one is dropped. Chromium converts the
+/// timestamp to whole microseconds and replaces a zero with the time it
+/// receives the event, so a value under 1000 ns gets the click in and
+/// hands the page a sane time. Anything from 1000 ns up reaches the page as
+/// a click from before it loaded, and Chromium's renderer crashes ("Aw,
+/// Snap!", error code 5) on the first same-document navigation that click
+/// starts: an SPA route change, a pushState or a hash link. Zero itself is
+/// not taken at all.
 fn gesture_id() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as i64)
+        .map(|d| d.subsec_nanos() as i64 % 999 + 1)
         .unwrap_or(1)
 }
 
