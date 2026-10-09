@@ -169,9 +169,9 @@ Click in a session's window without moving your real pointer or focus. Give x/y,
   - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
   - `x` (number): Where to click x, in window coordinates.
   - `y` (number): Where to click y, in window coordinates.
-  - `element` (string): An element id from the accessibility tree (e.g. "e12") to click instead of x/y. Uses the element's own press action, the most reliable way to click in a background window.
+  - `element` (string): An element id from the accessibility tree (e.g. "e12") to click instead of x/y. A single left or right click uses the element's own action, the most reliable way to click in a background window; other clicks land at its centre.
   - `button` (string): Default left. One of `left`, `right`, `middle`.
-  - `count` (integer): 2 for a double click. Default 1.
+  - `count` (integer): 2 for a double click (selects a word, opens an item), 3 for a triple click (selects a line or paragraph). Default 1.
   - `modifiers` (string): Keys held while clicking, e.g. "cmd" or "shift+alt".
   - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
   - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
@@ -189,7 +189,7 @@ Move the session's pointer, for hover effects. Coordinates are points from the w
 
 ### `drag`
 
-Press, drag and release. Coordinates are points from the window's top-left: the pixel grid of its screenshot.
+Press, drag and release: to select text, move or resize something, or drag an item onto another. Coordinates are points from the window's top-left: the pixel grid of its screenshot.
 
   - `session_id` (string, required): The id start_session returned.
   - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
@@ -198,6 +198,7 @@ Press, drag and release. Coordinates are points from the window's top-left: the 
   - `to_x` (number, required)
   - `to_y` (number, required)
   - `button` (string) One of `left`, `right`, `middle`.
+  - `modifiers` (string): Keys held throughout, e.g. "alt" to copy instead of move, or "shift" to extend a selection.
   - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
   - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
 

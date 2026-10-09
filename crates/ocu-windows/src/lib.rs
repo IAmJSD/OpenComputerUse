@@ -376,6 +376,16 @@ impl Session for WindowsSession {
         self.uia.tree(w.id, (w.frame.x, w.frame.y), opts)
     }
 
+    fn element_point(
+        &mut self,
+        window: Option<u64>,
+        element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        let w = self.window(window)?;
+        let (x, y) = self.uia.center(element, (w.frame.x, w.frame.y))?;
+        Ok((Some(w.id), x, y))
+    }
+
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
         match action {
             Action::Wait { ms } => {
@@ -428,12 +438,20 @@ impl Session for WindowsSession {
                 to_x,
                 to_y,
                 button,
-            } => input::drag(
-                top,
-                Self::point(&w, *from_x, *from_y),
-                Self::point(&w, *to_x, *to_y),
-                *button,
-            ),
+                modifiers,
+            } => {
+                let m = match modifiers.as_deref().filter(|s| !s.is_empty()) {
+                    Some(s) => parse_chord(s)?.modifiers,
+                    None => Default::default(),
+                };
+                input::drag(
+                    top,
+                    Self::point(&w, *from_x, *from_y),
+                    Self::point(&w, *to_x, *to_y),
+                    *button,
+                    m,
+                )
+            }
             Action::Scroll { x, y, dx, dy } => {
                 input::scroll(top, Self::point(&w, *x, *y), *dx, *dy)
             }
@@ -444,7 +462,9 @@ impl Session for WindowsSession {
                     sleep(Duration::from_millis(30));
                 }
             }
-            Action::Wait { .. } | Action::ChooseFile { .. } => unreachable!(),
+            Action::ClickElement { .. } | Action::Wait { .. } | Action::ChooseFile { .. } => {
+                unreachable!()
+            }
         }
         Ok(())
     }

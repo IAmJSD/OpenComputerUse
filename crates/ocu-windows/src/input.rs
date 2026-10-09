@@ -97,26 +97,28 @@ pub fn click(top: HWND, p: POINT, button: MouseButton, count: u32, m: Modifiers)
     });
 }
 
-pub fn drag(top: HWND, from: POINT, to: POINT, button: MouseButton) {
+pub fn drag(top: HWND, from: POINT, to: POINT, button: MouseButton, m: Modifiers) {
     let (h, a) = target(top, from);
     let (down, up, flag) = match button {
         MouseButton::Left => (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON),
         MouseButton::Right => (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON),
         MouseButton::Middle => (WM_MBUTTONDOWN, WM_MBUTTONUP, MK_MBUTTON),
     };
-    post(h, down, flag, lparam_xy(a.x, a.y));
-    // The press captures the mouse to `h`; keep sending there.
-    let d = (to.x - from.x, to.y - from.y);
-    for i in 1..=12 {
-        sleep(Duration::from_millis(12));
-        post(
-            h,
-            WM_MOUSEMOVE,
-            flag,
-            lparam_xy(a.x + d.0 * i / 12, a.y + d.1 * i / 12),
-        );
-    }
-    post(h, up, 0, lparam_xy(a.x + d.0, a.y + d.1));
+    with_modifiers(top, m, || {
+        post(h, down, flag | mk(m), lparam_xy(a.x, a.y));
+        // The press captures the mouse to `h`; keep sending there.
+        let d = (to.x - from.x, to.y - from.y);
+        for i in 1..=12 {
+            sleep(Duration::from_millis(12));
+            post(
+                h,
+                WM_MOUSEMOVE,
+                flag | mk(m),
+                lparam_xy(a.x + d.0 * i / 12, a.y + d.1 * i / 12),
+            );
+        }
+        post(h, up, mk(m), lparam_xy(a.x + d.0, a.y + d.1));
+    });
 }
 
 pub fn scroll(top: HWND, p: POINT, dx: f64, dy: f64) {

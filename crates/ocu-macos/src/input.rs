@@ -242,7 +242,7 @@ pub fn click_chromium(
     sleep(Duration::from_millis(1));
     step(CGEventType::LeftMouseUp, off, 1, 2)?;
     sleep(Duration::from_millis(100));
-    let pairs = count.clamp(1, 2);
+    let pairs = count.clamp(1, 3);
     for n in 1..=pairs {
         step(CGEventType::LeftMouseDown, at, n as i64, 3)?;
         sleep(Duration::from_millis(1));
@@ -254,11 +254,18 @@ pub fn click_chromium(
     Ok(())
 }
 
-pub fn drag(target: &Target, from: CGPoint, to: CGPoint, button: MouseButton) -> Result<()> {
+pub fn drag(
+    target: &Target,
+    from: CGPoint,
+    to: CGPoint,
+    button: MouseButton,
+    modifiers: Modifiers,
+) -> Result<()> {
     let (down, up, dragged, b) = button_types(button);
     move_to(target, from)?;
     let e = mouse_event(target, down, from, b)?;
     CGEvent::set_integer_value_field(Some(&e), CGEventField::MouseEventClickState, 1);
+    CGEvent::set_flags(Some(&e), flags(modifiers));
     post(target, &e);
     // Intermediate points so apps that track drag distance see a drag.
     const STEPS: u32 = 12;
@@ -269,11 +276,14 @@ pub fn drag(target: &Target, from: CGPoint, to: CGPoint, button: MouseButton) ->
             y: from.y + (to.y - from.y) * t,
         };
         sleep(Duration::from_millis(12));
-        post(target, &*mouse_event(target, dragged, p, b)?);
+        let e = mouse_event(target, dragged, p, b)?;
+        CGEvent::set_flags(Some(&e), flags(modifiers));
+        post(target, &e);
     }
     sleep(Duration::from_millis(30));
     let e = mouse_event(target, up, to, b)?;
     CGEvent::set_integer_value_field(Some(&e), CGEventField::MouseEventClickState, 1);
+    CGEvent::set_flags(Some(&e), flags(modifiers));
     post(target, &e);
     Ok(())
 }
