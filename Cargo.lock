@@ -4237,6 +4237,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocu-mobile"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "log",
+ "ocu-core",
+ "png 0.17.16",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "ureq",
+]
+
+[[package]]
 name = "ocu-windows"
 version = "0.4.0"
 dependencies = [
@@ -4322,6 +4338,7 @@ dependencies = [
  "ocu-core",
  "ocu-linux",
  "ocu-macos",
+ "ocu-mobile",
  "ocu-windows",
  "png 0.17.16",
  "raw-window-handle",

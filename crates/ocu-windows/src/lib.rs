@@ -266,6 +266,7 @@ impl Session for WindowsSession {
             app: self.name.clone(),
             pid: Some(self.owner.pid()),
             details,
+            ..Default::default()
         }
     }
 

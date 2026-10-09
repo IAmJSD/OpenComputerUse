@@ -479,6 +479,7 @@ impl Session for LinuxSession {
             app: self.name.clone(),
             pid: Some(self.app.id()),
             details,
+            ..Default::default()
         }
     }
 

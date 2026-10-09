@@ -48,6 +48,8 @@ pub enum Request {
     },
     /// Unlock the Mac if it is locked, so sessions can be driven.
     Unlock,
+    /// Simulators, emulators and phones, and the apps on them.
+    Devices(DeviceQuery),
 }
 
 /// What to look at after an action.
@@ -108,6 +110,8 @@ pub enum Response {
     },
     /// Whether the screen ended up unlocked.
     Unlocked(bool),
+    /// The answer to a [`Request::Devices`].
+    Devices(serde_json::Value),
 }
 
 /// Anything that answers requests: the in-process service, or the socket
@@ -120,10 +124,16 @@ struct Entry {
     info: SessionInfo,
     owner: u64,
     session: SharedSession,
+    /// On this computer's screen, where the observer can draw over it; not
+    /// for a phone or simulator.
+    desktop: bool,
 }
 
 pub struct Service {
     platform: Arc<dyn Platform>,
+    /// Phones, tablets, simulators and emulators: what starts a session
+    /// whose [`LaunchSpec`] names a device.
+    devices: Option<Arc<dyn Platform>>,
     /// The last picture of each (session, window), to notice an action that
     /// changed nothing on screen.
     last_shots: Mutex<HashMap<(String, u64), Vec<u8>>>,
@@ -136,8 +146,18 @@ pub struct Service {
 
 impl Service {
     pub fn new(platform: Arc<dyn Platform>, observer: Option<Arc<dyn Observer>>) -> Arc<Self> {
+        Self::with_devices(platform, None, observer)
+    }
+
+    /// A service that can also start sessions on mobile devices.
+    pub fn with_devices(
+        platform: Arc<dyn Platform>,
+        devices: Option<Arc<dyn Platform>>,
+        observer: Option<Arc<dyn Observer>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             platform,
+            devices,
             last_shots: Mutex::new(HashMap::new()),
             observer,
             sessions: Mutex::new(BTreeMap::new()),
@@ -208,7 +228,7 @@ impl Service {
         format!("s{n}-{a:016x}{b:08x}").chars().take(28).collect()
     }
 
-    fn session(&self, client: &Client, id: &str) -> Result<(SharedSession, SessionInfo)> {
+    fn session(&self, client: &Client, id: &str) -> Result<(SharedSession, bool)> {
         let sessions = self.sessions.lock().unwrap();
         let entry = sessions.get(id).ok_or_else(|| {
             anyhow!("no session {id}; it may have ended (list_sessions shows the live ones)")
@@ -216,19 +236,29 @@ impl Service {
         if entry.owner != client.id {
             bail!("session {id} belongs to another client");
         }
-        Ok((entry.session.clone(), entry.info.clone()))
+        Ok((entry.session.clone(), entry.desktop))
     }
 
     fn handle(&self, client: &Client, req: Request) -> Result<Response> {
         match req {
             Request::Permissions => Ok(Response::Permissions(self.platform.permissions())),
             Request::Unlock => Ok(Response::Unlocked(self.platform.unlock()?)),
+            Request::Devices(query) => match &self.devices {
+                Some(d) => Ok(Response::Devices(d.query_devices(&query)?)),
+                None => bail!("this server cannot drive mobile devices"),
+            },
             Request::StartSession(spec) => {
-                let mut session = self.platform.launch(&spec)?;
+                let platform = match (&spec.device, &self.devices) {
+                    (None, _) => &self.platform,
+                    (Some(_), Some(devices)) => devices,
+                    (Some(_), None) => bail!("this server cannot drive mobile devices"),
+                };
+                let desktop = spec.device.is_none();
+                let mut session = platform.launch(&spec)?;
                 let d = session.describe();
                 // Driving itself, it answers its own accessibility requests
                 // off the main thread, which AppKit aborts on.
-                if d.pid == Some(std::process::id()) {
+                if desktop && d.pid == Some(std::process::id()) {
                     bail!("{} can't drive itself", d.app);
                 }
                 let windows = session.windows().unwrap_or_default();
@@ -236,7 +266,7 @@ impl Service {
                     id: self.new_id(),
                     app: d.app,
                     pid: d.pid,
-                    backend: self.platform.name().to_string(),
+                    backend: d.backend.unwrap_or_else(|| platform.name().to_string()),
                     details: d.details,
                 };
                 log::info!(
@@ -251,6 +281,7 @@ impl Service {
                         info: info.clone(),
                         owner: client.id,
                         session: Arc::new(Mutex::new(session)),
+                        desktop,
                     },
                 );
                 if let Some(o) = &self.observer {
@@ -299,7 +330,7 @@ impl Service {
                 action,
                 observe,
             } => {
-                let (s, _) = self.session(client, &session)?;
+                let (s, desktop) = self.session(client, &session)?;
                 let mut s = s.lock().unwrap();
                 let target = s
                     .windows()
@@ -323,7 +354,8 @@ impl Service {
                 if let Action::Wait { ms } = action {
                     std::thread::sleep(Duration::from_millis(ms.min(60_000)));
                 } else {
-                    if let (Some(o), Some(w)) = (&self.observer, &target) {
+                    let observer = self.observer.as_ref().filter(|_| desktop);
+                    if let (Some(o), Some(w)) = (observer, &target) {
                         match action.pointer() {
                             Some((x, y)) => {
                                 o.pointer(&session, w, x, y, matches!(action, Action::Click { .. }))

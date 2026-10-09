@@ -31,7 +31,7 @@ pub struct Issued {
 impl Issued {
     fn new(device: devices::Device, key: &str) -> Self {
         let host_entry = skill::host_entry(&device, key);
-        let skill = skill::render_generic(&crate::tools::list());
+        let skill = skill::render_generic(&crate::tools::catalog());
         Issued {
             prompt: skill::agent_prompt(&skill, &host_entry),
             device,

@@ -38,6 +38,54 @@ pub struct LaunchSpec {
     /// The virtual display's size, where the backend makes one (Linux).
     #[serde(default)]
     pub display_size: Option<Size>,
+    /// Start the app on a phone, tablet, simulator or emulator instead of
+    /// this computer. `app` is then a bundle id (iOS) or a package or
+    /// activity (Android).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceTarget>,
+}
+
+/// Which mobile device a session runs on.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DeviceTarget {
+    pub kind: DeviceKind,
+    /// A simulator's UDID or name, an AVD name or adb serial, or a phone's
+    /// id, serial or name. `None` picks the only (or the first running) one.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Show the simulator's or emulator's window when the session boots it.
+    /// By default it boots headless, so nothing appears on screen.
+    #[serde(default)]
+    pub show_window: bool,
+    /// Android: run the app on the device's own screen instead of a private
+    /// virtual display. Needed for apps that refuse secondary displays.
+    #[serde(default)]
+    pub main_display: bool,
+}
+
+/// A question about the mobile devices a server can drive.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum DeviceQuery {
+    /// The simulators, emulators or phones there are, and their state.
+    List { kind: DeviceKind },
+    /// The apps on one of them.
+    Apps {
+        kind: DeviceKind,
+        #[serde(default)]
+        id: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    #[default]
+    IosSimulator,
+    AndroidEmulator,
+    /// A physical phone or tablet: Android over adb, or an iPhone or iPad
+    /// through WebDriverAgent (macOS).
+    Phone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

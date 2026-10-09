@@ -1645,7 +1645,18 @@ impl Render for Status {
                                         div()
                                             .text_color(rgb(p.text_dim))
                                             .text_size(px(11.0))
-                                            .child(format!("{} · pid {}", s.id, s.pid.unwrap_or(0))),
+                                            .child(match s.backend.as_str() {
+                                                "macos" => format!("{} · pid {}", s.id, s.pid.unwrap_or(0)),
+                                                // A phone, simulator or emulator: say which.
+                                                backend => {
+                                                    let on = ["simulator", "device", "serial"]
+                                                        .iter()
+                                                        .find_map(|k| s.details.get(*k))
+                                                        .map(String::as_str)
+                                                        .unwrap_or(backend);
+                                                    format!("{} · on {on}", s.id)
+                                                }
+                                            }),
                                     ),
                             )
                             .child(Button::new(ElementId::Name(SharedString::from(format!("end-{}", s.id))), "End").on_click(

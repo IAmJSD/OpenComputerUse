@@ -119,8 +119,37 @@ jobs:
           name: opencomputeruse-windows-x86_64
           path: dist/*
 
+  android:
+    # The Android helper (and on-device app): the desktop fetches the APK of
+    # its own version from the release to give phone sessions a display.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Build
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          OCU_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          OCU_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -eo pipefail
+          # One signing key across releases, so the app updates in place;
+          # without the secret the build gets a throwaway key.
+          if [ -n "${ANDROID_KEYSTORE_BASE64}" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+            export OCU_ANDROID_KEYSTORE="$RUNNER_TEMP/release.jks"
+          fi
+          android/build.sh
+      - uses: actions/upload-artifact@v5
+        with:
+          name: opencomputeruse-android
+          path: dist/OpenComputerUse.apk
+
   publish:
-    needs: [macos, linux, windows]
+    needs: [macos, linux, windows, android]
     # The macOS app is what the updater needs; a failed Linux or Windows
     # build leaves its binary out of the release rather than holding it up.
     if: always() && startsWith(github.ref, 'refs/tags/v') && needs.macos.result == 'success'

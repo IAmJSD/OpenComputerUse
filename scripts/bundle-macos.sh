@@ -91,6 +91,10 @@ else
     codesign --force --options runtime --timestamp=none --sign - "$plugin_app"
 fi
 
+# The iOS simulator's WebDriverAgent runner, so simulator sessions need no
+# download. Signed on its own, like the plugin, before the app seals it.
+scripts/wda-sim-runner.sh "$app/Contents/Resources" "$identity"
+
 signed=false
 if [ -n "$identity" ]; then
     echo "signing with $identity"

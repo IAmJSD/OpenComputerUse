@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenComputerUse</string>
+    <string name="accessibility_description">Lets the devices you give a key to operate apps on this phone over the network: it reads what apps show, and taps, swipes and types for them. Nothing is sent anywhere unless you turn on Serve over HTTP in OpenComputerUse.</string>
+</resources>

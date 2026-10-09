@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A pointer over a window: the app's mark, drawn as a vector. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path android:fillColor="#FF1F6FEB" android:pathData="M8,4h32a4,4 0,0 1,4 4v32a4,4 0,0 1,-4 4h-32a4,4 0,0 1,-4 -4v-32a4,4 0,0 1,4 -4z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M10,12h28v22h-28z" />
+    <path android:fillColor="#FF1F6FEB" android:pathData="M10,12h28v4h-28z" />
+    <path android:fillColor="#FF0B1F3A" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:pathData="M22,19l0,17l4.5,-4.5l3,6.5l3,-1.4l-3,-6.4l6.3,-0.2z" />
+</vector>

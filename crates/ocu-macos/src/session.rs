@@ -591,6 +591,7 @@ impl Session for MacSession {
             app: self.name.clone(),
             pid: Some(self.pid as u32),
             details,
+            ..Default::default()
         }
     }
 
