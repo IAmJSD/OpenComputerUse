@@ -426,7 +426,6 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
     const HOSTS: &str = "# my computers\nhosts:\n  work-mac:   # the office one\n    url: \"http://work-mac.ts.net:8642\"\n    key: ocu_AAA111\n  \"studio\":\n    url: 'https://studio.example.com'\n    key: 'ocu_BBB-222'  # rotated\n  work-mac:\n    url: http://work-mac.ts.net:9000\n    key: ocu_CCC333\nother: 1\n";
 
     #[cfg(unix)]
@@ -491,10 +490,13 @@ mod tests {
         assert!(merged.contains("ocu_BBB-222") && merged.contains("other: 1"));
         assert!(merged.contains("# my computers"));
         // And the shell helper reads the result.
-        let (code, out, _) = sh("merged", &merged, "_ocu_entry work-mac");
-        assert_eq!((code, out.as_str()), (0, "http://n:1\tocu_NEW\n"));
-        let (_, out, _) = sh("merged2", &merged, "_ocu_entry studio");
-        assert_eq!(out, "https://studio.example.com\tocu_BBB-222\n");
+        #[cfg(unix)]
+        {
+            let (code, out, _) = sh("merged", &merged, "_ocu_entry work-mac");
+            assert_eq!((code, out.as_str()), (0, "http://n:1\tocu_NEW\n"));
+            let (_, out, _) = sh("merged2", &merged, "_ocu_entry studio");
+            assert_eq!(out, "https://studio.example.com\tocu_BBB-222\n");
+        }
     }
 
     #[test]
@@ -509,8 +511,11 @@ mod tests {
         let four = "hosts:\n    a:\n        url: http://a\n        key: ka\n";
         let merged = merge_host_entry(four, e).unwrap();
         assert!(merged.ends_with("    m:\n      url: \"http://x\"\n      key: \"k\"\n"));
-        let (code, out, _) = sh("four", &merged, "_ocu_entry m");
-        assert_eq!((code, out.as_str()), (0, "http://x\tk\n"));
+        #[cfg(unix)]
+        {
+            let (code, out, _) = sh("four", &merged, "_ocu_entry m");
+            assert_eq!((code, out.as_str()), (0, "http://x\tk\n"));
+        }
     }
 
     #[test]
@@ -520,8 +525,11 @@ mod tests {
         let merged = merge_host_entry(file, e).unwrap();
         assert!(merged.contains("  # about b\n  b:"));
         assert!(merged.contains("key: \"k\"\n\n# settings\nother: 1\n"));
-        let (_, out, _) = sh("kept", &merged, "_ocu_entry b");
-        assert_eq!(out, "http://b\tKB\n");
+        #[cfg(unix)]
+        {
+            let (_, out, _) = sh("kept", &merged, "_ocu_entry b");
+            assert_eq!(out, "http://b\tKB\n");
+        }
         assert!(merge_host_entry("hosts: {}\n", e).is_err());
         // A tab-indented file keeps its tabs.
         let tabbed = merge_host_entry("hosts:\n\ta:\n\t\turl: http://a\n\t\tkey: ka\n", e).unwrap();
