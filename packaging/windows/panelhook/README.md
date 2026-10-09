@@ -70,9 +70,10 @@ Locally with mingw: `packaging/windows/panelhook/build.sh`, then point
 The agent unpacks it to `%LOCALAPPDATA%\opencomputeruse\panelhook\<version>`.
 Both builds fail if the hook imports anything but Windows system DLLs.
 
-## Untested
+## Testing
 
-The C has been compiled but never run. Before shipping, test on Windows:
-modern and legacy dialogs (pick, cancel, multiple), the agent killed
-mid-dialog, the agent not running, a session ending mid-dialog, and
-machines with Defender and HVCI.
+`tests/file_dialogs.rs` drives a real app's open, save and cancel through
+the hook on a Windows runner (`.github/workflows/e2e.yml`), modern dialog
+and legacy. Still untried, and worth checking before relying on it: the
+agent killed mid-dialog, the agent not running, a session ending
+mid-dialog, and machines with Defender and HVCI.

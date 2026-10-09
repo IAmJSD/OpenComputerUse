@@ -19,11 +19,6 @@ jobs:
         hook: [on, off]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    # The Windows panel hook loads into the app but does not yet answer its
-    # dialogs (hook.c, never run on a real machine). The hook is opt-in and
-    # off by default, so this one combination does not block CI; it still
-    # runs and reports, to show the day the hook works.
-    continue-on-error: ${{ matrix.os == 'windows-latest' && matrix.hook == 'on' }}
     env:
       OCU_E2E_HOOK: ${{ matrix.hook == 'on' && '1' || '0' }}
     steps:
@@ -80,8 +75,6 @@ jobs:
             $dll = "$env:RUNNER_TEMP\panelhook\OcuPanelHook.dll"
             packaging\windows\panelhook\build.ps1 -Out $dll
             "OCU_PANEL_HOOK=$dll" >> $env:GITHUB_ENV
-            # The hook logs each step it reaches here, to bring it up.
-            "OCU_PANEL_LOG=$env:RUNNER_TEMP\panelhook.log" >> $env:GITHUB_ENV
           }
 
       - name: Set up (Linux)
@@ -95,8 +88,3 @@ jobs:
 
       - name: Run
         run: cargo test --test file_dialogs
-
-      - name: The panel hook's log
-        if: always() && runner.os == 'Windows' && env.OCU_E2E_HOOK == '1'
-        shell: pwsh
-        run: Get-Content "$env:RUNNER_TEMP\panelhook.log" -ErrorAction SilentlyContinue

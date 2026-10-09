@@ -25,9 +25,9 @@
  *
  * Only apps the agent itself starts, and only for its own sessions.
  *
- * NOT RUN. This compiles, but has never been run. It needs a Windows
- * machine, an injected-app test, and a test that the app still starts when
- * every failure path here is taken.
+ * The open, save and cancel paths, modern and legacy, are exercised on a
+ * real Windows runner by tests/file_dialogs.rs. Set OCU_PANEL_LOG to a file
+ * to trace each step while bringing it up on a new machine.
  */
 
 #define COBJMACROS

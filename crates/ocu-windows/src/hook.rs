@@ -146,7 +146,6 @@ fn converse(pipe: Pipe) {
     if unsafe { GetNamedPipeClientProcessId(pipe.0, &mut pid) }.is_err() {
         return;
     }
-    log::info!("the panel hook in pid {pid} connected");
     let mut buf = Vec::new();
     while let Some(v) = read_request(&pipe, &mut buf) {
         let request = Request {
@@ -165,7 +164,6 @@ fn converse(pipe: Pipe) {
                 id,
             },
         );
-        log::info!("pid {pid} is waiting for a file (request {id})");
         let (line, done) = match rx.recv_timeout(ANSWER_WINDOW) {
             Ok(reply) => reply,
             // Forgotten: closing the pipe tells the app.
@@ -176,7 +174,6 @@ fn converse(pipe: Pipe) {
                 let mut open = pending().lock().unwrap();
                 if open.get(&pid).is_some_and(|p| p.id == id) {
                     open.remove(&pid);
-                    log::info!("pid {pid} waited {ANSWER_WINDOW:?} unanswered (request {id})");
                     continue;
                 }
                 drop(open);
