@@ -79,20 +79,14 @@ impl Dialog {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        // Focused first: a save dialog takes a change to the box as the
-        // user's own only while it has focus, and otherwise saves under the
-        // name it was given.
         let _ = unsafe { self.name.SetFocus() };
-        uia.set_element_value(&self.name, &text, "the dialog's file name box")?;
-        log::info!(
-            "the dialog's file name box now holds {:?}",
-            unsafe {
-                self.name
-                    .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-            }
-            .and_then(|p| unsafe { p.CurrentValue() })
-            .map(|v| v.to_string())
-        );
+        if self.save {
+            // A save dialog keeps the name it was given unless the box is
+            // typed into: a value set on it shows, but Save ignores it.
+            self.type_name(&text)?;
+        } else {
+            uia.set_element_value(&self.name, &text, "the dialog's file name box")?;
+        }
         // The dialog reads the box as it closes, so it needs the button
         // rather than anything we could do to the text alone.
         let accept = self
@@ -100,6 +94,44 @@ impl Dialog {
             .as_ref()
             .ok_or_else(|| anyhow!("the dialog has no Open or Save button to press"))?;
         uia.invoke(accept)
+    }
+
+    /// What the file name box holds now.
+    fn name_text(&self) -> Option<String> {
+        let p = unsafe {
+            self.name
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        }
+        .ok()?;
+        unsafe { p.CurrentValue() }.ok().map(|v| v.to_string())
+    }
+
+    /// Replaces the file name box's text as typing would: everything in it
+    /// selected, then `text` sent as characters, which the box and the
+    /// dialog both see as input. Waits until the box shows it.
+    fn type_name(&self, text: &str) -> Result<()> {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SendMessageW, WM_CHAR};
+        const EM_SETSEL: u32 = 0x00B1;
+        let edit = unsafe { self.name.CurrentNativeWindowHandle() }
+            .ok()
+            .filter(|h| !h.is_invalid())
+            .ok_or_else(|| anyhow!("the dialog's file name box has no window to type into"))?;
+        unsafe { SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1))) };
+        for unit in text.encode_utf16() {
+            unsafe { PostMessageW(Some(edit), WM_CHAR, WPARAM(unit as usize), LPARAM(1)) }?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while self.name_text().as_deref() != Some(text) {
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!(
+                    "the dialog's file name box shows {:?}, not what was typed",
+                    self.name_text()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(())
     }
 
     fn cancel(&self, uia: &Uia) -> Result<()> {
