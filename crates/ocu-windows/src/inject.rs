@@ -90,3 +90,32 @@ fn release(process: HANDLE, remote: *mut c_void) {
         let _ = VirtualFreeEx(process, remote, 0, MEM_RELEASE);
     }
 }
+
+/// Whether `dll` is loaded in process `pid` now: a queued hook that the app
+/// refused, or that failed to load, is not.
+pub fn loaded(pid: u32, dll: &str) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+    };
+    let Ok(snap) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid) }) else {
+        return false;
+    };
+    let mut entry = MODULEENTRY32W {
+        dwSize: size_of::<MODULEENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut found = false;
+    let mut more = unsafe { Module32FirstW(snap, &mut entry) }.is_ok();
+    while more && !found {
+        let len = entry
+            .szModule
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(entry.szModule.len());
+        found = String::from_utf16_lossy(&entry.szModule[..len]).eq_ignore_ascii_case(dll);
+        more = unsafe { Module32NextW(snap, &mut entry) }.is_ok();
+    }
+    let _ = unsafe { CloseHandle(snap) };
+    found
+}

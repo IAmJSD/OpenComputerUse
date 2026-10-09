@@ -146,6 +146,7 @@ fn converse(pipe: Pipe) {
     if unsafe { GetNamedPipeClientProcessId(pipe.0, &mut pid) }.is_err() {
         return;
     }
+    log::info!("the panel hook in pid {pid} connected");
     let mut buf = Vec::new();
     while let Some(v) = read_request(&pipe, &mut buf) {
         let request = Request {

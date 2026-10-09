@@ -317,10 +317,15 @@ impl Session for WindowsSession {
                 // Which route `choose_file` takes.
                 details.insert(
                     "dialogs".into(),
-                    if self.owner.hooked() {
-                        "held by the panel hook; nothing shows on screen".into()
-                    } else {
-                        "answered on screen through UI Automation".into()
+                    match (
+                        self.owner.hooked(),
+                        inject::loaded(self.owner.pid(), hook::DLL),
+                    ) {
+                        (true, true) => "held by the panel hook; nothing shows on screen".into(),
+                        (true, false) => "the panel hook was queued but is not loaded; answered \
+                                          on screen through UI Automation"
+                            .into(),
+                        _ => "answered on screen through UI Automation".into(),
                     },
                 );
             }
