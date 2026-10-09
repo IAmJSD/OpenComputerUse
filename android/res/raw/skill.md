@@ -236,7 +236,7 @@ Press keys: chords joined with +, several separated by spaces. Modifiers: cmd (m
 
 ### `set_value`
 
-Set an element's value directly (a text field's contents, a slider's position) through accessibility. On a web page's dropdown (a PopUpButton) the value is the option's text, picked without opening the menu.
+Set an element's value directly (a text field's contents, a slider's position) through accessibility. On a dropdown (a PopUpButton) the value is the option's text: a web page's is picked without opening its menu, an app's through its menu, which shows for a moment.
 
   - `session_id` (string, required): The id start_session returned.
   - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.

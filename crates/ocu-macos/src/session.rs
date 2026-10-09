@@ -652,6 +652,61 @@ impl MacSession {
     }
 }
 
+/// Picks an option of an AppKit pop-up button by its text. Its AXValue
+/// says it was set and changes nothing, and it lists its items only while
+/// its menu is open: so the menu is opened, the item pressed, and the menu
+/// is gone again a moment later.
+fn choose_native(el: &Element, value: &str) -> Result<()> {
+    let is = |s: &str| s.trim().eq_ignore_ascii_case(value.trim());
+    if el.string("AXValue").is_some_and(|v| is(&v)) {
+        return Ok(());
+    }
+    let menu_items = || -> Vec<Element> {
+        el.elements("AXChildren")
+            .into_iter()
+            .filter(|c| c.string("AXRole").as_deref() == Some("AXMenu"))
+            .flat_map(|m| m.elements("AXChildren"))
+            .filter(|i| i.string("AXRole").as_deref() == Some("AXMenuItem"))
+            .collect()
+    };
+    let close = || {
+        for m in el.elements("AXChildren") {
+            let _ = m.perform("AXCancel");
+        }
+    };
+    let _ = el.perform("AXPress");
+    let Some(items) = panel::wait_for(Duration::from_secs(1), || {
+        Some(menu_items()).filter(|i| !i.is_empty())
+    }) else {
+        bail!("the pop-up button did not open its menu");
+    };
+    let Some(item) = items
+        .iter()
+        .find(|i| i.string("AXTitle").is_some_and(|t| is(&t)))
+    else {
+        let options: Vec<String> = items.iter().filter_map(|i| i.string("AXTitle")).collect();
+        close();
+        bail!("{value:?} is not one of the options: {options:?}");
+    };
+    item.perform("AXPress")?;
+    if panel::wait_for(Duration::from_secs(1), || {
+        el.string("AXValue").filter(|v| is(v))
+    })
+    .is_none()
+    {
+        close();
+        bail!(
+            "{value:?} did not select: the pop-up button shows {:?}",
+            el.string("AXValue").unwrap_or_default()
+        );
+    }
+    // The button acts on the choice once its menu has closed.
+    let _ = panel::wait_for(Duration::from_secs(1), || {
+        menu_items().is_empty().then_some(())
+    });
+    Ok(())
+}
+
 impl Session for MacSession {
     fn describe(&self) -> Description {
         let mut details = BTreeMap::new();
@@ -779,10 +834,11 @@ impl Session for MacSession {
             }
             Action::SetValue { element, value } => {
                 let el = self.elements.get(element)?.clone();
-                if (self.chromium || self.gecko)
-                    && el.string("AXRole").as_deref() == Some("AXPopUpButton")
-                {
-                    return self.choose(window, &el, value);
+                if el.string("AXRole").as_deref() == Some("AXPopUpButton") {
+                    if (self.chromium || self.gecko) && ax::in_web_area(&el) {
+                        return self.choose(window, &el, value);
+                    }
+                    return choose_native(&el, value);
                 }
                 if el.settable("AXFocused") {
                     let _ = el.set("AXFocused", CFBoolean::new(true));

@@ -37,7 +37,7 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 | `get_ui_tree` | One line per element: `[e12] Button "Save" @(x,y wxh) actions=press` |
 | `click`, `move_mouse`, `drag`, `scroll` | Pointer actions at window coordinates, or `click` with `element: "e12"` |
 | `type_text`, `press_key` | Text, and chords such as `cmd+s` or `ctrl+shift+tab enter` |
-| `set_value`, `element_action` | Set an element's value, or run press, focus, showmenu, increment and similar actions |
+| `set_value`, `element_action` | Set an element's value (including a dropdown's option), or run press, focus, showmenu, increment and similar actions |
 | `choose_file` | Answer the file picker the app is showing (macOS): the paths to pick or save to, or none to cancel. Actions say when one is waiting |
 | `wait` | Let the app catch up |
 | `run_recipe` | Run a fixed list of steps with a decision model (see below) |
@@ -99,6 +99,9 @@ cleanup, the MCP tools and recipes.
   panels are drawn by a separate process (`openAndSavePanelService`).
   Input goes to that process, the path goes in through the panel's Go to
   sheet, and screenshots compose the panel as the screen draws it.
+- **Dropdowns:** `set_value` picks a web `<select>`'s option without
+  opening it, and an app's pop-up button's through its menu, which shows
+  for a moment.
 
 The MCP server is a thin client. The **OpenComputerUse app** owns the
 sessions, holds the Accessibility and Screen Recording permissions, and
