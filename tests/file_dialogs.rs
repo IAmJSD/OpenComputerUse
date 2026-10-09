@@ -203,7 +203,10 @@ fn answer(
 
     let notice = wait(Duration::from_secs(30), || session.notice())
         .context("the app never asked for a file")?;
-    println!("  asked: {notice}\n  {}", diagnose(session));
+    // No tree walk here: a hooked app's main thread is blocked in its
+    // dialog waiting for this answer, so reading its UI would stall past the
+    // answer window. The failure path dumps the tree instead.
+    println!("  asked: {notice}");
     let hidden = notice.contains("nothing shows") || notice.contains("nothing is shown");
     ensure!(
         hidden == hook,
