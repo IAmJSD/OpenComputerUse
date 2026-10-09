@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
-use ocu_core::{Action, LaunchSpec, Platform, Session};
+use ocu_core::{Action, LaunchSpec, Platform, Session, TreeOptions, UiNode};
 
 #[derive(Clone, Copy)]
 enum Answer {
@@ -136,7 +136,8 @@ fn run(platform: &dyn Platform, app: &str, hook: bool, case: &Case) -> Result<()
         args: vec![case.mode.into(), out.to_string_lossy().into_owned()],
         ..Default::default()
     })?;
-    let result = answer(session.as_mut(), hook, &paths, &out, expect.as_deref());
+    let result = answer(session.as_mut(), hook, &paths, &out, expect.as_deref())
+        .map_err(|e| anyhow!("{e:#}\n{}", diagnose(session.as_mut())));
     session.close();
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -193,6 +194,40 @@ fn answer(
         None => ensure!(got == "CANCELLED", "the app got {got:?}, not a cancel"),
     }
     Ok(())
+}
+
+/// What the session looks like now, for a failure: its windows, and each
+/// one's accessibility tree, a few levels deep.
+fn diagnose(session: &mut dyn Session) -> String {
+    fn walk(node: &UiNode, depth: usize, out: &mut String) {
+        out.push_str(&format!(
+            "\n{}{} {:?} {:?} {:?}",
+            "  ".repeat(depth),
+            node.role,
+            node.name.as_deref().unwrap_or(""),
+            node.value.as_deref().unwrap_or(""),
+            node.description.as_deref().unwrap_or("")
+        ));
+        if depth < 6 {
+            for c in &node.children {
+                walk(c, depth + 1, out);
+            }
+        }
+    }
+    let mut out = String::from("the session then:");
+    let windows = session.windows().unwrap_or_default();
+    for w in &windows {
+        out.push_str(&format!("\nwindow {} {:?} {:?}", w.id, w.title, w.frame));
+        let opts = TreeOptions {
+            max_depth: 6,
+            max_nodes: 300,
+        };
+        match session.ui_tree(Some(w.id), &opts) {
+            Ok(tree) => walk(&tree, 1, &mut out),
+            Err(e) => out.push_str(&format!("\n  (no tree: {e:#})")),
+        }
+    }
+    out
 }
 
 fn wait<T>(limit: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {

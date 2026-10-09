@@ -289,10 +289,9 @@ fn response_signal(
     code: u32,
     uris: &[String],
 ) -> Result<Message> {
-    let mut results: HashMap<&str, Value> = HashMap::new();
-    if !uris.is_empty() {
-        results.insert("uris", Value::from(uris.to_vec()));
-    }
+    // Always given, even empty: GTK 3 reads `uris` without checking it is
+    // there, and crashes on a cancel that leaves it out.
+    let results = HashMap::from([("uris", Value::from(uris.to_vec()))]);
     let mut builder = Message::signal(token, REQUEST, "Response")?;
     if let Some(caller) = caller {
         builder = builder.destination(caller)?;
@@ -1100,7 +1099,9 @@ mod tests {
             portal.answer(&token, &[]).expect("cancelling");
             let (code, results) = response(&mut answers).await;
             assert_eq!(code, 1, "a cancel, which is the portal's 1");
-            assert!(results.is_empty(), "and nothing picked");
+            let uris = Vec::<String>::try_from(results["uris"].try_clone().unwrap())
+                .expect("uris, even when empty");
+            assert!(uris.is_empty(), "and nothing picked");
             assert!(portal.waiting().is_none(), "a cancel ends the request");
         }
 

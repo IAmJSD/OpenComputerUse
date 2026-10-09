@@ -243,6 +243,29 @@ impl Uia {
         )
     }
 
+    /// The first element under `window` with automation id `id` and control
+    /// type `ty`, where controls nest under one id (a combo box and its edit).
+    pub fn find_by_id_and_type(
+        &self,
+        window: u64,
+        id: &str,
+        ty: UIA_CONTROLTYPE_ID,
+    ) -> Option<IUIAutomationElement> {
+        let root = self.root(window)?;
+        let by_id = unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_AutomationIdPropertyId, &VARIANT::from(BSTR::from(id)))
+        }
+        .ok()?;
+        let by_type = unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(ty.0))
+        }
+        .ok()?;
+        let cond = unsafe { self.automation.CreateAndCondition(&by_id, &by_type) }.ok()?;
+        unsafe { root.FindFirst(TreeScope_Descendants, &cond) }.ok()
+    }
+
     /// The first element under `window` of a control type, optionally with a
     /// given name, where an empty `name` matches any.
     pub fn find_by_type(

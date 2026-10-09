@@ -8,6 +8,7 @@ root=$(cd "$here/../../.." && pwd)
 out="$root/dist/OcuPanelHook.dylib"
 sign_id=${OCU_SIGN_ID:-"Developer ID Application: Astrid Gealer (CS54L4CF2Z)"}
 
+mkdir -p "$(dirname "$out")"
 clang -dynamiclib -arch arm64 \
     -framework AppKit -fobjc-arc -Wall \
     -mmacosx-version-min=14.0 \

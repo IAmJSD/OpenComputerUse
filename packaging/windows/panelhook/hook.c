@@ -467,9 +467,10 @@ static HRESULT STDMETHODCALLTYPE hook_GetResults(IFileOpenDialog *d, IShellItemA
         return ((IFileOpenDialogVtbl *)h->real->lpVtbl)
             ->GetResults((IFileOpenDialog *)h->real, out);
 
-    ITEMIDLIST **ids =
-        (ITEMIDLIST **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                                 sizeof(ITEMIDLIST *) * h->npaths);
+    /* PIDLIST_ABSOLUTE, not ITEMIDLIST *: MSVC marks it __unaligned. */
+    PIDLIST_ABSOLUTE *ids =
+        (PIDLIST_ABSOLUTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                      sizeof(PIDLIST_ABSOLUTE) * h->npaths);
     if (!ids) return E_OUTOFMEMORY;
     HRESULT hr = E_OUTOFMEMORY;
     int made = 0;
@@ -478,7 +479,7 @@ static HRESULT STDMETHODCALLTYPE hook_GetResults(IFileOpenDialog *d, IShellItemA
         if (ids[made]) made++;
     }
     if (made > 0)
-        hr = SHCreateShellItemArrayFromIDLists((UINT)made, (const ITEMIDLIST **)ids, out);
+        hr = SHCreateShellItemArrayFromIDLists((UINT)made, (PCIDLIST_ABSOLUTE_ARRAY)ids, out);
     for (int i = 0; i < made; i++) CoTaskMemFree(ids[i]);
     HeapFree(GetProcessHeap(), 0, ids);
     return hr;

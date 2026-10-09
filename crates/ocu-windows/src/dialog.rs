@@ -137,7 +137,10 @@ fn open(uia: &Uia, window: u64) -> Option<Dialog> {
 /// The file name box, by automation id, then by its label. Never just any
 /// edit: an app's own window has those too, and is no file dialog.
 fn file_name(uia: &Uia, window: u64) -> Option<IUIAutomationElement> {
-    uia.find_by_id(window, FILE_NAME_ID)
+    // The edit, not the combo box around it with the same id: the dialog
+    // reads the edit, and setting the combo box's value leaves it alone.
+    uia.find_by_id_and_type(window, FILE_NAME_ID, UIA_EditControlTypeId)
+        .or_else(|| uia.find_by_id(window, FILE_NAME_ID))
         .or_else(|| uia.find_by_type(window, UIA_EditControlTypeId, "File name:"))
 }
 
