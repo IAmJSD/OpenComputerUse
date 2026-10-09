@@ -107,6 +107,10 @@ pub enum Response {
     Performed {
         screenshot: Option<Screenshot>,
         ui_tree: Option<UiNode>,
+        /// Something the caller should know about the app's state, such as
+        /// a file panel waiting for an answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice: Option<String>,
     },
     /// Whether the screen ended up unlocked.
     Unlocked(bool),
@@ -369,6 +373,7 @@ impl Service {
                     return Ok(Response::Performed {
                         screenshot: None,
                         ui_tree: None,
+                        notice: None,
                     });
                 }
                 if observe.screenshot || observe.ui_tree {
@@ -415,6 +420,7 @@ impl Service {
                 Ok(Response::Performed {
                     screenshot,
                     ui_tree,
+                    notice: s.notice(),
                 })
             }
         }

@@ -352,6 +352,18 @@ fn base_tools() -> Vec<Value> {
             &["session_id", "element"],
         ),
         tool(
+            "choose_file",
+            "Answer the open or save panel (file picker) the app is showing, without clicking through it: give `paths` to pick those files or folders (one path for a save panel: where to save), or leave `paths` empty to cancel. Actions say when a panel is waiting. macOS only.",
+            action_props(json!({
+                "paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Absolute paths (or starting with ~). Several only where the panel lets you pick several. Empty or left out: cancel.",
+                },
+            })),
+            &["session_id"],
+        ),
+        tool(
             "wait",
             "Wait for the app, then look again.",
             action_props(json!({ "ms": { "type": "integer", "description": "Milliseconds, at most 60000." } })),
@@ -496,6 +508,14 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
         "wait" => Action::Wait {
             ms: opt_u64(args, "ms").unwrap_or(1000),
         },
+        "choose_file" => Action::ChooseFile {
+            paths: match args.get("paths") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::String(p)) => vec![p.clone()],
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|_| anyhow!("\"paths\" is a list of file paths"))?,
+            },
+        },
         _ => return Ok(None),
     }))
 }
@@ -558,6 +578,7 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
         let Response::Performed {
             screenshot,
             ui_tree,
+            notice,
         } = handler.handle(Request::Perform {
             session,
             window: opt_u64(args, "window_id"),
@@ -575,6 +596,10 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
                 s.width,
                 s.height
             ));
+        }
+        if let Some(n) = &notice {
+            out.push(' ');
+            out.push_str(n);
         }
         if let Some(t) = &ui_tree {
             out.push('\n');

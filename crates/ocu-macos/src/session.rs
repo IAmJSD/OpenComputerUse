@@ -26,6 +26,7 @@ use ocu_core::{
 use crate::ax::{self, Element, ElementTable};
 use crate::capture;
 use crate::input::{self, Target};
+use crate::panel;
 
 enum Resolved {
     Bundle(PathBuf),
@@ -494,10 +495,16 @@ impl MacSession {
         }
     }
 
-    /// The app's windows, best first, with the pinned one leading.
+    /// The app's windows, best first, with an open or save panel leading
+    /// (it holds up the window it belongs to), then the pinned one.
     fn listed(&self) -> Vec<WindowInfo> {
         let mut windows = app_windows(self.pid);
         if let Some(i) = windows.iter().position(|w| Some(w.id) == self.pinned) {
+            let w = windows.remove(i);
+            windows.insert(0, w);
+        }
+        let panels = panel::remotes(&windows);
+        if let Some(i) = windows.iter().position(|w| panels.contains_key(&w.id)) {
             let w = windows.remove(i);
             windows.insert(0, w);
         }
@@ -509,10 +516,17 @@ impl MacSession {
         pick_window(&windows, window).cloned()
     }
 
+    /// Where input for `w` goes: the app, or the panel service when `w`
+    /// shows an open or save panel.
     fn target(&self, w: &WindowInfo) -> Target {
+        let (pid, window_id) = match panel::remotes(std::slice::from_ref(w)).get(&w.id) {
+            Some(r) => (r.pid, r.window),
+            None => (self.pid, w.id as u32),
+        };
         Target {
-            pid: self.pid,
-            window_id: w.id as u32,
+            pid,
+            window_id,
+            paced: pid != self.pid,
             origin: CGPoint {
                 x: w.frame.x,
                 y: w.frame.y,
@@ -560,6 +574,42 @@ impl MacSession {
             let _ = el.set("AXFocused", CFBoolean::new(true));
         }
         el.perform("AXPress")
+    }
+
+    /// The window showing an open or save panel: `window` when it does,
+    /// else the first that does.
+    fn panel_window(&self, window: Option<u64>) -> Option<WindowInfo> {
+        let windows = self.listed();
+        let panels = panel::remotes(&windows);
+        let mut shown: Vec<WindowInfo> = windows
+            .into_iter()
+            .filter(|w| panels.contains_key(&w.id))
+            .collect();
+        let i = shown.iter().position(|w| Some(w.id) == window).unwrap_or(0);
+        (!shown.is_empty()).then(|| shown.swap_remove(i))
+    }
+
+    /// Answers the open or save panel the app is showing.
+    fn choose_file(&mut self, window: Option<u64>, paths: &[String]) -> Result<()> {
+        let paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| panel::absolute(p))
+            .collect::<Result<_>>()?;
+        // The panel may still be on its way: it comes a moment after the
+        // click that opens it.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let w = loop {
+            if let Some(w) = self.panel_window(window) {
+                break w;
+            }
+            if Instant::now() > deadline {
+                bail!("the app is not showing an open or save panel: do what opens one first (an upload button, File → Open)");
+            }
+            sleep(Duration::from_millis(100));
+        };
+        let t = self.target(&w);
+        let _focus = t.prepare(user_focus());
+        panel::answer(self.pid, &w, &t, &paths)
     }
 
     /// Picks an option of a pop-up button (a web page's <select>) by its
@@ -642,6 +692,14 @@ impl Session for MacSession {
 
     fn screenshot(&mut self, window: Option<u64>) -> Result<Screenshot> {
         let w = self.window(window)?;
+        // The app's window around a panel only hosts the panel service's
+        // drawing, which a capture of either window alone misses.
+        let windows = self.listed();
+        let panels = panel::remotes(&windows);
+        if panels.contains_key(&w.id) {
+            let with: Vec<u64> = panels.keys().copied().filter(|&id| id != w.id).collect();
+            return capture::capture_composed(&w, &with);
+        }
         capture::capture(&w)
     }
 
@@ -744,6 +802,7 @@ impl Session for MacSession {
                 sleep(Duration::from_millis(*ms));
                 return Ok(());
             }
+            Action::ChooseFile { paths } => return self.choose_file(window, paths),
             _ => {}
         }
         let w = self.window(window)?;
@@ -766,7 +825,9 @@ impl Session for MacSession {
                     Some(s) => parse_chord(s)?.modifiers,
                     None => Default::default(),
                 };
-                if (self.chromium || self.gecko) && *button == MouseButton::Left {
+                // A panel is AppKit's own, whatever the app is built on.
+                let in_app = t.pid == self.pid;
+                if (self.chromium || self.gecko) && in_app && *button == MouseButton::Left {
                     let clicked = input::click_chromium(&t, Self::point(&w, *x, *y), *count, m);
                     // Keep the window focused while the page handles it.
                     sleep(PAGE_HANDLER_GRACE);
@@ -800,10 +861,22 @@ impl Session for MacSession {
             Action::ElementAction { .. }
             | Action::SetValue { .. }
             | Action::Focus { .. }
-            | Action::Wait { .. } => {
+            | Action::Wait { .. }
+            | Action::ChooseFile { .. } => {
                 unreachable!()
             }
         }
+    }
+
+    fn notice(&mut self) -> Option<String> {
+        let w = self.panel_window(None)?;
+        let kind = panel::element(self.pid, &w)
+            .map(|el| panel::kind(&el))
+            .ok()?;
+        Some(match kind {
+            panel::Kind::Open => format!("An open panel is showing (window {}): answer it with choose_file, giving the paths to pick, or no paths to cancel.", w.id),
+            panel::Kind::Save => format!("A save panel is showing (window {}): answer it with choose_file, giving the path to save to, or no paths to cancel.", w.id),
+        })
     }
 
     fn is_alive(&mut self) -> bool {

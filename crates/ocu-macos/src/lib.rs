@@ -11,6 +11,7 @@ mod ax;
 mod capture;
 mod input;
 pub mod lock;
+mod panel;
 mod session;
 mod sky;
 

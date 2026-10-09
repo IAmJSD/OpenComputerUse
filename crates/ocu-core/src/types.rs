@@ -354,6 +354,12 @@ pub enum Action {
     Wait {
         ms: u64,
     },
+    /// Answers the open or save panel the app is showing: picks `paths`
+    /// (one path to save to), or cancels the panel when there are none.
+    ChooseFile {
+        #[serde(default)]
+        paths: Vec<String>,
+    },
 }
 
 fn one() -> u32 {

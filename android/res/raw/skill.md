@@ -256,6 +256,16 @@ Perform an accessibility action on an element: press, focus, showmenu, increment
   - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
   - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
 
+### `choose_file`
+
+Answer the open or save panel (file picker) the app is showing, without clicking through it: give `paths` to pick those files or folders (one path for a save panel: where to save), or leave `paths` empty to cancel. Actions say when a panel is waiting. macOS only.
+
+  - `session_id` (string, required): The id start_session returned.
+  - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
+  - `paths` (array): Absolute paths (or starting with ~). Several only where the panel lets you pick several. Empty or left out: cancel.
+  - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
+  - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
+
 ### `wait`
 
 Wait for the app, then look again.

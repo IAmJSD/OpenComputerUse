@@ -168,6 +168,16 @@ pub fn window_element(pid: i32, window_id: Option<u32>) -> Result<Element> {
         if let Some(w) = windows.iter().find(|w| w.window_id() == Some(id)) {
             return Ok(w.clone());
         }
+        // A sheet (an open panel) has a window of its own but is listed
+        // only among its parent window's children.
+        let sheet = windows.iter().find_map(|w| {
+            w.elements("AXChildren").into_iter().find(|c| {
+                c.string("AXRole").as_deref() == Some("AXSheet") && c.window_id() == Some(id)
+            })
+        });
+        if let Some(sheet) = sheet {
+            return Ok(sheet);
+        }
         bail!("no accessible window {id} (is Accessibility permission granted?)");
     }
     app.element("AXFocusedWindow")

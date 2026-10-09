@@ -523,6 +523,7 @@ impl Session for LinuxSession {
             Action::ElementAction { .. } | Action::SetValue { .. } | Action::Focus { .. } => {
                 bail!("element actions need the accessibility tree, which the Linux backend does not read yet; use coordinates")
             }
+            Action::ChooseFile { .. } => bail!("choose_file answers macOS open and save panels; drive this platform's file dialog with clicks and keys"),
             _ => {}
         }
         let w = self.window(window)?;
@@ -623,7 +624,8 @@ impl Session for LinuxSession {
             Action::ElementAction { .. }
             | Action::SetValue { .. }
             | Action::Focus { .. }
-            | Action::Wait { .. } => {
+            | Action::Wait { .. }
+            | Action::ChooseFile { .. } => {
                 unreachable!()
             }
         }

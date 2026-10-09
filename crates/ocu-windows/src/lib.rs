@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -290,9 +290,13 @@ impl Session for WindowsSession {
     }
 
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
-        if let Action::Wait { ms } = action {
-            sleep(Duration::from_millis(*ms));
-            return Ok(());
+        match action {
+            Action::Wait { ms } => {
+                sleep(Duration::from_millis(*ms));
+                return Ok(());
+            }
+            Action::ChooseFile { .. } => bail!("choose_file answers macOS open and save panels; drive this platform's file dialog with clicks and keys"),
+            _ => {}
         }
         let w = self.window(window)?;
         let top = capture::hwnd(w.id);
@@ -353,7 +357,7 @@ impl Session for WindowsSession {
                     sleep(Duration::from_millis(30));
                 }
             }
-            Action::Wait { .. } => unreachable!(),
+            Action::Wait { .. } | Action::ChooseFile { .. } => unreachable!(),
         }
         Ok(())
     }

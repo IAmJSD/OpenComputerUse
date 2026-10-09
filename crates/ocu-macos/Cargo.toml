@@ -17,7 +17,7 @@ objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NS
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "block2", "objc2-core-foundation"] }
 objc2-core-foundation = { version = "0.3", features = ["CFArray", "CFString", "CFNumber", "CFDictionary", "CFCGTypes", "CFData"] }
 objc2-core-graphics = { version = "0.3", features = ["CGEvent", "CGEventTypes", "CGEventSource", "CGRemoteOperation", "CGWindow", "CGImage", "CGDataProvider", "CGDirectDisplay"] }
-objc2-screen-capture-kit = { version = "0.3", features = ["SCShareableContent", "SCScreenshotManager", "SCStream", "objc2-core-graphics", "block2"] }
+objc2-screen-capture-kit = { version = "0.3", features = ["SCShareableContent", "SCScreenshotManager", "SCStream", "objc2-core-graphics", "objc2-core-foundation", "block2"] }
 objc2-application-services = { version = "0.3", default-features = false, features = ["std", "HIServices", "AXUIElement", "AXError", "AXValue", "AXAttributeConstants", "AXActionConstants", "AXRoleConstants", "libc"] }
 
 [dev-dependencies]

@@ -38,6 +38,7 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 | `click`, `move_mouse`, `drag`, `scroll` | Pointer actions at window coordinates, or `click` with `element: "e12"` |
 | `type_text`, `press_key` | Text, and chords such as `cmd+s` or `ctrl+shift+tab enter` |
 | `set_value`, `element_action` | Set an element's value, or run press, focus, showmenu, increment and similar actions |
+| `choose_file` | Answer the file picker the app is showing (macOS): the paths to pick or save to, or none to cancel. Actions say when one is waiting |
 | `wait` | Let the app catch up |
 | `run_recipe` | Run a fixed list of steps with a decision model (see below) |
 | `permissions` | What the OS needs granted, and whether it is |
@@ -94,6 +95,10 @@ cleanup, the MCP tools and recipes.
 - **Pointer and keys:** posted to the app's process through SkyLight. The
   app is first told its window is active, without being raised; this
   "focus without raise" approach comes from yabai and trycua/cua.
+- **File pickers:** `choose_file` answers them. AppKit's open and save
+  panels are drawn by a separate process (`openAndSavePanelService`).
+  Input goes to that process, the path goes in through the panel's Go to
+  sheet, and screenshots compose the panel as the screen draws it.
 
 The MCP server is a thin client. The **OpenComputerUse app** owns the
 sessions, holds the Accessibility and Screen Recording permissions, and
