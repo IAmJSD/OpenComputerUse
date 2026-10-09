@@ -289,8 +289,11 @@ impl WindowsSession {
             }
             if Instant::now() > deadline {
                 bail!(
-                    "the app is not asking for a file: do what opens a dialog first (an upload \
-                     button, File → Open), or use clicks and keys"
+                    "the app is not asking for a file (session pid {}, pids with a dialog waiting: \
+                     {:?}): do what opens a dialog first (an upload button, File → Open), or use \
+                     clicks and keys",
+                    self.owner.pid(),
+                    hook::waiting_pids(),
                 );
             }
             sleep(Duration::from_millis(100));
