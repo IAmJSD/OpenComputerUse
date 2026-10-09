@@ -36,21 +36,23 @@ use ocu_core::{
 };
 
 pub struct WindowsPlatform {
-    /// Whether to load the panel hook into the apps sessions start.
-    hook: bool,
+    /// Whether to load the panel hook into the apps sessions start. Asked at
+    /// each launch, so a changed setting applies to the next app.
+    hook: fn() -> bool,
 }
 
 impl WindowsPlatform {
     /// A platform with the panel hook set by `OCU_WINDOWS_PANEL_HOOK`.
     pub fn new() -> Self {
-        let on = std::env::var("OCU_WINDOWS_PANEL_HOOK")
-            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
-        Self::with_hook(on)
+        Self::with_hook(|| {
+            std::env::var("OCU_WINDOWS_PANEL_HOOK")
+                .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        })
     }
 
-    /// A platform that loads the panel hook into the apps it starts when
-    /// `hook` is set.
-    pub fn with_hook(hook: bool) -> Self {
+    /// A platform that loads the panel hook into the apps it starts whenever
+    /// `hook` says so.
+    pub fn with_hook(hook: fn() -> bool) -> Self {
         // Physical pixels everywhere, so screenshots and coordinates agree
         // on high-DPI screens.
         let _ =
@@ -74,7 +76,7 @@ impl Platform for WindowsPlatform {
     fn permissions(&self) -> Vec<ocu_core::Permission> {
         vec![ocu_core::Permission {
             name: "Panel hook".into(),
-            granted: self.hook,
+            granted: (self.hook)(),
             help: "Hands apps' open and save dialogs straight to the agent, so they never show. \
                    Loads a small library into the apps a session starts, which endpoint protection \
                    may object to; dialogs are answered on screen instead without it."
@@ -88,7 +90,7 @@ impl Platform for WindowsPlatform {
             return attach_active(spec);
         }
         let foreground = unsafe { GetForegroundWindow() };
-        let job = launch::Job::spawn(spec, self.hook)?;
+        let job = launch::Job::spawn(spec, (self.hook)())?;
         let name = std::path::Path::new(&spec.app)
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())

@@ -311,7 +311,6 @@ pub fn uninstall(client: Client) -> Result<()> {
 }
 
 /// A JSON snippet for clients set up by hand (Cursor, Windsurf, …).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn json_snippet() -> String {
     let exe = server_command()
         .map(|p| p.display().to_string())

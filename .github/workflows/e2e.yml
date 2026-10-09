@@ -1,0 +1,74 @@
+name: End to end
+on: push
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A real app opens real file dialogs and choose_file answers them
+  # (tests/file_dialogs.rs), with each platform's hook and without it.
+  file-dialogs:
+    name: file dialogs (${{ matrix.os }}, hook ${{ matrix.hook }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        hook: [on, off]
+    runs-on: ${{ matrix.os }}
+    env:
+      OCU_E2E_HOOK: ${{ matrix.hook == 'on' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set up (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "OCU_E2E_APP=$(tests/e2e/macos/build.sh "$RUNNER_TEMP")" >> "$GITHUB_ENV"
+          if [ "$OCU_E2E_HOOK" = 1 ]; then
+            OCU_SIGN_ID=- packaging/macos/panelhook/build.sh
+            echo "OCU_PANEL_HOOK=$PWD/dist/OcuPanelHook.dylib" >> "$GITHUB_ENV"
+            # The hook is only offered with App Management, which the runner
+            # image does not grant. Give it to whatever already has
+            # Accessibility there.
+            for db in "/Library/Application Support/com.apple.TCC/TCC.db" \
+                      "$HOME/Library/Application Support/com.apple.TCC/TCC.db"; do
+              sudo sqlite3 "$db" "
+                CREATE TEMP TABLE t AS SELECT * FROM access WHERE service = 'kTCCServiceAccessibility';
+                UPDATE t SET service = 'kTCCServiceSystemPolicyAppBundles';
+                INSERT OR REPLACE INTO access SELECT * FROM t;"
+            done
+          fi
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Set up (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $app = "$env:RUNNER_TEMP\dialog.exe"
+          cl /nologo /W4 /WX tests\e2e\windows\dialog.c "/Fe:$app" "/Fo:$env:RUNNER_TEMP\" `
+            /link ole32.lib shell32.lib uuid.lib comdlg32.lib user32.lib /SUBSYSTEM:WINDOWS
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "OCU_E2E_APP=$app" >> $env:GITHUB_ENV
+          if ($env:OCU_E2E_HOOK -eq '1') {
+            $dll = "$env:RUNNER_TEMP\panelhook\OcuPanelHook.dll"
+            packaging\windows\panelhook\build.ps1 -Out $dll
+            "OCU_PANEL_HOOK=$dll" >> $env:GITHUB_ENV
+          }
+
+      - name: Set up (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb dbus python3-gi gir1.2-gtk-3.0 \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
+            libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev
+          echo "OCU_E2E_APP=$PWD/tests/e2e/linux/dialog.py" >> "$GITHUB_ENV"
+
+      - name: Run
+        run: cargo test --test file_dialogs

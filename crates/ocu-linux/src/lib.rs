@@ -39,18 +39,19 @@ use ocu_core::{
 
 pub struct LinuxPlatform {
     xvfb: Option<PathBuf>,
-    /// Whether sessions get a private bus with a file chooser portal.
-    portal: bool,
+    /// Whether sessions get a private bus with a file chooser portal. Asked
+    /// at each launch, so a changed setting applies to the next app.
+    portal: fn() -> bool,
 }
 
 impl LinuxPlatform {
     pub fn new() -> Self {
-        Self::with_portal(false)
+        Self::with_portal(|| false)
     }
 
-    /// A platform whose sessions answer file choosers through a portal when
-    /// `portal` is set. The agent passes the user's setting.
-    pub fn with_portal(portal: bool) -> Self {
+    /// A platform whose sessions answer file choosers through a portal
+    /// whenever `portal` says so.
+    pub fn with_portal(portal: fn() -> bool) -> Self {
         Self {
             xvfb: find_xvfb(),
             portal,
@@ -94,7 +95,7 @@ impl Platform for LinuxPlatform {
             },
             ocu_core::Permission {
                 name: "File chooser portal".into(),
-                granted: self.portal,
+                granted: (self.portal)(),
                 help: "Answers apps' open and save dialogs without showing them. Each app runs on \
                        a private session bus whose file chooser is the agent; everything else is \
                        forwarded to the user's own bus, so the keyring and notifications still work. \
@@ -114,7 +115,7 @@ impl Platform for LinuxPlatform {
                 "Xvfb is not installed; install it (apt install xvfb) or set OCU_XVFB to its path"
             )
         })?;
-        Ok(Box::new(LinuxSession::start(xvfb, spec, self.portal)?))
+        Ok(Box::new(LinuxSession::start(xvfb, spec, (self.portal)())?))
     }
 }
 

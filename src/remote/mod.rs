@@ -20,10 +20,8 @@ pub struct Issued {
     pub device: devices::Device,
     /// What the device adds under `hosts:` in its hosts file: this
     /// computer's name, URL and the key.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub host_entry: String,
     /// The generic skill, the same for every computer (no key).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub skill: String,
     /// Both, inside a message asking the device's agent to set them up.
     pub prompt: String,
@@ -58,7 +56,6 @@ pub fn regenerate(id: &str, url: Option<&str>) -> Result<Issued> {
 /// user alone (it may hold a key), and returns where it went. A link at the
 /// folder or file is never written through; an existing regular file is
 /// replaced.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::PathBuf> {
     // Only the Unix branch below writes through a handle.
     #[cfg(unix)]

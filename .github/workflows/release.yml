@@ -90,6 +90,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install the window's libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev
       - name: Build
         run: |
           cargo build --release
@@ -111,27 +115,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Build the panel hook
         shell: pwsh
-        # The hook runs inside other apps, so it links the C runtime
-        # statically (/MT) and may import only Windows system DLLs.
-        run: |
-          New-Item -ItemType Directory -Force -Path target\panelhook | Out-Null
-          cl /nologo /W4 /WX /O2 /LD /std:c11 /DUNICODE /D_UNICODE `
-            /D_WIN32_WINNT=0x0601 /MT `
-            /Fe:target\panelhook\OcuPanelHook.dll `
-            packaging\windows\panelhook\hook.c `
-            /link ole32.lib shell32.lib shlwapi.lib uuid.lib comdlg32.lib
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Dependents are the indented lines; "Dump of file" is not.
-          $imports = dumpbin /nologo /dependents target\panelhook\OcuPanelHook.dll |
-            Select-String -Pattern '^\s+(\S+\.dll)\s*$' |
-            ForEach-Object { $_.Matches[0].Groups[1].Value }
-          $allowed = @('kernel32.dll', 'ole32.dll', 'shell32.dll', 'shlwapi.dll', 'comdlg32.dll')
-          $stray = $imports | Where-Object { $allowed -notcontains $_.ToLower() }
-          if ($stray) {
-            Write-Error "the hook imports $($stray -join ', '), which are not allowed"
-            exit 1
-          }
-          Write-Host "hook imports: $($imports -join ', ')"
+        run: packaging\windows\panelhook\build.ps1 -Out target\panelhook\OcuPanelHook.dll
       - name: Sign the panel hook
         shell: pwsh
         env:

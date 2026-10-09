@@ -23,7 +23,9 @@ what `brew trust` is for. The cask puts `OpenComputerUse.app` in `/Applications`
 `opencomputeruse` command into Homebrew's `bin`. The app updates itself, so
 `brew upgrade` leaves it alone. Or download `OpenComputerUse.dmg` from the
 [latest release](https://github.com/IAmJSD/OpenComputerUse/releases/latest).
-Linux and Windows releases have plain binaries of the MCP server.
+Linux and Windows releases are a single binary. Run it with no arguments for
+the settings window (the same one as the Mac app's); MCP clients run it as
+`opencomputeruse mcp`.
 
 Then add it to your client (see [Install into a client](#install-into-a-client)).
 
@@ -149,6 +151,11 @@ build, and macOS then asks for the permissions again.
 - **Cleanup:** Xvfb and the app get `PR_SET_PDEATHSIG`, so they die with
   the server.
 - **Where Xvfb is found:** `$OCU_XVFB`, next to the binary, or on `PATH`.
+- **File dialogs:** off by default, apps draw their own. With **Answer open
+  and save dialogs through a portal** on in the window (`linux_file_portal`,
+  or `OCU_LINUX_FILE_PORTAL=1`), each app gets a private session bus whose
+  file chooser portal is answered by `choose_file`; everything else is
+  forwarded to your own bus. Needs `dbus-daemon`.
 - **Not yet:** the accessibility tree (AT-SPI), so element actions and
   recipes are unavailable on Linux for now.
 - **Watching a session:** connect a VNC server to its display, for example
@@ -168,6 +175,11 @@ docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm ocu-l
 - **Input:** window messages posted to the control under the point, or to
   the focused control.
 - **Tree and element actions:** UI Automation.
+- **File dialogs:** `choose_file` fills in the dialog's file name and
+  presses its button over UI Automation. With **Hand open and save dialogs
+  to agents** on in the window (`windows_panel_hook`, or
+  `OCU_WINDOWS_PANEL_HOOK=1`), a hook loaded into each app hands its dialogs
+  over without showing them; see `packaging/windows/panelhook`.
 
 ### Phones, tablets, simulators and emulators (`crates/ocu-mobile`)
 
@@ -339,8 +351,9 @@ The API:
 - Every request needs `Authorization: Bearer <key>`, except `GET /health`.
 
 There is no TLS, so use it over Tailscale or another trusted network. On
-Linux and Windows, `opencomputeruse serve` runs the server, and
-`serve --install` starts it at login.
+Linux and Windows the window serves while it is open, `opencomputeruse
+serve` runs the server without it, and `serve --install` starts that at
+login.
 
 It listens on every network adapter unless you limit it, for example so it
 is reachable over Tailscale but not on a coffee shop's Wi-Fi. Untick

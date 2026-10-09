@@ -174,7 +174,6 @@ fn bind_addrs(bind: &str, port: u16) -> Result<Vec<SocketAddr>> {
 
 /// A short list of addresses for a label: IPv4 first, and past `show`, a
 /// count of the rest (IPv6 privacy addresses alone can run to several).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn summary<T: ToString>(addrs: &[T], show: usize) -> String {
     let mut all: Vec<String> = addrs.iter().map(ToString::to_string).collect();
     // IPv6 addresses, bare or bracketed with a port, go last.
