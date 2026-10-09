@@ -273,6 +273,20 @@ fn connect(display: &Display, cookie: &[u8]) -> Result<(RustConnection, Window)>
     Ok((conn, root))
 }
 
+/// A private session bus with the file chooser portal on it. The portal
+/// forwards everything else to the user's bus, so the app keeps the keyring,
+/// notifications and the rest.
+fn start_portal() -> Option<(Arc<ocu_core::portal::Bus>, Arc<ocu_core::portal::Portal>)> {
+    let bus = ocu_core::portal::Bus::start()
+        .inspect_err(|e| log::warn!("no private session bus: {e}"))
+        .ok()?;
+    let upstream = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
+    let portal = ocu_core::portal::Portal::start(bus.address(), upstream)
+        .inspect_err(|e| log::warn!("the file chooser portal is not answering: {e}"))
+        .ok()?;
+    Some((bus, portal))
+}
+
 pub struct LinuxSession {
     app: Child,
     name: String,
@@ -280,9 +294,8 @@ pub struct LinuxSession {
     root: Window,
     keymap: keys::Keymap,
     /// The session's private bus and the file chooser portal on it. Dropping
-    /// the bus ends its dbus-daemon.
-    bus: Option<Arc<ocu_core::portal::Bus>>,
-    portal: Option<Arc<ocu_core::portal::Portal>>,
+    /// the bus ends its dbus-daemon, and with it the portal's bridge.
+    portal: Option<(Arc<ocu_core::portal::Bus>, Arc<ocu_core::portal::Portal>)>,
     // Dropped last: the display outlives the connection and the app.
     display: Display,
     closed: bool,
@@ -300,22 +313,7 @@ impl LinuxSession {
 
         // Started before the app so it finds the portal. Off, or without
         // dbus-daemon, the app keeps the user's bus and draws its own dialogs.
-        let bus = portal
-            .then(|| {
-                ocu_core::portal::Bus::start()
-                    .inspect_err(|e| log::warn!("no private session bus: {e}"))
-                    .ok()
-            })
-            .flatten();
-        // The app's own bus is the user's real one, captured before it is
-        // replaced below. The portal forwards to it for everything but file
-        // choosers, so the app keeps the keyring, notifications and the rest.
-        let upstream = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
-        let portal = bus.as_ref().and_then(|bus| {
-            ocu_core::portal::Portal::start(bus.address(), upstream.clone())
-                .inspect_err(|e| log::warn!("the file chooser portal is not answering: {e}"))
-                .ok()
-        });
+        let portal = if portal { start_portal() } else { None };
 
         let mut cmd = Command::new(&spec.app);
         cmd.args(&spec.args)
@@ -327,7 +325,7 @@ impl LinuxSession {
             .env("QT_QPA_PLATFORM", "xcb")
             .env("SDL_VIDEODRIVER", "x11")
             .env("ELECTRON_OZONE_PLATFORM_HINT", "x11");
-        if let (Some(bus), Some(_)) = (&bus, &portal) {
+        if let Some((bus, _)) = &portal {
             // Steers GTK (Firefox included) and Qt to ask the portal rather
             // than draw a dialog.
             cmd.env("DBUS_SESSION_BUS_ADDRESS", bus.address())
@@ -356,7 +354,6 @@ impl LinuxSession {
             conn,
             root,
             keymap,
-            bus,
             portal,
             display,
             closed: false,
@@ -380,7 +377,7 @@ impl LinuxSession {
             .iter()
             .map(|p| ocu_core::paths::absolute(p))
             .collect::<Result<_>>()?;
-        let Some(portal) = &self.portal else {
+        let Some((_, portal)) = &self.portal else {
             bail!("this session has no file chooser portal (it is off, or dbus-daemon is missing); drive the app's own dialog with clicks and keys")
         };
         // A menu item's chooser comes a moment after the click.
@@ -560,13 +557,13 @@ impl Session for LinuxSession {
         );
         details.insert(
             "files".into(),
-            match (&self.bus, &self.portal) {
-                (Some(bus), Some(_)) => format!(
+            match &self.portal {
+                Some((bus, _)) => format!(
                     "answered through a portal on a private bus at {} (other services forwarded \
                      to the user's bus); nothing is shown",
                     bus.address()
                 ),
-                _ => "the app draws its own dialogs".into(),
+                None => "the app draws its own dialogs".into(),
             },
         );
         Description {
@@ -727,7 +724,7 @@ impl Session for LinuxSession {
     }
 
     fn notice(&mut self) -> Option<String> {
-        let waiting = self.portal.as_ref()?.waiting()?;
+        let waiting = self.portal.as_ref()?.1.waiting()?;
         Some(format!(
             "The app is asking for {} through the file chooser portal (nothing is shown): answer \
              it with choose_file, giving the {}, or no paths to cancel.",

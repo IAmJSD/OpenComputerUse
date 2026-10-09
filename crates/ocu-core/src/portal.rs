@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -120,7 +120,7 @@ impl Portal {
             .enable_all()
             .build()
             .map_err(|e| anyhow!("the portal needs an async runtime: {e}"))?;
-        let bridge = Arc::clone(&portal);
+        let bridge = Arc::downgrade(&portal);
         let private = private.to_string();
         let (ready, claimed) = std::sync::mpsc::channel();
         std::thread::Builder::new()
@@ -371,10 +371,12 @@ async fn subscribe(upstream: &Connection) -> Result<()> {
 }
 
 /// The bridge loop: answer file choosers, forward the rest, relay what comes
-/// back, and send out the `Response` signals that answer choosers.
+/// back, and send out the `Response` signals that answer choosers. Ends when
+/// the private bus or the [`Portal`] goes. It holds the portal weakly, since
+/// a strong handle would keep `out` open and the loop alive forever.
 async fn run(
     buses: Buses,
-    portal: Arc<Portal>,
+    portal: Weak<Portal>,
     mut out: tokio::sync::mpsc::UnboundedReceiver<Message>,
 ) {
     let mut from_app = MessageStream::from(&buses.private);
@@ -386,24 +388,24 @@ async fn run(
 
     loop {
         tokio::select! {
-            Some(Ok(msg)) = from_app.next() => {
-                handle_from_app(&buses, &portal, &mut forwarded, msg).await;
-            }
+            msg = from_app.next() => match (msg, portal.upgrade()) {
+                (Some(Ok(msg)), Some(portal)) => {
+                    handle_from_app(&buses, &portal, &mut forwarded, msg).await;
+                }
+                (Some(Err(e)), Some(_)) => log::warn!("reading the private bus: {e}"),
+                _ => break,
+            },
             Some(Ok(msg)) = next_opt(&mut from_real), if from_real.is_some() => {
                 relay_from_real(&buses.private, &mut forwarded, msg).await;
             }
-            answer = out.recv() => {
-                match answer {
-                    Some(signal) => {
-                        if let Err(e) = buses.private.send(&signal).await {
-                            log::warn!("the app stopped waiting for its file: {e}");
-                        }
+            answer = out.recv() => match answer {
+                Some(signal) => {
+                    if let Err(e) = buses.private.send(&signal).await {
+                        log::warn!("the app stopped waiting for its file: {e}");
                     }
-                    // Every sender is gone, so the portal itself is: nothing
-                    // left to answer, and the buses can be let go.
-                    None => break,
                 }
-            }
+                None => break,
+            },
         }
     }
 }
@@ -544,10 +546,15 @@ async fn forward(buses: &Buses, forwarded: &mut HashMap<NonZeroU32, Message>, ms
     };
     // The serial is fixed once the message is built; it keys the reply back.
     let serial = call.primary_header().serial_num();
+    let wants_reply = !msg
+        .primary_header()
+        .flags()
+        .contains(zbus::message::Flags::NoReplyExpected);
     match upstream.send(&call).await {
-        Ok(()) => {
+        Ok(()) if wants_reply => {
             forwarded.insert(serial, msg);
         }
+        Ok(()) => {}
         Err(e) => {
             reply_error(
                 &buses.private,
@@ -618,6 +625,13 @@ fn build_like(msg: &Message, kind: Forwarded) -> Result<Message> {
             let mut b = Message::method_call(&path, &member)?;
             if let Some(dest) = hdr.destination() {
                 b = b.destination(dest.to_owned())?;
+            }
+            if msg
+                .primary_header()
+                .flags()
+                .contains(zbus::message::Flags::NoReplyExpected)
+            {
+                b = b.with_flags(zbus::message::Flags::NoReplyExpected)?;
             }
             b
         }

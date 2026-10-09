@@ -326,8 +326,9 @@ static int ask(const char *kind, BOOL multiple, BOOL folders, wchar_t out[][MAX_
     const char *mid = ",\"kind\":\"";
     const char *tail1 = "\",\"multiple\":";
     const char *tail2 = ",\"folders\":";
-    const char *yes = "true}";
-    const char *no = "false}";
+    const char *yes = "true";
+    const char *no = "false";
+    const char *end = "}\n";
     size_t n = 0;
 
     /* The pid, digits from the end backwards, so no formatting needed. */
@@ -343,8 +344,8 @@ static int ask(const char *kind, BOOL multiple, BOOL folders, wchar_t out[][MAX_
     digits[numlen] = 0;
 
     const char *parts[] = {head, digits, mid, kind, tail1, multiple ? yes : no, tail2,
-                           folders ? yes : no};
-    for (int i = 0; i < 8; i++) {
+                           folders ? yes : no, end};
+    for (int i = 0; i < (int)(sizeof(parts) / sizeof(parts[0])); i++) {
         const char *s = parts[i];
         while (*s && n + 1 < sizeof(request)) request[n++] = *s++;
     }

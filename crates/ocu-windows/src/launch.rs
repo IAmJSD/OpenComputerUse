@@ -97,7 +97,7 @@ pub struct Job {
 unsafe impl Send for Job {}
 
 impl Job {
-    pub fn spawn(spec: &LaunchSpec) -> Result<Self> {
+    pub fn spawn(spec: &LaunchSpec, hook: bool) -> Result<Self> {
         unsafe {
             let job = CreateJobObjectW(None, PCWSTR::null())?;
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -118,14 +118,14 @@ impl Job {
             }
             let mut cmdline = wide(OsStr::new(&cmdline));
 
-            // Settled before the environment block is built, because the
-            // hook's pipe name has to reach the app through it.
-            let hook = Self::plan_hook(spec);
+            // Settled first: the hook's pipe name reaches the app through
+            // the environment.
+            let hook = if hook { Self::plan_hook() } else { None };
 
             let mut env = spec.env.clone();
             if let Some((_, pipe)) = &hook {
-                // The hook clears this again as it loads, so nothing the app
-                // starts inherits it.
+                // The hook clears it as it loads, so the app's children
+                // do not inherit it.
                 env.insert(crate::hook::PIPE_VAR.into(), (*pipe).to_string());
             }
             let env_block: Option<Vec<u16>> = (!env.is_empty()).then(|| {
@@ -175,11 +175,8 @@ impl Job {
             // In the job before it runs a single instruction, so nothing it
             // starts can slip out.
             AssignProcessToJobObject(job, pi.hProcess)?;
-            // And the hook in before it runs any at all.
+            // A failed hook is no reason not to start the app.
             let hooked = match hook {
-                // An app without the hook is one whose dialogs the UI
-                // Automation path answers instead, so a failure here is never
-                // a reason not to start it.
                 Some((dll, _)) => crate::inject::queue_load(&dll, pi.hProcess, pi.hThread)
                     .inspect_err(|e| log::warn!("no panel hook in {exe}: {e}"))
                     .is_ok(),
@@ -196,29 +193,22 @@ impl Job {
         }
     }
 
-    /// The hook to load into a new app, and the pipe it will answer on, if
-    /// the setting is on and the hook is there to load.
-    ///
-    /// Anything missing is a `None` and a warning rather than a failure:
-    /// dialogs are answered over UI Automation whether or not the hook
-    /// arrives, so the app starts either way.
-    fn plan_hook(spec: &LaunchSpec) -> Option<(std::path::PathBuf, &'static str)> {
-        // An app that was already running cannot be given a hook, and one
-        // being watched through `active_window` never can.
-        if !spec.active_window && crate::hook::wanted() {
-            match (crate::hook::dll(), crate::hook::pipe()) {
-                (Some(dll), Some(pipe)) if crate::hook::reachable(pipe) => {
-                    return Some((dll, pipe))
-                }
-                (None, _) => log::warn!(
-                    "the panel hook is on but {} was not found beside this executable",
-                    crate::hook::DLL
-                ),
-                (_, None) => log::warn!("the panel hook could not open its pipe"),
-                _ => log::warn!("nothing is listening on the panel hook's pipe"),
-            }
-        }
-        None
+    /// The hook to load and the pipe it answers on, or `None` with a warning
+    /// if either is missing. The app starts either way: UI Automation answers
+    /// its dialogs instead.
+    fn plan_hook() -> Option<(std::path::PathBuf, &'static str)> {
+        let Some(dll) = crate::hook::dll() else {
+            log::warn!(
+                "the panel hook is on but this build has no {}",
+                crate::hook::DLL
+            );
+            return None;
+        };
+        let Some(pipe) = crate::hook::pipe() else {
+            log::warn!("the panel hook could not open its pipe");
+            return None;
+        };
+        Some((dll, pipe))
     }
 
     /// Every process in the job: the app and whatever it started.

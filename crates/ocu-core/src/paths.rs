@@ -85,7 +85,6 @@ mod tests {
 
     #[test]
     fn refuses_a_relative_path() {
-        // "..\\b.txt" and "/b.txt" are relative on their own platform.
         let err = absolute("Documents").unwrap_err().to_string();
         assert!(err.contains("not an absolute path"), "{err}");
     }

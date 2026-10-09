@@ -1,18 +1,19 @@
-//! An app's open or save dialog, answered through UI Automation: the file
-//! name box is set and the dialog's own button pressed, as a person would.
+//! An app's open or save dialog, answered through UI Automation by setting
+//! the file name box and pressing the dialog's own button.
 //!
-//! The shell draws every app's file dialog (`IFileDialog` and the older
-//! `GetOpenFileNameW`) with the same controls and automation ids, so
-//! nothing here is per app. Controls are found by automation id, then by
-//! their English names.
+//! The shell draws both `IFileDialog` and `GetOpenFileNameW` with the same
+//! automation ids, so nothing here is per app. Controls are found by id,
+//! then by their English names.
 
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use windows::Win32::UI::Accessibility::*;
+use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
 
 use ocu_core::WindowInfo;
 
+use crate::capture::hwnd;
 use crate::uia::Uia;
 
 /// The file name box: the same automation id in the modern dialog and the
@@ -38,9 +39,8 @@ pub struct Dialog {
 }
 
 impl Dialog {
-    /// A notice for the agent: what the app is waiting for, and how to
-    /// answer it. Wording to match the macOS backend's, so the model reads
-    /// the same either way.
+    /// What the app is waiting for and how to answer it, worded like the
+    /// macOS backend's notice.
     pub fn notice(&self) -> String {
         format!(
             "{} (window {}): answer it with choose_file, giving the {}, or no paths to cancel.",
@@ -96,11 +96,23 @@ impl Dialog {
     }
 }
 
-/// The file dialog among a session's windows, if one is up: a window with
-/// a file name box, looked for from the last window, since a dialog comes
-/// up after the window that opened it.
+/// The file dialog among a session's windows, if one is up. Searched from
+/// the last window, since a dialog comes up after its owner.
 pub fn locate(uia: &Uia, windows: &[WindowInfo]) -> Option<Dialog> {
-    windows.iter().rev().find_map(|w| open(uia, w.id))
+    windows
+        .iter()
+        .rev()
+        .filter(|w| is_dialog(w.id))
+        .find_map(|w| open(uia, w.id))
+}
+
+/// Whether `window` has the dialog class (`#32770`) both file dialogs use.
+/// Checked first so an app's own windows are never searched, which is slow
+/// for a large tree and could match an app's own "File name:" box.
+fn is_dialog(window: u64) -> bool {
+    let mut class = [0u16; 16];
+    let n = unsafe { GetClassNameW(hwnd(window), &mut class) };
+    n > 0 && String::from_utf16_lossy(&class[..n as usize]) == "#32770"
 }
 
 fn open(uia: &Uia, window: u64) -> Option<Dialog> {

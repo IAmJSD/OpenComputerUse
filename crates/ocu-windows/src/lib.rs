@@ -41,22 +41,21 @@ pub struct WindowsPlatform {
 }
 
 impl WindowsPlatform {
+    /// A platform with the panel hook set by `OCU_WINDOWS_PANEL_HOOK`.
     pub fn new() -> Self {
+        let on = std::env::var("OCU_WINDOWS_PANEL_HOOK")
+            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
+        Self::with_hook(on)
+    }
+
+    /// A platform that loads the panel hook into the apps it starts when
+    /// `hook` is set.
+    pub fn with_hook(hook: bool) -> Self {
         // Physical pixels everywhere, so screenshots and coordinates agree
         // on high-DPI screens.
         let _ =
             unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         uia::com_init();
-        let hook = hook::from_env();
-        hook::set_wanted(hook);
-        Self { hook }
-    }
-
-    /// A platform that loads the panel hook when `hook` is set. The agent
-    /// passes the user's own setting; [`new`] alone takes it from the
-    /// environment.
-    pub fn with_hook(hook: bool) -> Self {
-        hook::set_wanted(hook);
         Self { hook }
     }
 }
@@ -89,7 +88,7 @@ impl Platform for WindowsPlatform {
             return attach_active(spec);
         }
         let foreground = unsafe { GetForegroundWindow() };
-        let job = launch::Job::spawn(spec)?;
+        let job = launch::Job::spawn(spec, self.hook)?;
         let name = std::path::Path::new(&spec.app)
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -313,8 +312,7 @@ impl Session for WindowsSession {
                     "job".into(),
                     "the app and its children run in a kill-on-close job".into(),
                 );
-                // Which route `choose_file` will take, which is worth saying
-                // out loud when the hook was asked for and did not arrive.
+                // Which route `choose_file` takes.
                 details.insert(
                     "dialogs".into(),
                     if self.owner.hooked() {
@@ -466,8 +464,7 @@ impl Session for WindowsSession {
 
     fn close(&mut self) {
         if !std::mem::replace(&mut self.closed, true) {
-            // A dialog the hook is holding is the app's own thread, blocked
-            // on us. Dropping it here is how the app sees a cancel.
+            // Unblocks a dialog the hook is holding.
             hook::forget(self.owner.pid());
             self.owner.kill();
         }
