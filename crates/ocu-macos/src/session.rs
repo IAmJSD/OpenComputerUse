@@ -25,7 +25,9 @@ use ocu_core::{
 
 use crate::ax::{self, Element, ElementTable};
 use crate::capture;
+use crate::cdp::{self, Cdp};
 use crate::input::{self, Target};
+use crate::pages::PageFiles;
 use crate::panel;
 
 enum Resolved {
@@ -96,6 +98,34 @@ fn bundle_id(bundle: &Path) -> Option<String> {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
     let b = objc2_foundation::NSBundle::bundleWithURL(&url)?;
     b.bundleIdentifier().map(|s| s.to_string())
+}
+
+pub(crate) fn bundle_executable(bundle: &Path) -> Option<PathBuf> {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
+    let b = objc2_foundation::NSBundle::bundleWithURL(&url)?;
+    b.executableURL()?
+        .path()
+        .map(|p| PathBuf::from(p.to_string()))
+}
+
+/// Starts a Chromium browser with a DevTools pipe, so a page's file
+/// chooser is answered without the open panel showing. Only for a profile
+/// of its own: Chrome refuses remote debugging of the user's default
+/// profile, and with that profile already open the new process would hand
+/// over to the running one. `None` when it does not apply or fails.
+fn spawn_with_devtools(bundle: &Path, spec: &LaunchSpec, running: bool) -> Option<(Child, Cdp)> {
+    let own_profile = spec.args.iter().any(|a| a.starts_with("--user-data-dir"));
+    if !own_profile || (running && !spec.new_instance) {
+        return None;
+    }
+    let exe = bundle_executable(bundle)?;
+    match cdp::spawn(&exe, spec) {
+        Ok(started) => Some(started),
+        Err(e) => {
+            log::warn!("starting {} with DevTools: {e:#}", bundle.display());
+            None
+        }
+    }
 }
 
 fn frontmost_pid() -> Option<i32> {
@@ -209,6 +239,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
     let resolved = resolve(&spec.app)?;
     let mut successor_of: Option<(String, Vec<i32>)> = None;
     let mut gecko = false;
+    let mut pages: Option<Box<dyn PageFiles>> = None;
     let (pid, launched, child, name) = match resolved {
         Resolved::Bundle(bundle) => {
             let already: Vec<i32> = bundle_id(&bundle)
@@ -236,17 +267,25 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
             // Known from the bundle rather than the process: Firefox
             // relaunches itself, so the process we start may be gone already.
             gecko = is_gecko_bundle(&bundle);
-            let pid = open_bundle(&bundle, &spec)?;
             let name = bundle
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if let Some(id) = bundle_id(&bundle) {
-                let mut known = already.clone();
-                known.push(pid);
-                successor_of = Some((id, known));
+            let piped = is_chromium_bundle(&bundle)
+                .then(|| spawn_with_devtools(&bundle, &spec, !already.is_empty()))
+                .flatten();
+            if let Some((child, c)) = piped {
+                pages = Some(Box::new(c));
+                (child.id() as i32, true, Some(child), name)
+            } else {
+                let pid = open_bundle(&bundle, &spec)?;
+                if let Some(id) = bundle_id(&bundle) {
+                    let mut known = already.clone();
+                    known.push(pid);
+                    successor_of = Some((id, known));
+                }
+                (pid, !already.contains(&pid), None, name)
             }
-            (pid, !already.contains(&pid), None, name)
         }
         Resolved::Binary(path) => {
             let mut cmd = Command::new(&path);
@@ -281,6 +320,7 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         launched_at: Instant::now(),
         foreground: spec.foreground,
         pinned: None,
+        pages,
     };
     session.chromium = is_chromium(session.pid);
     // Wait for a window, putting the user's app back in front if this one
@@ -337,6 +377,7 @@ pub fn attach_active(spec: &LaunchSpec) -> Result<MacSession> {
         launched_at: Instant::now(),
         foreground: spec.foreground,
         pinned: Some(window.id),
+        pages: None,
     };
     if session.foreground {
         session.bring_forward(Some(&window));
@@ -418,6 +459,9 @@ pub struct MacSession {
     /// The window the session was attached to, which comes first in its
     /// window list while it exists.
     pinned: Option<u64>,
+    /// A browser's link that takes its pages' file choosers: the DevTools
+    /// pipe of a Chromium browser.
+    pages: Option<Box<dyn PageFiles>>,
 }
 
 impl MacSession {
@@ -589,21 +633,32 @@ impl MacSession {
         (!shown.is_empty()).then(|| shown.swap_remove(i))
     }
 
-    /// Answers the open or save panel the app is showing.
+    /// The browser link with a page's file chooser waiting on it, and
+    /// whether it takes several files.
+    fn page_chooser(&self) -> Option<(&dyn PageFiles, bool)> {
+        let p = self.pages.as_deref().filter(|p| p.is_alive())?;
+        Some((p, p.waiting()?))
+    }
+
+    /// Answers whatever is asking for files: a page's chooser held by the
+    /// browser link, or a panel on screen.
     fn choose_file(&mut self, window: Option<u64>, paths: &[String]) -> Result<()> {
         let paths: Vec<PathBuf> = paths
             .iter()
             .map(|p| panel::absolute(p))
             .collect::<Result<_>>()?;
-        // The panel may still be on its way: it comes a moment after the
-        // click that opens it.
+        // What asked may still be on its way: a click's chooser or panel
+        // comes a moment after the click.
         let deadline = Instant::now() + Duration::from_secs(2);
         let w = loop {
+            if let Some((pages, _)) = self.page_chooser() {
+                return pages.answer(&paths);
+            }
             if let Some(w) = self.panel_window(window) {
                 break w;
             }
             if Instant::now() > deadline {
-                bail!("the app is not showing an open or save panel: do what opens one first (an upload button, File → Open)");
+                bail!("the app is not showing an open or save panel, and no page is asking for a file: do what opens one first (an upload button, File → Open)");
             }
             sleep(Duration::from_millis(100));
         };
@@ -925,6 +980,12 @@ impl Session for MacSession {
     }
 
     fn notice(&mut self) -> Option<String> {
+        if let Some((_, multiple)) = self.page_chooser() {
+            return Some(format!(
+                "The page is asking for {} (a file input; no panel is shown): answer it with choose_file, giving the paths, or no paths to cancel.",
+                if multiple { "files" } else { "a file" }
+            ));
+        }
         let w = self.panel_window(None)?;
         let kind = panel::element(self.pid, &w)
             .map(|el| panel::kind(&el))

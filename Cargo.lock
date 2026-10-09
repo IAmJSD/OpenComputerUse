@@ -4234,6 +4234,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-screen-capture-kit",
  "ocu-core",
+ "serde_json",
 ]
 
 [[package]]

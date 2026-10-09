@@ -9,8 +9,10 @@
 
 mod ax;
 mod capture;
+mod cdp;
 mod input;
 pub mod lock;
+mod pages;
 mod panel;
 mod session;
 mod sky;

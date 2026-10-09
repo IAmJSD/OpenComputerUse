@@ -11,6 +11,7 @@ ocu-core.workspace = true
 anyhow.workspace = true
 log.workspace = true
 libc.workspace = true
+serde_json.workspace = true
 block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSString", "NSValue", "NSURL", "NSError", "NSEnumerator", "NSObject", "NSBundle", "block2"] }

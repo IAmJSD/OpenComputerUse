@@ -95,10 +95,15 @@ cleanup, the MCP tools and recipes.
 - **Pointer and keys:** posted to the app's process through SkyLight. The
   app is first told its window is active, without being raised; this
   "focus without raise" approach comes from yabai and trycua/cua.
-- **File pickers:** `choose_file` answers them. AppKit's open and save
-  panels are drawn by a separate process (`openAndSavePanelService`).
-  Input goes to that process, the path goes in through the panel's Go to
-  sheet, and screenshots compose the panel as the screen draws it.
+- **File pickers:** `choose_file` answers them, most smoothly first:
+  - Chromium browsers started with their own `--user-data-dir` get a
+    DevTools pipe (`--remote-debugging-pipe`, so no port is opened). A
+    page's `<input type=file>` then never shows a panel; its files are set
+    over the pipe. `showOpenFilePicker` and kin still open the panel.
+  - Everything else shows AppKit's panel, which is drawn by a separate
+    process (`openAndSavePanelService`). Input goes to that process, the
+    path goes in through the panel's Go to sheet, and screenshots compose
+    the panel as the screen draws it.
 - **Dropdowns:** `set_value` picks a web `<select>`'s option without
   opening it, and an app's pop-up button's through its menu, which shows
   for a moment.
