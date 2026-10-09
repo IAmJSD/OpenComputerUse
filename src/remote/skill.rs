@@ -215,6 +215,92 @@ pub fn host_entry(device: &Device, key: &str) -> String {
     )
 }
 
+/// The hosts file on this computer, from `HOSTS_FILE`.
+pub fn hosts_file_path() -> std::path::PathBuf {
+    crate::clients::home().join(HOSTS_FILE.trim_start_matches("~/"))
+}
+
+fn is_blank_or_comment(line: &str) -> bool {
+    let t = line.trim_start();
+    t.is_empty() || t.starts_with('#')
+}
+
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// The host a line of the hosts section names, if it is an entry's name line.
+fn entry_name(line: &str) -> &str {
+    let name = line.trim().split(':').next().unwrap_or_default().trim();
+    name.trim_matches(|c| c == '"' || c == '\'')
+}
+
+/// Puts `entry` (from `host_entry`) into the text of a hosts file, under
+/// `hosts:`, replacing an entry of the same name and leaving the rest as it
+/// is. A missing `hosts:` line is added. The entry takes the indentation the
+/// file's other entries use, which the shell helper's parser relies on.
+pub fn merge_host_entry(existing: &str, entry: &str) -> anyhow::Result<String> {
+    let name = entry_name(entry.lines().next().unwrap_or_default());
+    anyhow::ensure!(!name.is_empty(), "the entry has no host name");
+    let lines: Vec<&str> = existing.lines().collect();
+    let is_hosts = |l: &&str| l.starts_with("hosts:");
+    let Some(at) = lines.iter().position(is_hosts) else {
+        let mut out = existing.trim_end().to_string();
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("hosts:\n");
+        out.push_str(entry);
+        return Ok(out);
+    };
+    anyhow::ensure!(
+        is_blank_or_comment(&lines[at]["hosts:".len()..]),
+        "the hosts file's `hosts:` must be a block map, not an inline value"
+    );
+    let end = lines[at + 1..]
+        .iter()
+        .position(|l| !is_blank_or_comment(l) && indent(l) == 0)
+        .map_or(lines.len(), |i| at + 1 + i);
+    let section = &lines[at + 1..end];
+    let first = section.iter().find(|l| !is_blank_or_comment(l));
+    let hi = first.map_or(2, |l| indent(l));
+    let pad = first.map_or("  ", |l| &l[..hi]);
+
+    let mut kept: Vec<String> = Vec::new();
+    let mut skipping = false;
+    for l in section {
+        // The replaced entry's own lines, and comments inside it, go with it.
+        skipping = if is_blank_or_comment(l) {
+            skipping && indent(l) > hi
+        } else {
+            indent(l) == hi && entry_name(l) == name || (skipping && indent(l) > hi)
+        };
+        if !skipping {
+            kept.push((*l).to_string());
+        }
+    }
+    // Blank lines and comments that follow the last entry belong to what
+    // comes after the section, so the new entry goes above them.
+    let mut trail = Vec::new();
+    while kept
+        .last()
+        .is_some_and(|l| is_blank_or_comment(l) && indent(l) == 0)
+    {
+        trail.push(kept.pop().unwrap_or_default());
+    }
+    trail.reverse();
+    for l in entry.lines() {
+        let rest = l.strip_prefix("  ").unwrap_or(l);
+        kept.push(format!("{pad}{rest}"));
+    }
+    kept.extend(trail);
+
+    let mut out: Vec<String> = lines[..=at].iter().map(|l| (*l).to_string()).collect();
+    out.extend(kept);
+    out.extend(lines[end..].iter().map(|l| (*l).to_string()));
+    Ok(out.join("\n") + "\n")
+}
+
 /// A message to paste into the device's agent, which then sets itself up
 /// to drive this computer: it adds this computer's `entry`, with the key,
 /// to the hosts file, and installs the generic `skill`. The entry comes
@@ -393,5 +479,52 @@ mod tests {
             let (code, out, _) = sh("bad", &hosts, "_ocu_entry h");
             assert_eq!((code, out.as_str()), (1, ""), "{bad}");
         }
+    }
+
+    #[test]
+    fn merging_a_host_entry_replaces_only_that_host() {
+        let new = "  work-mac:\n    url: \"http://n:1\"\n    key: \"ocu_NEW\"\n";
+        let merged = merge_host_entry(HOSTS, new).unwrap();
+        // The old entries of that name are gone; the others and the rest stay.
+        assert_eq!(merged.matches("work-mac:").count(), 1);
+        assert!(!merged.contains("ocu_AAA111") && !merged.contains("ocu_CCC333"));
+        assert!(merged.contains("ocu_BBB-222") && merged.contains("other: 1"));
+        assert!(merged.contains("# my computers"));
+        // And the shell helper reads the result.
+        let (code, out, _) = sh("merged", &merged, "_ocu_entry work-mac");
+        assert_eq!((code, out.as_str()), (0, "http://n:1\tocu_NEW\n"));
+        let (_, out, _) = sh("merged2", &merged, "_ocu_entry studio");
+        assert_eq!(out, "https://studio.example.com\tocu_BBB-222\n");
+    }
+
+    #[test]
+    fn merging_creates_and_follows_the_file_layout() {
+        let e = "  m:\n    url: \"http://x\"\n    key: \"k\"\n";
+        assert_eq!(merge_host_entry("", e).unwrap(), format!("hosts:\n{e}"));
+        assert_eq!(
+            merge_host_entry("other: 1\n", e).unwrap(),
+            format!("other: 1\nhosts:\n{e}")
+        );
+        // A file indented by four gets an entry indented by four.
+        let four = "hosts:\n    a:\n        url: http://a\n        key: ka\n";
+        let merged = merge_host_entry(four, e).unwrap();
+        assert!(merged.ends_with("    m:\n      url: \"http://x\"\n      key: \"k\"\n"));
+        let (code, out, _) = sh("four", &merged, "_ocu_entry m");
+        assert_eq!((code, out.as_str()), (0, "http://x\tk\n"));
+    }
+
+    #[test]
+    fn merging_keeps_comments_and_refuses_an_inline_hosts_value() {
+        let e = "  m:\n    url: \"http://x\"\n    key: \"k\"\n";
+        let file = "hosts:\n  m:\n    url: http://o\n    key: OLD\n\n  # about b\n  b:\n    url: http://b\n    key: KB\n\n# settings\nother: 1\n";
+        let merged = merge_host_entry(file, e).unwrap();
+        assert!(merged.contains("  # about b\n  b:"));
+        assert!(merged.contains("key: \"k\"\n\n# settings\nother: 1\n"));
+        let (_, out, _) = sh("kept", &merged, "_ocu_entry b");
+        assert_eq!(out, "http://b\tKB\n");
+        assert!(merge_host_entry("hosts: {}\n", e).is_err());
+        // A tab-indented file keeps its tabs.
+        let tabbed = merge_host_entry("hosts:\n\ta:\n\t\turl: http://a\n\t\tkey: ka\n", e).unwrap();
+        assert!(tabbed.contains("\n\tm:\n"));
     }
 }

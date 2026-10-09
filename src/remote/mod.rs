@@ -52,50 +52,95 @@ pub fn regenerate(id: &str, url: Option<&str>) -> Result<Issued> {
     Ok(Issued::new(device, &key))
 }
 
-/// Saves a file to `~/Downloads/<folder>/<file>`, created readable by the
-/// user alone (it may hold a key), and returns where it went. A link at the
-/// folder or file is never written through; an existing regular file is
-/// replaced.
-pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::PathBuf> {
+/// Writes `text` to `dir/file`, with the folder created readable by the user
+/// alone and the file too (it may hold a key), and returns where it went. A
+/// link at the folder or file is never written through; an existing regular
+/// file is replaced.
+fn write_private(dir: &std::path::Path, file: &str, text: &str) -> Result<std::path::PathBuf> {
     // Only the Unix branch below writes through a handle.
     #[cfg(unix)]
     use std::io::Write as _;
 
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .unwrap_or_default();
-    let dir = std::path::Path::new(&home).join("Downloads").join(folder);
     let path = dir.join(file);
-    for p in [&dir, &path] {
+    for p in [dir, path.as_path()] {
         anyhow::ensure!(
             !std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()),
             "{} is a symlink; not writing through it",
             p.display()
         );
     }
+    // Written beside the target and renamed over it, so a failed write never
+    // leaves a truncated file (the hosts file holds every host's key).
+    let tmp = dir.join(format!(".{file}.{}.tmp", std::process::id()));
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(&dir)?;
+            .create(dir)?;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(&path)?;
+            .open(&tmp)?;
         f.write_all(text.as_bytes())?;
-        // A file that was already there keeps its old mode otherwise.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&path, text)?;
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(&tmp, text)?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
     }
     Ok(path)
+}
+
+/// Saves a file to `~/Downloads/<folder>/<file>`, created readable by the
+/// user alone (it may hold a key), and returns where it went.
+pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::PathBuf> {
+    let dir = crate::clients::home().join("Downloads").join(folder);
+    write_private(&dir, file, text)
+}
+
+/// Where an agent harness keeps its skills, for the harnesses that have a
+/// skills folder.
+pub fn skills_dir(client: crate::clients::Client) -> Option<std::path::PathBuf> {
+    use crate::clients::Client;
+    let home = crate::clients::home();
+    match client {
+        Client::ClaudeCode => Some(home.join(".claude/skills")),
+        Client::Codex => Some(home.join(".codex/skills")),
+        Client::OpenCode => Some(home.join(".config/opencode/skills")),
+        Client::ClaudeDesktop | Client::Kimi => None,
+    }
+}
+
+/// Installs the generic skill (it holds no key) into a harness's skills
+/// folder, replacing an older copy, and returns the file written.
+pub fn deploy_skill(client: crate::clients::Client, skill: &str) -> Result<std::path::PathBuf> {
+    let Some(skills) = skills_dir(client) else {
+        bail!("{} has no skills folder", client.label());
+    };
+    write_private(&skills.join(skill::GENERIC_SKILL_NAME), "SKILL.md", skill)
+}
+
+/// Adds a hosts-file entry (see `skill::host_entry`) to this computer's
+/// hosts file, replacing any entry of the same name, and returns the file.
+pub fn save_host_entry(entry: &str) -> Result<std::path::PathBuf> {
+    let path = skill::hosts_file_path();
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("no folder for the hosts file"))?;
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let merged = skill::merge_host_entry(&existing, entry)?;
+    write_private(dir, "hosts.yaml", &merged)
 }
 
 /// Turns the server on or off (and moves it, or limits where it listens),
