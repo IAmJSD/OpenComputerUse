@@ -12,9 +12,10 @@
  * Windows has two file dialogs, so there are two routes:
  *
  *   - the shell's modern one, IFileOpenDialog / IFileSaveDialog, reached
- *     through CoCreateInstance. The dialog is created as usual but never
- *     shown: Show is answered from the agent, and the shell's own GetResult
- *     and GetResults hand back what was chosen.
+ *     through CoCreateInstance. The dialog is created as usual and its
+ *     vtable patched in place: Show is answered from the agent, GetResult
+ *     and GetResults hand back what it chose, and every other method is the
+ *     shell's own, called on the shell's own object.
  *   - the older GetOpenFileNameW and GetSaveFileNameW, wrapped whole.
  *
  * Everything fails open. If the pipe is unreachable, the agent does not
@@ -24,10 +25,9 @@
  *
  * Only apps the agent itself starts, and only for its own sessions.
  *
- * NOT TESTED. This has never been compiled or run. Treat it as a reviewed
- * draft: the logic is meant to be right, but it needs a Windows machine,
- * an injected-app test, and a test that the app still starts when every
- * failure path here is taken.
+ * NOT RUN. This compiles, but has never been run. It needs a Windows
+ * machine, an injected-app test, and a test that the app still starts when
+ * every failure path here is taken.
  */
 
 #define COBJMACROS
@@ -51,29 +51,23 @@
    would hang the app, which is worse than not hooking at all. */
 #define AGENT_TIMEOUT_MS 30000
 
-/* Paths one dialog can answer with, and the longest one handled. */
+/* Paths one dialog can answer with, and the longest one handled. A reply
+   past either limit is not one the hook can follow, and shows the real
+   dialog. */
 #define MAX_PATHS 16
 #define MAX_PATH_LEN 1024
 
-/* Shell file dialog CLSIDs and IIDs, filled in once on first use. */
-static CLSID g_clsid_open, g_clsid_save;
-static IID g_iid_dialog, g_iid_open, g_iid_save;
-static BOOL g_ids_ready = FALSE;
-
+/* The pipe, connected on the first dialog rather than at load: DllMain runs
+   under the loader lock, where waiting on anything is unsafe. */
+static wchar_t g_pipe_name[256];
 static HANDLE g_pipe = INVALID_HANDLE_VALUE;
-static CRITICAL_SECTION g_lock;
-static BOOL g_ready = FALSE;
 
-static void ensure_ids(void)
-{
-    if (g_ids_ready) return;
-    CLSIDFromString(L"{DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7}", &g_clsid_open);
-    CLSIDFromString(L"{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}", &g_clsid_save);
-    IIDFromString(L"{42f85136-db7e-439c-85f1-e4075d135fc8}", &g_iid_dialog);
-    IIDFromString(L"{d57c7288-d4ad-4768-be02-9d969532d960}", &g_iid_open);
-    IIDFromString(L"{84bccd23-5fde-4cdb-aea4-af64b83d78ab}", &g_iid_save);
-    g_ids_ready = TRUE;
-}
+/* Held for each exchange with the agent. The buffers below belong to
+   whoever holds it, and are static so no hook puts tens of kilobytes on an
+   app thread's stack. */
+static CRITICAL_SECTION g_lock;
+static char g_reply[64 * 1024];
+static wchar_t g_picks[MAX_PATHS][MAX_PATH_LEN];
 
 /* ---------------------------------------------------------------- JSON */
 
@@ -134,14 +128,14 @@ static size_t wlen(const wchar_t *s)
     return (size_t)(p - s);
 }
 
-/* The last path separator in a path, which is what splits a directory from
-   the file in it. */
-static const wchar_t *last_sep(const wchar_t *s)
+/* Where the file's name starts in a path: just past the last separator, or
+   0 if there is none. */
+static size_t name_offset(const wchar_t *s)
 {
-    const wchar_t *last = NULL;
-    for (; *s; s++)
-        if (*s == L'\\') last = s;
-    return last;
+    size_t at = 0;
+    for (size_t i = 0; s[i]; i++)
+        if (s[i] == L'\\') at = i + 1;
+    return at;
 }
 
 static size_t slen(const char *s)
@@ -169,10 +163,19 @@ static const char *find_str(const char *hay, const char *needle)
     return NULL;
 }
 
-/* Decodes one UTF-8 sequence at p into *out, advancing p past it. Returns
-   the number of bytes consumed. A malformed sequence is consumed as one
-   replacement character rather than looped on. */
-static int utf8_next(const char **p, wchar_t *out)
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decodes one UTF-8 sequence at *p into out, advancing *p past it, and
+   returns how many UTF-16 units it made: two for a character outside the
+   BMP, which Windows stores as a surrogate pair. A malformed sequence is
+   consumed as one replacement character rather than looped on. */
+static int utf8_next(const char **p, wchar_t out[2])
 {
     const unsigned char *s = (const unsigned char *)*p;
     unsigned char c = s[0];
@@ -180,7 +183,7 @@ static int utf8_next(const char **p, wchar_t *out)
     unsigned long cp;
 
     if (c < 0x80) {
-        *out = (wchar_t)c;
+        out[0] = (wchar_t)c;
         *p += 1;
         return 1;
     } else if ((c & 0xe0) == 0xc0) {
@@ -193,41 +196,43 @@ static int utf8_next(const char **p, wchar_t *out)
         extra = 3;
         cp = c & 0x07u;
     } else {
-        *out = 0xfffd;
+        out[0] = 0xfffd;
         *p += 1;
         return 1;
     }
     for (int i = 1; i <= extra; i++) {
         if ((s[i] & 0xc0) != 0x80) { /* truncated: not a sequence at all */
-            *out = 0xfffd;
+            out[0] = 0xfffd;
             *p += 1;
             return 1;
         }
         cp = (cp << 6) | (s[i] & 0x3fu);
     }
-    /* Surrogates would need a pair, and a path carrying one is not a path
-       Windows produced. */
-    if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) cp = 0xfffd;
-    if (cp > 0xffff) {
-        /* Outside the BMP: keep the replacement, since wchar_t here is
-           16 bits and splitting it would corrupt the path. */
-        *out = 0xfffd;
-    } else {
-        *out = (wchar_t)cp;
-    }
     *p += extra + 1;
-    return extra + 1;
+    if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+        out[0] = 0xfffd;
+        return 1;
+    }
+    if (cp > 0xffff) {
+        cp -= 0x10000;
+        out[0] = (wchar_t)(0xd800 + (cp >> 10));
+        out[1] = (wchar_t)(0xdc00 + (cp & 0x3ff));
+        return 2;
+    }
+    out[0] = (wchar_t)cp;
+    return 1;
 }
 
 /* Reads the reply's "paths" array into out[]. Returns how many paths it
-   holds, or -1 if the reply has no "paths" at all, which the callers treat
-   as a cancel. */
+   holds, 0 for a cancel, or -1 for a reply this cannot follow in full: no
+   "paths", a path or escape cut short, a path too long, or too many paths.
+   Callers treat -1 as no answer and show the real dialog. */
 static int parse_paths(const char *json, wchar_t out[][MAX_PATH_LEN])
 {
     const char *p = find_str(json, "\"paths\"");
-    if (!p) return 0;
+    if (!p) return -1;
     p = find_char(p, '[');
-    if (!p) return 0;
+    if (!p) return -1;
     p++;
 
     int n = 0;
@@ -237,57 +242,90 @@ static int parse_paths(const char *json, wchar_t out[][MAX_PATH_LEN])
             continue;
         }
         p++; /* the opening quote */
-        wchar_t *w = out[n < MAX_PATHS ? n : MAX_PATHS - 1];
+        if (n == MAX_PATHS) return -1;
+        wchar_t *w = out[n];
         int i = 0;
         while (*p && *p != '"') {
-            wchar_t ch;
+            wchar_t ch[2];
+            int units = 1;
             if (*p == '\\') {
                 p++;
-                switch (*p) {
-                case 'u': {
+                if (*p == 'u') {
                     unsigned code = 0;
-                    if (slen(p + 1) >= 4) {
-                        for (int k = 1; k <= 4; k++) {
-                            char c = p[k];
-                            unsigned d = (c >= '0' && c <= '9')   ? c - '0'
-                                         : (c >= 'a' && c <= 'f') ? c - 'a' + 10
-                                         : (c >= 'A' && c <= 'F') ? c - 'A' + 10
-                                                                  : 0xffff;
-                            if (d == 0xffff) break;
-                            code = (code << 4) | d;
-                        }
+                    /* Stops at the first non-digit, the end included, so
+                       nothing past the reply is read. */
+                    for (int k = 1; k <= 4; k++) {
+                        int d = hex_digit(p[k]);
+                        if (d < 0) return -1;
+                        code = (code << 4) | (unsigned)d;
                     }
                     p += 5;
-                    /* A lone surrogate is dropped rather than written, so
-                       a mangled path fails visibly instead of silently. */
-                    ch = (code >= 0xd800 && code <= 0xdfff) ? 0xfffd : (wchar_t)code;
-                    break;
-                }
-                case 'n': ch = L'\n'; p++; break;
-                case 't': ch = L'\t'; p++; break;
-                case 'r': ch = L'\r'; p++; break;
-                case '\\': case '"': case '/': ch = (wchar_t)*p; p++; break;
-                default: ch = (wchar_t)*p; p++; break;
+                    /* Kept as it comes, surrogates too: a path is UTF-16
+                       units, and a pair arrives as two escapes. */
+                    ch[0] = (wchar_t)code;
+                } else {
+                    switch (*p) {
+                    case '\0': return -1; /* the reply ends in a backslash */
+                    case 'n': ch[0] = L'\n'; break;
+                    case 't': ch[0] = L'\t'; break;
+                    case 'r': ch[0] = L'\r'; break;
+                    case 'b': ch[0] = L'\b'; break;
+                    case 'f': ch[0] = L'\f'; break;
+                    default: ch[0] = (wchar_t)(unsigned char)*p; break;
+                    }
+                    p++;
                 }
             } else {
-                p += utf8_next(&p, &ch);
+                units = utf8_next(&p, ch);
             }
-            if (i < MAX_PATH_LEN - 1) w[i++] = ch;
+            if (i + units > MAX_PATH_LEN - 1) return -1;
+            for (int k = 0; k < units; k++) w[i++] = ch[k];
         }
+        if (*p != '"') return -1; /* the reply ends inside a path */
+        p++;
         w[i] = 0;
-        if (*p == '"') p++;
-        if (n < MAX_PATHS) n++;
+        n++;
     }
-    return n;
+    return *p == ']' ? n : -1;
 }
 
 /* --------------------------------------------------------------- pipe */
 
-/* Reads one line from the pipe, giving up after AGENT_TIMEOUT_MS. Polling
-   rather than a blocking read, because a blocking one has no timeout to
-   give and would hang the app if the agent wedged. */
-static int read_line(char *buf, DWORD cap)
+static void disconnect(void)
 {
+    if (g_pipe == INVALID_HANDLE_VALUE) return;
+    CloseHandle(g_pipe);
+    g_pipe = INVALID_HANDLE_VALUE;
+}
+
+/* Connects to the agent if not already. The agent makes a fresh pipe
+   instance as soon as one is taken, but two apps connecting at once can
+   find every instance busy for a moment, so that is waited out briefly. */
+static BOOL connect_agent(void)
+{
+    if (g_pipe != INVALID_HANDLE_VALUE) return TRUE;
+    for (int tries = 0; tries < 3; tries++) {
+        g_pipe = CreateFileW(g_pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+        if (g_pipe != INVALID_HANDLE_VALUE) {
+            DWORD mode = PIPE_READMODE_BYTE;
+            if (SetNamedPipeHandleState(g_pipe, &mode, NULL, NULL)) return TRUE;
+            disconnect();
+            return FALSE;
+        }
+        if (GetLastError() != ERROR_PIPE_BUSY || !WaitNamedPipeW(g_pipe_name, 2000))
+            return FALSE;
+    }
+    return FALSE;
+}
+
+/* Reads one line from the pipe into g_reply, giving up after
+   AGENT_TIMEOUT_MS. Polling rather than a blocking read, because a blocking
+   one has no timeout to give and would hang the app if the agent wedged.
+   Returns -1 on a timeout, a broken pipe, or a line too long to hold. */
+static int read_line(void)
+{
+    DWORD cap = (DWORD)sizeof(g_reply);
     DWORD total = 0;
     DWORD start = GetTickCount();
     for (;;) {
@@ -297,11 +335,11 @@ static int read_line(char *buf, DWORD cap)
             DWORD room = cap - total - 1;
             DWORD want = avail < room ? avail : room;
             DWORD got = 0;
-            if (want == 0) return (int)total;
-            if (!ReadFile(g_pipe, buf + total, want, &got, NULL)) return -1;
+            if (want == 0) return -1;
+            if (!ReadFile(g_pipe, g_reply + total, want, &got, NULL)) return -1;
             total += got;
-            buf[total] = 0;
-            if (has_newline(buf, total)) return (int)total;
+            g_reply[total] = 0;
+            if (has_newline(g_reply, total)) return (int)total;
         } else {
             if (GetTickCount() - start > AGENT_TIMEOUT_MS) return -1;
             Sleep(20);
@@ -311,12 +349,11 @@ static int read_line(char *buf, DWORD cap)
 
 /* Asks the agent about a dialog. Returns how many paths it chose, or -1 if
    it could not be reached or did not answer, which means the caller must
-   show the real dialog. An empty result is a cancel, not a failure. */
+   show the real dialog. An empty result is a cancel, not a failure. The
+   caller holds g_lock. */
 static int ask(const char *kind, BOOL multiple, BOOL folders, wchar_t out[][MAX_PATH_LEN])
 {
-    if (g_pipe == INVALID_HANDLE_VALUE) return -1;
-    DWORD mode = PIPE_READMODE_BYTE;
-    if (!SetNamedPipeHandleState(g_pipe, &mode, NULL, NULL)) return -1;
+    if (!connect_agent()) return -1;
 
     /* Built by hand rather than with the CRT, so the hook needs no runtime
        of its own inside someone else's process. Every part but the pid is a
@@ -352,94 +389,114 @@ static int ask(const char *kind, BOOL multiple, BOOL folders, wchar_t out[][MAX_
     request[n] = 0;
 
     DWORD written = 0;
-    if (!WriteFile(g_pipe, request, (DWORD)n, &written, NULL)) return -1;
-
-    char reply[64 * 1024];
-    int got = read_line(reply, (DWORD)sizeof(reply));
-    if (got <= 0) return -1;
-    return parse_paths(reply, out);
+    if (!WriteFile(g_pipe, request, (DWORD)n, &written, NULL)) {
+        disconnect();
+        return -1;
+    }
+    if (read_line() < 0) {
+        /* Hung up rather than kept: a reply arriving late would otherwise
+           be read as the answer to the next dialog. The next dialog
+           reconnects. */
+        disconnect();
+        return -1;
+    }
+    return parse_paths(g_reply, out);
 }
 
 /* --------------------------------------------------- the modern dialog */
 
-/* Wraps a shell file dialog.
+/* A shell file dialog's patched vtable, and what the hook keeps about the
+ * dialog beside it.
  *
- * The vtable here is IFileOpenDialogVtbl, which is exactly IFileDialogVtbl
- * plus GetResults and GetSelectedItems. That is deliberate: a save dialog
- * only has the shorter table, so only its own slots are copied and only
- * they are ever called, while an open dialog gets both tables' worth and so
- * can answer a multiple selection. */
-typedef struct HookedDialog {
-    /* First, because the app calls through the pointer it was handed and
-       that has to land on this struct. */
-    IFileOpenDialogVtbl *lpVtbl;
-    IFileOpenDialogVtbl vtbl;
-    LONG ref;
-    IFileDialog *real; /* the shell's own object, vtable aside */
+ * The table is first, so the object's own lpVtbl leads straight back here:
+ * the hooks are called with the shell's object as `this`, as every method
+ * is, and find their state through it. Methods the hook leaves alone are
+ * the shell's own entries, copied, so they run exactly as before.
+ *
+ * Each kind of dialog has its own table length: an open dialog's adds
+ * GetResults and GetSelectedItems to IFileDialog's, and a save dialog's adds
+ * five others. The table is copied at the length of the interface it was
+ * read through, so no slot past the shell's own is ever read. */
+typedef struct DialogHook {
+    union {
+        IFileDialogVtbl base;
+        IFileOpenDialogVtbl open;
+        IFileSaveDialogVtbl save;
+    } vtbl;
+    const IFileDialogVtbl *orig; /* the shell's own table */
     int is_save;
     /* Set by Show once the agent has answered, read by the GetResult that
-       follows on the same thread. */
-    int answered;
+       follows. Cleared each time Show is called. */
     int npaths;
-    wchar_t paths[MAX_PATHS][MAX_PATH_LEN];
-} HookedDialog;
+    wchar_t (*paths)[MAX_PATH_LEN];
+} DialogHook;
 
-static HookedDialog *self_of(IFileOpenDialog *d)
+static DialogHook *hook_of(IFileDialog *d)
 {
-    return (HookedDialog *)d;
+    return (DialogHook *)d->lpVtbl;
 }
 
-static HRESULT STDMETHODCALLTYPE hook_QueryInterface(IFileOpenDialog *d, REFIID riid,
-                                                    void **out)
+static void forget_answer(DialogHook *h)
 {
-    HookedDialog *h = self_of(d);
-    /* Forwarded, so every interface the app asks for behaves normally. The
-       shell's object comes back, which means a caller that unwraps it and
-       calls Show on it sees the real dialog: a fair outcome, since that
-       shows a dialog rather than hanging. */
-    return IFileDialog_QueryInterface(h->real, riid, out);
+    if (h->paths) HeapFree(GetProcessHeap(), 0, h->paths);
+    h->paths = NULL;
+    h->npaths = 0;
 }
 
-static ULONG STDMETHODCALLTYPE hook_AddRef(IFileOpenDialog *d)
+/* An ID list for a path. A real one where the path exists, and a simple
+   one where it does not yet, which is what a save dialog's answer usually
+   is: ILCreateFromPathW fails on a file that is not there. */
+static PIDLIST_ABSOLUTE id_list_of(const wchar_t *path)
 {
-    HookedDialog *h = self_of(d);
-    return (ULONG)InterlockedIncrement(&h->ref);
+    PIDLIST_ABSOLUTE id = ILCreateFromPathW(path);
+    return id ? id : SHSimpleIDListFromPath(path);
 }
 
-static ULONG STDMETHODCALLTYPE hook_Release(IFileOpenDialog *d)
+static ULONG STDMETHODCALLTYPE hook_Release(IFileDialog *d)
 {
-    HookedDialog *h = self_of(d);
-    LONG n = InterlockedDecrement(&h->ref);
+    DialogHook *h = hook_of(d);
+    ULONG n = h->orig->Release(d);
+    /* The object is gone, and nothing will look at this table again. A
+       last release made through one of the object's other interfaces never
+       comes here, which leaks this small block, nothing worse. */
     if (n == 0) {
-        IFileDialog_Release(h->real);
+        forget_answer(h);
         HeapFree(GetProcessHeap(), 0, h);
     }
-    return (ULONG)n;
+    return n;
 }
 
-static HRESULT STDMETHODCALLTYPE hook_Show(IFileOpenDialog *d, HWND owner)
+static HRESULT STDMETHODCALLTYPE hook_Show(IFileDialog *d, HWND owner)
 {
-    HookedDialog *h = self_of(d);
-    wchar_t picks[MAX_PATHS][MAX_PATH_LEN];
+    DialogHook *h = hook_of(d);
     FILEOPENDIALOGOPTIONS opts = 0;
     int n;
 
-    EnterCriticalSection(&g_lock);
+    /* A dialog shown again starts over, so a real dialog shown this time
+       never hands back what the agent chose last time. */
+    forget_answer(h);
     /* GetOptions before answering: an open dialog set for folders says so
        only here. */
-    IFileDialog_GetOptions(h->real, &opts);
+    h->orig->GetOptions(d, &opts);
+
+    EnterCriticalSection(&g_lock);
     n = ask(h->is_save ? "save" : "open", (opts & FOS_ALLOWMULTISELECT) ? TRUE : FALSE,
-            (opts & FOS_PICKFOLDERS) ? TRUE : FALSE, picks);
+            (opts & FOS_PICKFOLDERS) ? TRUE : FALSE, g_picks);
     if (n > 0) {
-        copy_bytes(h->paths, picks, sizeof(picks));
-        h->npaths = n;
-        h->answered = 1;
+        size_t size = sizeof(g_picks[0]) * (size_t)n;
+        h->paths = (wchar_t(*)[MAX_PATH_LEN])HeapAlloc(GetProcessHeap(), 0, size);
+        if (h->paths) {
+            copy_bytes(h->paths, g_picks, size);
+            h->npaths = n;
+        } else {
+            n = -1;
+        }
     }
     LeaveCriticalSection(&g_lock);
 
     if (n < 0) {
         /* No agent, or no answer: the app gets its own dialog. */
-        return IFileDialog_Show(h->real, owner);
+        return h->orig->Show(d, owner);
     }
     if (n == 0) {
         /* Cancelled, and reported exactly as the shell reports a cancel. */
@@ -450,32 +507,33 @@ static HRESULT STDMETHODCALLTYPE hook_Show(IFileOpenDialog *d, HWND owner)
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE hook_GetResult(IFileOpenDialog *d, IShellItem **out)
+static HRESULT STDMETHODCALLTYPE hook_GetResult(IFileDialog *d, IShellItem **out)
 {
-    HookedDialog *h = self_of(d);
-    if (!h->answered || h->npaths < 1)
-        return IFileDialog_GetResult(h->real, out);
-    return SHCreateItemFromParsingName(h->paths[0], NULL, &IID_IShellItem, (void **)out);
+    DialogHook *h = hook_of(d);
+    if (h->npaths < 1) return h->orig->GetResult(d, out);
+
+    PIDLIST_ABSOLUTE id = id_list_of(h->paths[0]);
+    if (!id) return E_FAIL;
+    HRESULT hr = SHCreateItemFromIDList(id, &IID_IShellItem, (void **)out);
+    CoTaskMemFree(id);
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE hook_GetResults(IFileOpenDialog *d, IShellItemArray **out)
 {
-    HookedDialog *h = self_of(d);
-    if (!h->answered || h->npaths < 1)
-        /* Not ours to answer, so the shell's own, reached through the longer
-           table this one came in on. */
-        return ((IFileOpenDialogVtbl *)h->real->lpVtbl)
-            ->GetResults((IFileOpenDialog *)h->real, out);
+    DialogHook *h = hook_of((IFileDialog *)d);
+    if (h->npaths < 1)
+        return ((const IFileOpenDialogVtbl *)h->orig)->GetResults(d, out);
 
     /* PIDLIST_ABSOLUTE, not ITEMIDLIST *: MSVC marks it __unaligned. */
     PIDLIST_ABSOLUTE *ids =
         (PIDLIST_ABSOLUTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                       sizeof(PIDLIST_ABSOLUTE) * h->npaths);
     if (!ids) return E_OUTOFMEMORY;
-    HRESULT hr = E_OUTOFMEMORY;
+    HRESULT hr = E_FAIL;
     int made = 0;
     for (int i = 0; i < h->npaths; i++) {
-        ids[made] = ILCreateFromPathW(h->paths[i]);
+        ids[made] = id_list_of(h->paths[i]);
         if (ids[made]) made++;
     }
     if (made > 0)
@@ -485,43 +543,35 @@ static HRESULT STDMETHODCALLTYPE hook_GetResults(IFileOpenDialog *d, IShellItemA
     return hr;
 }
 
-/* Takes over a dialog the shell just made: copies its vtable, points the
-   methods that matter at ours, and leaves the object pointing here. */
-static IFileDialog *wrap(IFileDialog *real, int is_save)
+/* Takes over a dialog the shell just made, through the interface pointer
+   that carries its full table: copies the table, points the methods that
+   matter at ours, and points the object at the copy. */
+static void patch_dialog(IFileDialog *d, int is_save)
 {
-    HookedDialog *h =
-        (HookedDialog *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(HookedDialog));
-    if (!h) return real;
+    if (d->lpVtbl->Show == hook_Show) return; /* already ours */
+    DialogHook *h =
+        (DialogHook *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DialogHook));
+    if (!h) return;
 
-    h->ref = 1;
-    h->real = real;
+    h->orig = d->lpVtbl;
     h->is_save = is_save;
-    /* Only as many slots as the object's own table really has: a save
-       dialog's stops at GetFilter, and reading past that would be reading
-       whatever the next thing in memory happens to be. */
-    copy_bytes(&h->vtbl, real->lpVtbl,
-            is_save ? sizeof(IFileDialogVtbl) : sizeof(IFileOpenDialogVtbl));
-    h->vtbl.QueryInterface = hook_QueryInterface;
-    h->vtbl.AddRef = hook_AddRef;
-    h->vtbl.Release = hook_Release;
-    h->vtbl.Show = hook_Show;
-    h->vtbl.GetResult = hook_GetResult;
-    /* GetResults only exists on the open dialog, and only that one is ever
-       asked for it. */
-    if (!is_save) h->vtbl.GetResults = hook_GetResults;
-
-    h->lpVtbl = &h->vtbl;
-    IFileDialog_AddRef(real); /* held for our own lifetime */
-    real->lpVtbl = (CONST_VTBL IFileDialogVtbl *)&h->vtbl;
-    return (IFileDialog *)h;
+    copy_bytes(&h->vtbl, d->lpVtbl,
+               is_save ? sizeof(IFileSaveDialogVtbl) : sizeof(IFileOpenDialogVtbl));
+    h->vtbl.base.Release = hook_Release;
+    h->vtbl.base.Show = hook_Show;
+    h->vtbl.base.GetResult = hook_GetResult;
+    if (!is_save) h->vtbl.open.GetResults = hook_GetResults;
+    d->lpVtbl = &h->vtbl.base;
 }
 
 /* ------------------------------------------------ the older functions */
 
-/* Fills the caller's buffer for GetOpenFileNameW and GetSaveFileNameW. The
-   shell writes one path, or, when OFN_ALLOWMULTISELECT is set, the folder
-   first and then each name, each double-null terminated. Both are produced
-   here. */
+/* Fills the caller's buffer for GetOpenFileNameW and GetSaveFileNameW the
+   way the shell does: one full path, or, for an Explorer-style multiple
+   selection, the folder and then each name, each null-terminated and the
+   whole ending on an extra null. Also the offsets apps read the name and
+   extension through. FALSE for anything it cannot produce exactly, which
+   shows the real dialog. */
 static BOOL fill_legacy(OPENFILENAMEW *ofn, wchar_t picks[][MAX_PATH_LEN], int n)
 {
     wchar_t *buf = ofn->lpstrFile;
@@ -529,103 +579,142 @@ static BOOL fill_legacy(OPENFILENAMEW *ofn, wchar_t picks[][MAX_PATH_LEN], int n
     if (!buf || cap == 0) return FALSE;
 
     if (n == 1) {
-        if (wlen(picks[0]) + 1 > cap) return FALSE;
-        for (size_t i = 0; i <= wlen(picks[0]); i++) buf[i] = picks[0][i];
+        const wchar_t *path = picks[0];
+        size_t len = wlen(path);
+        size_t name = name_offset(path);
+        if (len + 1 > cap || len > 0xffff) return FALSE;
+
+        /* Past the last dot in the name; the terminating null if there is
+           none; zero if the name ends in one. */
+        size_t ext = len;
+        for (size_t i = len; i > name; i--) {
+            if (path[i - 1] == L'.') {
+                ext = i == len ? 0 : i;
+                break;
+            }
+        }
+        copy_bytes(buf, path, (len + 1) * sizeof(wchar_t));
+        ofn->nFileOffset = (WORD)name;
+        ofn->nFileExtension = (WORD)ext;
+        if (ofn->lpstrFileTitle && ofn->nMaxFileTitle > len - name)
+            copy_bytes(ofn->lpstrFileTitle, path + name, (len - name + 1) * sizeof(wchar_t));
         return TRUE;
     }
-    if (!(ofn->Flags & OFN_ALLOWMULTISELECT)) return FALSE;
 
-    /* The shared folder, then each name after it. */
+    /* Several only where several were asked for, and only in the Explorer
+       format: the old one separates names with spaces. */
+    if (!(ofn->Flags & OFN_ALLOWMULTISELECT) || !(ofn->Flags & OFN_EXPLORER)) return FALSE;
+
+    /* One folder holds them all, or the format cannot say where each is. */
     const wchar_t *first = picks[0];
-    const wchar_t *slash = last_sep(first);
-    size_t dir_len = slash ? (size_t)(slash - first) + 1 : 0;
-    if (!dir_len) return FALSE;
+    size_t name = name_offset(first);
+    if (!name) return FALSE;
+    for (int i = 1; i < n; i++) {
+        if (name_offset(picks[i]) != name) return FALSE;
+        for (size_t k = 0; k < name; k++)
+            if (picks[i][k] != first[k]) return FALSE;
+    }
+
+    /* The folder without its trailing separator, except a drive's root,
+       which the shell writes as "C:\". */
+    size_t dir_len = name - 1;
+    if (dir_len == 2 && first[1] == L':') dir_len = 3;
 
     size_t need = dir_len + 1;
-    for (int i = 0; i < n; i++) {
-        const wchar_t *base = last_sep(picks[i]);
-        need += (base ? wlen(base + 1) : wlen(picks[i])) + 1;
-    }
-    if (need + 1 > cap) return FALSE;
+    for (int i = 0; i < n; i++) need += wlen(picks[i] + name) + 1;
+    if (need + 1 > cap || dir_len + 1 > 0xffff) return FALSE;
 
     wchar_t *p = buf;
     copy_bytes(p, first, dir_len * sizeof(wchar_t));
     p += dir_len;
     *p++ = 0;
     for (int i = 0; i < n; i++) {
-        const wchar_t *base = last_sep(picks[i]);
-        base = base ? base + 1 : picks[i];
-        size_t len = wlen(base) + 1;
-        copy_bytes(p, base, len * sizeof(wchar_t));
+        size_t len = wlen(picks[i] + name) + 1;
+        copy_bytes(p, picks[i] + name, len * sizeof(wchar_t));
         p += len;
     }
-    *p = 0; /* the extra null the shell's own multi-select format ends on */
+    *p = 0; /* the extra null the multi-select format ends on */
+    ofn->nFileOffset = (WORD)(dir_len + 1);
+    ofn->nFileExtension = 0;
+    return TRUE;
+}
+
+static BOOL legacy_dialog(OPENFILENAMEW *ofn, BOOL save)
+{
+    int n = -1;
+    BOOL filled = FALSE;
+    if (ofn) {
+        EnterCriticalSection(&g_lock);
+        n = ask(save ? "save" : "open",
+                (!save && (ofn->Flags & OFN_ALLOWMULTISELECT)) ? TRUE : FALSE, FALSE, g_picks);
+        if (n > 0) filled = fill_legacy(ofn, g_picks, n);
+        LeaveCriticalSection(&g_lock);
+    }
+    if (n == 0) return FALSE; /* cancelled */
+    if (!filled) return save ? GetSaveFileNameW(ofn) : GetOpenFileNameW(ofn);
+    ofn->nFilterIndex = 1;
     return TRUE;
 }
 
 static BOOL WINAPI hook_GetOpenFileNameW(OPENFILENAMEW *ofn)
 {
-    if (!ofn || !g_ready) return GetOpenFileNameW(ofn);
-    wchar_t picks[MAX_PATHS][MAX_PATH_LEN];
-    int n;
-    EnterCriticalSection(&g_lock);
-    n = ask("open", (ofn->Flags & OFN_ALLOWMULTISELECT) ? TRUE : FALSE, FALSE, picks);
-    LeaveCriticalSection(&g_lock);
-    if (n < 0) return GetOpenFileNameW(ofn);
-    if (n == 0) return FALSE; /* cancelled */
-    if (!fill_legacy(ofn, picks, n)) return GetOpenFileNameW(ofn);
-    ofn->nFilterIndex = 1;
-    return TRUE;
+    return legacy_dialog(ofn, FALSE);
 }
 
 static BOOL WINAPI hook_GetSaveFileNameW(OPENFILENAMEW *ofn)
 {
-    if (!ofn || !g_ready) return GetSaveFileNameW(ofn);
-    wchar_t picks[MAX_PATHS][MAX_PATH_LEN];
-    int n;
-    EnterCriticalSection(&g_lock);
-    n = ask("save", FALSE, FALSE, picks);
-    LeaveCriticalSection(&g_lock);
-    if (n < 0) return GetSaveFileNameW(ofn);
-    if (n == 0) return FALSE;
-    if (!fill_legacy(ofn, picks, n)) return GetSaveFileNameW(ofn);
-    ofn->nFilterIndex = 1;
-    return TRUE;
+    return legacy_dialog(ofn, TRUE);
 }
 
 /* ------------------------------------------------------------- CoCreate */
 
-typedef HRESULT(WINAPI *CoCreateInstanceFn)(REFCLSID, LPUNKNOWN, DWORD, REFIID, LPVOID);
-static CoCreateInstanceFn g_real_cocreate = NULL;
-
+/* CoCreateInstance here is the hook's own import, which nothing patches, so
+   it is always the real one. */
 static HRESULT WINAPI hook_CoCreateInstance(REFCLSID rclsid, LPUNKNOWN pUnk, DWORD dwClsContext,
                                             REFIID riid, LPVOID ppv)
 {
-    HRESULT hr = g_real_cocreate(rclsid, pUnk, dwClsContext, riid, ppv);
-    if (FAILED(hr) || !ppv || !g_ready) return hr;
+    HRESULT hr = CoCreateInstance(rclsid, pUnk, dwClsContext, riid, (void **)ppv);
+    if (FAILED(hr) || !ppv || !*(void **)ppv) return hr;
 
-    ensure_ids();
     int is_save;
-    if (same_guid(rclsid, &g_clsid_open))
+    if (same_guid(rclsid, &CLSID_FileOpenDialog))
         is_save = 0;
-    else if (same_guid(rclsid, &g_clsid_save))
+    else if (same_guid(rclsid, &CLSID_FileSaveDialog))
         is_save = 1;
     else
         return hr; /* some other COM object entirely */
 
-    /* Apps ask for whichever of the three dialog interfaces they need, and
-       the one they get back is what they go on to call Show through. */
-    if (!same_guid(riid, &g_iid_dialog) && !same_guid(riid, &g_iid_open) &&
-        !same_guid(riid, &g_iid_save))
-        return hr;
-
-    IFileDialog *dlg = *(IFileDialog **)ppv;
-    if (!dlg) return hr;
-    *(IFileDialog **)ppv = wrap(dlg, is_save);
+    /* Whatever the app asked for, the dialog interface is what Show is
+       called through, and asking for the most derived one gives the
+       pointer whose table is that long. It is the same pointer the app gets
+       for IFileDialog too. */
+    IUnknown *unk = *(IUnknown **)ppv;
+    IFileDialog *dlg = NULL;
+    if (SUCCEEDED(IUnknown_QueryInterface(unk, is_save ? &IID_IFileSaveDialog : &IID_IFileOpenDialog,
+                                          (void **)&dlg)) &&
+        dlg) {
+        patch_dialog(dlg, is_save);
+        IFileDialog_Release(dlg);
+    }
     return hr;
 }
 
 /* ---------------------------------------------------- import patching */
+
+/* Writes one import table slot. The loader makes the table read-only once
+   it has filled it, so it is made writable for the write and put back. */
+static void write_slot(void **slot, void *value)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(slot, &mbi, sizeof(mbi))) return;
+    /* Keep execute where the page had it: other code may share the page. */
+    DWORD exec = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    DWORD writable = (mbi.Protect & exec) ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+    DWORD old;
+    if (!VirtualProtect(slot, sizeof(*slot), writable, &old)) return;
+    InterlockedExchangePointer(slot, value);
+    VirtualProtect(slot, sizeof(*slot), old, &old);
+}
 
 /* Replaces one entry in a module's import table. The shell's dialogs are
    reached through imports, so this is where a call the app makes directly
@@ -658,7 +747,7 @@ static void patch_imports(HMODULE mod, const char *module, const char *name, voi
             PIMAGE_IMPORT_BY_NAME n =
                 (PIMAGE_IMPORT_BY_NAME)((BYTE *)mod + lookup->u1.AddressOfData);
             if (!same_str((const char *)n->Name, name)) continue;
-            InterlockedExchangePointer((PVOID *)&patch->u1.Function, replacement);
+            write_slot((void **)&patch->u1.Function, replacement);
             return;
         }
     }
@@ -666,6 +755,18 @@ static void patch_imports(HMODULE mod, const char *module, const char *name, voi
 
 /* ------------------------------------------------------------- entry */
 
+/* The DLLs an exe can import CoCreateInstance from: ole32 classically,
+   combase or the API set on newer SDKs. */
+static const char *const com_modules[] = {
+    "ole32.dll",
+    "combase.dll",
+    "api-ms-win-core-com-l1-1-0.dll",
+    "api-ms-win-core-com-l1-1-1.dll",
+};
+
+/* Runs under the loader lock, so it only reads the environment and patches
+   memory: no other library is loaded and nothing is waited on. The pipe is
+   connected on the first dialog. */
 BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved)
 {
     (void)self;
@@ -673,39 +774,17 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID reserved)
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
 
     /* Off before anything the app starts can inherit it. */
-    wchar_t name[256];
-    DWORD got = GetEnvironmentVariableW(L"OCU_PANEL_PIPE", name, 256);
+    DWORD cap = (DWORD)(sizeof(g_pipe_name) / sizeof(g_pipe_name[0]));
+    DWORD got = GetEnvironmentVariableW(L"OCU_PANEL_PIPE", g_pipe_name, cap);
     SetEnvironmentVariableW(L"OCU_PANEL_PIPE", NULL);
-    if (!got || got >= 256) return TRUE; /* not ours to do anything with */
-
-    ensure_ids();
-
-    /* Opened once and kept: a pipe serves one client at a time, and there
-       is exactly one client here, the app itself. */
-    g_pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                         FILE_ATTRIBUTE_NORMAL, NULL);
-    if (g_pipe == INVALID_HANDLE_VALUE) return TRUE;
+    if (!got || got >= cap) return TRUE; /* not ours to do anything with */
 
     InitializeCriticalSection(&g_lock);
 
-    HMODULE exe = GetModuleHandleA(NULL);
-    HMODULE ole32 = GetModuleHandleA("ole32.dll");
-    /* comdlg32 is loaded on demand, so it may not be there yet. Without it
-       only the modern route works; nothing else is affected. */
-    HMODULE comdlg = LoadLibraryA("comdlg32.dll");
-
-    g_ready = TRUE;
-
-    if (exe && ole32) {
-        FARPROC p = GetProcAddress(ole32, "CoCreateInstance");
-        if (p) {
-            g_real_cocreate = (CoCreateInstanceFn)(void *)p;
-            patch_imports(exe, "ole32.dll", "CoCreateInstance", (void *)hook_CoCreateInstance);
-        }
-    }
-    if (exe && comdlg) {
-        patch_imports(exe, "comdlg32.dll", "GetOpenFileNameW", (void *)hook_GetOpenFileNameW);
-        patch_imports(exe, "comdlg32.dll", "GetSaveFileNameW", (void *)hook_GetSaveFileNameW);
-    }
+    HMODULE exe = GetModuleHandleW(NULL);
+    for (size_t i = 0; i < sizeof(com_modules) / sizeof(com_modules[0]); i++)
+        patch_imports(exe, com_modules[i], "CoCreateInstance", (void *)hook_CoCreateInstance);
+    patch_imports(exe, "comdlg32.dll", "GetOpenFileNameW", (void *)hook_GetOpenFileNameW);
+    patch_imports(exe, "comdlg32.dll", "GetSaveFileNameW", (void *)hook_GetSaveFileNameW);
     return TRUE;
 }

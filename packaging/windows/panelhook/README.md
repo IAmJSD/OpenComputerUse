@@ -20,17 +20,26 @@ in the app's image is replaced. 32-bit apps are skipped.
 
 ## What it hooks
 
-- `CoCreateInstance` in the exe's import table. For `CLSID_FileOpenDialog`
-  and `CLSID_FileSaveDialog` it wraps the real object so `Show` asks the
-  agent and `GetResult`/`GetResults` return its answer.
+- `CoCreateInstance` in the exe's import table (from ole32, combase or the
+  COM API set). For `CLSID_FileOpenDialog` and `CLSID_FileSaveDialog` it
+  patches the new object's vtable in place, so `Show` asks the agent and
+  `GetResult`/`GetResults` return its answer. Every other method is the
+  shell's own.
 - `GetOpenFileNameW` and `GetSaveFileNameW` from comdlg32, wrapped whole.
+  Multiple selection is answered only in the Explorer format, and only when
+  every pick is in one folder.
 
-Delay-loaded imports are not patched, so those apps show their own dialog.
+Only the exe's own imports are patched. Dialogs opened from a DLL (Qt,
+Chromium or Electron, .NET, MFC) or through a delay-loaded import show the
+real dialog, and are answered over UI Automation as usual.
 
 ## Protocol
 
 The pipe name arrives in `OCU_PANEL_PIPE`, which `DllMain` clears so child
-processes do not inherit it. The hook connects once and, per dialog:
+processes do not inherit it. The hook connects on the first dialog, not at
+load, and keeps the connection. If an exchange times out or the pipe
+breaks, it hangs up, so a late reply can't answer the next dialog, and the
+next dialog reconnects. Per dialog:
 
 ```
 ->  {"pid":N,"kind":"open"|"save","multiple":bool,"folders":bool}
@@ -39,7 +48,9 @@ processes do not inherit it. The hook connects once and, per dialog:
 ```
 
 A cancel returns `HRESULT_FROM_WIN32(ERROR_CANCELLED)`. No reply within 30
-seconds, or no pipe, shows the real dialog. The agent's side is
+seconds, no pipe, or a reply the hook cannot follow in full (no `paths`,
+more than 16 paths, or a path over 1023 UTF-16 units) shows the real
+dialog. The agent's side is
 `crates/ocu-windows/src/hook.rs`, which takes the pid from the pipe, not
 the request.
 
