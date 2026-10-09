@@ -11,10 +11,19 @@
 //! `unlock` skips the self-lock (lock the Mac yourself first); `watch` stays
 //! alive with the input guard armed, to see a local touch relock.
 
+// The lock module this drives is macOS-only, so off macOS the example is an
+// empty program rather than a build error (CI builds every target everywhere).
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("the unlock example is macOS-only");
+}
+
+#[cfg(target_os = "macos")]
+use ocu_macos::lock;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
-use ocu_macos::lock;
-
+#[cfg(target_os = "macos")]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     println!("locked before: {}", lock::screen_is_locked());
