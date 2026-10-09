@@ -23,6 +23,9 @@ Computer use that runs in the background. Start a session with an app (start_ses
 screenshot and get_ui_tree to look; click, type_text, press_key, scroll, drag, set_value and element_action to act. \
 Actions return a fresh screenshot by default (screenshot: false skips it; ui_tree: true adds the accessibility tree). \
 Prefer element ids from the tree (click with element: \"e12\") over coordinates: they work reliably on background windows. \
+For apps on a phone, tablet, iOS simulator or Android emulator, start the session with phone_start_session, \
+ios_simulator_start_session or android_emulator_start_session (the matching *_list and *_apps tools show what is there); \
+the same tools then drive it, with taps for clicks and swipes for drags and scrolls. \
 When run_recipe is listed, it performs a fixed list of steps itself using a fast decision model. \
 End sessions with end_session when done; they also end when this server exits.";
 

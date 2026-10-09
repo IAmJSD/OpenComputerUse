@@ -41,10 +41,17 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 | `wait` | Let the app catch up |
 | `run_recipe` | Run a fixed list of steps with a decision model (see below) |
 | `permissions` | What the OS needs granted, and whether it is |
+| `phone_list`, `phone_apps`, `phone_start_session` | Phones and tablets connected to this computer (Android over adb; iPhones and iPads on macOS) |
+| `ios_simulator_list`, `ios_simulator_apps`, `ios_simulator_start_session` | iOS simulators (macOS only) |
+| `android_emulator_list`, `android_emulator_apps`, `android_emulator_start_session` | Android emulators (listed when the emulator is installed) |
 
 Every action returns a fresh screenshot unless you pass `screenshot: false`.
 Pass `ui_tree: true` to also get the tree. Coordinates are points from the
 window's top-left, the same grid as its screenshot.
+
+The `*_start_session` tools for devices return an ordinary session id, and
+every other tool works on it (see [Phones, tablets, simulators and
+emulators](#phones-tablets-simulators-and-emulators-cratesocu-mobile)).
 
 ## Recipes
 
@@ -136,6 +143,94 @@ docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm ocu-l
 - **Input:** window messages posted to the control under the point, or to
   the focused control.
 - **Tree and element actions:** UI Automation.
+
+### Phones, tablets, simulators and emulators (`crates/ocu-mobile`)
+
+Sessions on devices take the same tools as desktop ones. Coordinates are
+points (iOS) or density-independent pixels (Android), and screenshots are
+scaled to match. A click is a tap, a right click a long press, `drag` a
+swipe, and `scroll` swipes the content by `dx`/`dy`. `press_key` also takes
+the device's buttons: `home`, `back` and `recents` (Android), `power`,
+`volume_up`, `volume_down`. There is no hovering, so `move_mouse` fails.
+
+On macOS the app owns device sessions, as it does desktop ones. Elsewhere
+the MCP server does. Downloads and emulator logs go in the settings
+directory's `mobile` folder.
+
+**Android** (any desktop) is driven over adb. It needs Android's
+platform-tools, found through `$ANDROID_HOME`, `$ANDROID_SDK_ROOT`, Android
+Studio's and Homebrew's SDK locations, then `PATH` (or `$OCU_ADB`).
+
+- **Phones:** turn on USB debugging (or wireless debugging) and accept the
+  prompt. `phone_list` says what a device still needs.
+- **Emulators:** the `android_emulator_*` tools are listed when the emulator
+  is installed. A session on an emulator that isn't running boots its AVD
+  headless and shuts it down when the last session on it ends.
+- **The helper:** sessions push OpenComputerUse's APK
+  (`OpenComputerUse.apk` from the matching release, fetched once) to
+  `/data/local/tmp` and run its shell helper with `app_process`, the way
+  scrcpy runs its server. Nothing is installed. The helper gives the app a
+  private virtual display, so the phone's own screen, pointer and keyboard
+  are left alone. It also reads the accessibility tree through
+  `UiAutomation`, injects input into that display, and types any Unicode
+  text into the focused field. This needs Android 11 (API 30) or later.
+  `main_display: true` runs the app on the device's own screen instead, for
+  apps that refuse a secondary display. `home` and `recents` aren't
+  available on a private display, since it has no launcher.
+- **Without the helper** (an older Android, or no APK), sessions use the
+  device's own screen with adb's `input`, `screencap` and
+  `uiautomator dump`. That only types ASCII.
+- **Launching:** `app` is a package, which starts its launcher activity, or
+  an activity such as `com.android.settings/.Settings`. `args` are passed to
+  `am start`, for example `["-d", "https://example.com"]`.
+
+**iOS** (macOS, with Xcode) is driven through Appium's
+[WebDriverAgent](https://github.com/appium/WebDriverAgent), the XCUITest
+server; `OCU_WDA_VERSION` picks another release.
+
+- **Simulators:** the `ios_simulator_*` tools use WebDriverAgent's prebuilt
+  simulator runner. The app bundles it, made universal, signed, notarized
+  on its own (the notary service doesn't look inside the tarball) and packed
+  with xz by `scripts/wda-sim-runner.sh` (3.8 MB, with WebDriverAgent's BSD
+  licence beside it), and unpacks it once, so nothing is downloaded. A build
+  outside the app downloads it from WebDriverAgent's release once. A session boots the
+  simulator headless if it isn't running, so nothing appears on screen.
+  `show_window: true` opens Simulator.app. The simulator shuts down when the
+  last session that booted it ends.
+- **iPhones and iPads:** the device has to be paired and in Developer Mode.
+  The first session builds WebDriverAgent from source with `xcodebuild` and
+  signs it with your Apple development team, taken from your "Apple
+  Development" certificate or `OCU_IOS_TEAM`; Xcode must be signed in to that
+  team. That takes a few minutes once. It's built again by itself when its
+  provisioning profile expires (after a week on a free Apple account) or
+  doesn't yet include the device, or when the device refuses its signature. It's installed and launched with
+  `devicectl` and reached over CoreDevice's tunnel, so USB or the local
+  network both work. The app runs on the device's screen, so keep the device
+  unlocked.
+- **Launching:** `app` is a bundle id, and `args` and `env` are the app's
+  launch arguments and environment. The `*_apps` tools list bundle ids.
+
+Developer builds use `dist/OpenComputerUse.apk` from this checkout
+(`android/build.sh`), or `OCU_ANDROID_APK`.
+
+### An Android phone as a host (`android/`)
+
+The same APK is also an app that makes a phone a host by itself, with no
+computer: other devices drive the phone's apps over HTTP, the way they drive
+a computer's [Other devices](#other-devices-http) server. It uses the same
+API, keys, skill and hosts file. An accessibility service reads the screen
+and taps, swipes and types, and a foreground service serves on port 8642.
+
+Install `OpenComputerUse.apk` from the release, open it, turn it on in
+Accessibility settings, turn on **Serve over HTTP**, and tap **Generate
+key…** for each device that will drive the phone. A phone offers the
+session tools only, for apps on itself. The app's own screen, where keys are
+made, can't be reached over HTTP. See [android/README.md](android/README.md),
+including setup over adb.
+
+The skill is the same from every host, phones included.
+`opencomputeruse skill` prints it, and the app ships that text as
+`android/res/raw/skill.md`. The tests fail when the two differ.
 
 ## Install into a client
 
@@ -245,8 +340,8 @@ Set `OCU_LOG=debug` for logs on stderr. The macOS agent logs to
 Bump `version` in `Cargo.toml`, commit, and push a matching tag (`v0.2.0`).
 `.github/workflows/release.yml` builds the signed universal app
 (`OpenComputerUse.zip` for the updater, `OpenComputerUse.dmg` for first
-installs) and plain Linux and Windows binaries of the MCP server, then
-publishes them as a GitHub release. The app checks for releases daily and from
+installs), plain Linux and Windows binaries of the MCP server, and
+`OpenComputerUse.apk` for Android, then publishes them as a GitHub release. The app checks for releases daily and from
 its menu, and installs them in place when they are signed by the same team.
 
 After the release is published, bump `version` and `sha256` in
@@ -257,6 +352,11 @@ The macOS job signs and notarizes with these repository secrets, and builds
 unsigned without them: `MACOS_CERT_P12_BASE64`, `MACOS_CERT_P12_PASSWORD`
 (a Developer ID Application certificate), `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID`.
+
+The Android job builds `OpenComputerUse.apk` with `android/build.sh` and
+signs it with `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD` and
+`ANDROID_KEY_ALIAS`. Without them it signs with a throwaway key, which is
+fine for the helper but stops the phone app updating in place.
 
 ## Development
 

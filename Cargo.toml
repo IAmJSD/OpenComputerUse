@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ocu-core", "crates/ocu-macos", "crates/ocu-linux", "crates/ocu-windows"]
+members = ["crates/ocu-core", "crates/ocu-macos", "crates/ocu-linux", "crates/ocu-windows", "crates/ocu-mobile"]
 
 [workspace.package]
 version = "0.4.0"
@@ -32,6 +32,8 @@ path = "src/main.rs"
 
 [dependencies]
 ocu-core.workspace = true
+# Phones, tablets, iOS simulators and Android emulators.
+ocu-mobile = { path = "crates/ocu-mobile" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }

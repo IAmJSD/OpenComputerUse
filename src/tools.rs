@@ -4,8 +4,8 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
 
 use ocu_core::{
-    Action, Handler, LaunchSpec, MouseButton, Observe, Request, Response, Screenshot, TreeOptions,
-    UiNode,
+    Action, DeviceKind, DeviceQuery, DeviceTarget, Handler, LaunchSpec, MouseButton, Observe,
+    Request, Response, Screenshot, TreeOptions, UiNode,
 };
 
 use crate::recipe;
@@ -55,18 +55,134 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 const COORDS: &str =
     "Coordinates are points from the window's top-left: the pixel grid of its screenshot.";
 
+/// The tools this server offers.
 pub fn list() -> Vec<Value> {
     let mut tools = base_tools();
-    #[cfg(target_os = "macos")]
-    tools.push(tool(
-        "unlock_screen",
-        "Unlock the Mac if its screen is locked, so sessions can keep working. Does nothing when already unlocked. Needs \"Work while the Mac is locked\" turned on in settings.",
-        json!({}),
-        &[],
+    if cfg!(target_os = "macos") {
+        tools.push(unlock_tool());
+    }
+    tools.extend(device_tools(
+        cfg!(target_os = "macos"),
+        ocu_mobile::android_emulator_installed(),
     ));
     if recipe::available() {
         tools.push(recipe::tool_definition());
     }
+    tools
+}
+
+/// Every tool any host may offer, whatever this one has: what the skill
+/// for other devices describes, so it reads the same from every host (the
+/// Android app ships the same text).
+pub fn catalog() -> Vec<Value> {
+    let mut tools = base_tools();
+    tools.push(unlock_tool());
+    tools.extend(device_tools(true, true));
+    tools.push(recipe::tool_definition());
+    tools
+}
+
+fn unlock_tool() -> Value {
+    tool(
+        "unlock_screen",
+        "Unlock the Mac if its screen is locked, so sessions can keep working. Does nothing when already unlocked. Needs \"Work while the Mac is locked\" turned on in settings.",
+        json!({}),
+        &[],
+    )
+}
+
+/// The tools for mobile devices: iOS simulators (`ios`, on a Mac),
+/// Android emulators (`emulator`, when it is installed), and connected
+/// phones always. Their sessions take every other tool, as desktop
+/// sessions do.
+fn device_tools(ios: bool, emulator: bool) -> Vec<Value> {
+    let mut tools = Vec::new();
+    let then = "Then drive it with the same session tools as a desktop app (screenshot, get_ui_tree, click, type_text, press_key, scroll, drag, set_value, element_action). Coordinates are points, the grid of its screenshots; click is a tap, a right click a long press, drag a swipe, and scroll swipes the content.";
+    let args_prop =
+        |what: &str| json!({ "type": "array", "items": { "type": "string" }, "description": what });
+    if ios {
+        let sim_prop = json!({ "type": "string", "description": "The simulator's name (\"iPhone 17 Pro\") or UDID. Defaults to the running one, else the newest iPhone." });
+        tools.push(tool(
+            "ios_simulator_list",
+            "List this Mac's iOS simulators: name, UDID, iOS version and whether each is booted.",
+            json!({}),
+            &[],
+        ));
+        tools.push(tool(
+            "ios_simulator_apps",
+            "List the apps installed on an iOS simulator, with the bundle ids ios_simulator_start_session takes. Boots it briefly if it isn't running.",
+            json!({ "simulator": sim_prop }),
+            &[],
+        ));
+        tools.push(tool(
+            "ios_simulator_start_session",
+            &format!("Start an app on an iOS simulator and get a session id. The simulator boots headless if it isn't running (shut down again when the session ends), so nothing appears on the Mac's screen, and the app is driven through WebDriverAgent (downloaded the first time). {then}"),
+            json!({
+                "app": { "type": "string", "description": "The app's bundle id, such as com.apple.mobilesafari or com.apple.Preferences." },
+                "simulator": sim_prop,
+                "show_window": { "type": "boolean", "description": "Open the Simulator app's window for it, so the user can watch. Default false." },
+                "args": args_prop("Launch arguments for the app."),
+                "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables for the app." },
+            }),
+            &["app"],
+        ));
+    }
+    if emulator {
+        let emu_prop = json!({ "type": "string", "description": "The virtual device's (AVD's) name, or a running emulator's serial (emulator-5554). Defaults to the running emulator, else the only AVD." });
+        tools.push(tool(
+            "android_emulator_list",
+            "List the Android virtual devices (AVDs) and which are running, with their serials.",
+            json!({}),
+            &[],
+        ));
+        tools.push(tool(
+            "android_emulator_apps",
+            "List the launchable apps on a running Android emulator: package and activity.",
+            json!({ "emulator": emu_prop }),
+            &[],
+        ));
+        tools.push(tool(
+            "android_emulator_start_session",
+            &format!("Start an app on an Android emulator and get a session id. The emulator boots headless if it isn't running (shut down again when the session ends). The app runs on a private virtual display unless `main_display` is set. {then}"),
+            json!({
+                "app": { "type": "string", "description": "A package (com.android.settings) or an activity (com.android.settings/.Settings)." },
+                "emulator": emu_prop,
+                "show_window": { "type": "boolean", "description": "Show the emulator's window when it boots. Default false." },
+                "main_display": { "type": "boolean", "description": "Run the app on the device's own screen instead of a private virtual display, for apps that misbehave there. Default false." },
+                "args": args_prop("Extra `am start` arguments, such as [\"-d\", \"https://example.com\"] for a link."),
+            }),
+            &["app"],
+        ));
+    }
+    let phone_prop = json!({ "type": "string", "description": "The phone's id, serial or name from phone_list. Defaults to the only connected phone." });
+    tools.push(tool(
+        "phone_list",
+        if ios {
+            "List the phones and tablets connected to this computer: Android devices over adb (USB or wireless debugging), and iPhones and iPads paired with this Mac. Says what a device still needs, such as accepting USB debugging or Developer Mode."
+        } else {
+            "List the Android phones and tablets connected to this computer over adb (USB or wireless debugging). Says what a device still needs, such as accepting the USB debugging prompt."
+        },
+        json!({}),
+        &[],
+    ));
+    tools.push(tool(
+        "phone_apps",
+        "List the apps on a connected phone: packages and activities on Android, bundle ids on iOS.",
+        json!({ "phone": phone_prop }),
+        &[],
+    ));
+    tools.push(tool(
+        "phone_start_session",
+        &format!("Start an app on a connected phone or tablet and get a session id. Android apps run on a private virtual display, so the phone's own screen is left alone (unless `main_display` is set). iPhones and iPads are driven through WebDriverAgent, which is built and signed with your Xcode account the first time (a few minutes), and the app runs on the device's screen; keep it unlocked. {then}"),
+        json!({
+            "app": { "type": "string", "description": "Android: a package or activity. iOS: a bundle id." },
+            "phone": phone_prop,
+            "main_display": { "type": "boolean", "description": "Android: run on the phone's own screen instead of a private virtual display. Default false." },
+            "args": args_prop("Android: extra `am start` arguments. iOS: launch arguments."),
+            "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "iOS: environment variables for the app." },
+        }),
+        &["app"],
+    ));
     tools
 }
 
@@ -102,7 +218,7 @@ fn base_tools() -> Vec<Value> {
     vec![
         tool(
             "start_session",
-            "Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front, unless `foreground` is set. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows.",
+            "Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front, unless `foreground` is set. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows. For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.",
             json!({
                 "app": { "type": "string", "description": "The app to start. Required unless `active_window` is set." },
                 "args": { "type": "array", "items": { "type": "string" } },
@@ -186,7 +302,7 @@ fn base_tools() -> Vec<Value> {
         ),
         tool(
             "press_key",
-            "Press keys: chords joined with +, several separated by spaces. Modifiers: cmd (meta/win/super), ctrl, alt (option), shift. Named keys: enter, tab, escape, backspace, delete, space, up, down, left, right, home, end, pageup, pagedown, f1-f24. Examples: \"cmd+s\", \"ctrl+shift+tab\", \"down down enter\".",
+            "Press keys: chords joined with +, several separated by spaces. Modifiers: cmd (meta/win/super), ctrl, alt (option), shift. Named keys: enter, tab, escape, backspace, delete, space, up, down, left, right, home, end, pageup, pagedown, f1-f24. Examples: \"cmd+s\", \"ctrl+shift+tab\", \"down down enter\". On phones and simulators, also the device's buttons: home, back (Android), recents (Android), power, volume_up, volume_down.",
             action_props(json!({ "keys": { "type": "string" } })),
             &["session_id", "keys"],
         ),
@@ -357,6 +473,36 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
     }))
 }
 
+/// Which devices a tool is about, and the argument that names one.
+fn device_kind(tool: &str) -> (DeviceKind, &'static str) {
+    if tool.starts_with("ios_simulator") {
+        (DeviceKind::IosSimulator, "simulator")
+    } else if tool.starts_with("android_emulator") {
+        (DeviceKind::AndroidEmulator, "emulator")
+    } else {
+        (DeviceKind::Phone, "phone")
+    }
+}
+
+fn devices(handler: &mut dyn Handler, query: DeviceQuery) -> Result<Value> {
+    let Response::Devices(v) = handler.handle(Request::Devices(query))? else {
+        bail!("unexpected reply")
+    };
+    Ok(v)
+}
+
+fn start(handler: &mut dyn Handler, spec: LaunchSpec) -> Result<Output> {
+    let Response::Session { info, windows } = handler.handle(Request::StartSession(spec))? else {
+        bail!("unexpected reply");
+    };
+    Ok(Output {
+        text: serde_json::to_string_pretty(
+            &json!({ "session_id": info.id, "session": info, "windows": windows }),
+        )?,
+        image: None,
+    })
+}
+
 fn tree_text(tree: &UiNode) -> String {
     format!("Accessibility tree:\n{}", tree.render())
 }
@@ -437,15 +583,50 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
                     Vec::new()
                 },
                 display_size,
+                device: None,
             };
-            let Response::Session { info, windows } =
-                handler.handle(Request::StartSession(spec))?
-            else {
-                bail!("unexpected reply");
+            start(handler, spec)
+        }
+        "ios_simulator_start_session"
+        | "android_emulator_start_session"
+        | "phone_start_session" => {
+            let (kind, id_key) = device_kind(name);
+            let spec = LaunchSpec {
+                app: str_arg(args, "app")?.to_string(),
+                args: serde_json::from_value(args.get("args").cloned().unwrap_or(json!([])))?,
+                env: serde_json::from_value(args.get("env").cloned().unwrap_or(json!({})))?,
+                device: Some(DeviceTarget {
+                    kind,
+                    id: opt_str(args, id_key),
+                    show_window: flag(args, "show_window", false),
+                    main_display: flag(args, "main_display", false),
+                }),
+                ..Default::default()
             };
-            text(serde_json::to_string_pretty(
-                &json!({ "session_id": info.id, "session": info, "windows": windows }),
-            )?)
+            start(handler, spec)
+        }
+        "ios_simulator_list" | "android_emulator_list" | "phone_list" => {
+            let (kind, _) = device_kind(name);
+            let v = devices(handler, DeviceQuery::List { kind })?;
+            if v.as_array().is_some_and(Vec::is_empty) {
+                return text(match kind {
+                    DeviceKind::IosSimulator => "There are no iOS simulators; add one in Xcode (Window › Devices and Simulators).".into(),
+                    DeviceKind::AndroidEmulator => "There are no Android virtual devices; create one in Android Studio's Device Manager.".into(),
+                    DeviceKind::Phone => "No phones are connected.".into(),
+                });
+            }
+            text(serde_json::to_string_pretty(&v)?)
+        }
+        "ios_simulator_apps" | "android_emulator_apps" | "phone_apps" => {
+            let (kind, id_key) = device_kind(name);
+            let v = devices(
+                handler,
+                DeviceQuery::Apps {
+                    kind,
+                    id: opt_str(args, id_key),
+                },
+            )?;
+            text(serde_json::to_string_pretty(&v)?)
         }
         "end_session" => {
             handler.handle(Request::EndSession {

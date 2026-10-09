@@ -36,6 +36,7 @@ USAGE:
                                           like en0,tailscale,192.168.1.0/24
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
+    opencomputeruse skill                 Print the skill other devices use to drive a host
     opencomputeruse agent [--background]  Run the macOS agent app (opening the app does this)
     sudo opencomputeruse install-lock     Enable working while the Mac is locked (macOS; one-time)
     sudo opencomputeruse uninstall-lock   Undo install-lock, restoring the normal unlock
@@ -96,6 +97,11 @@ fn run() -> Result<()> {
                 };
                 println!("{:<15} {state}", client.label());
             }
+            Ok(())
+        }
+        // The skill other devices get, as android/res/raw/skill.md holds it.
+        Some("skill") => {
+            print!("{}", remote::skill::render_generic(&tools::catalog()));
             Ok(())
         }
         Some("config-path") => {
@@ -200,7 +206,7 @@ fn run_serve(args: &[String]) -> Result<()> {
     let platform = std::sync::Arc::new(ocu_linux::LinuxPlatform::new());
     #[cfg(windows)]
     let platform = std::sync::Arc::new(ocu_windows::WindowsPlatform::new());
-    let service = ocu_core::Service::new(platform, None);
+    let service = ocu_core::Service::with_devices(platform, Some(mobile_platform()), None);
     let mut server = remote::server::HttpServer::new(service);
     let mut shown: Option<(Vec<_>, Vec<String>)> = None;
     // Follow the settings and the network: adapters gain and lose addresses.
@@ -327,6 +333,19 @@ fn run_update(check_only: bool) -> Result<()> {
     Ok(())
 }
 
+/// Phones, tablets, simulators and emulators, beside this computer's apps.
+pub fn mobile_platform() -> std::sync::Arc<ocu_mobile::MobilePlatform> {
+    // A development build uses the Android helper built in this checkout
+    // (android/build.sh); a release fetches its own version's.
+    let android_apk = cfg!(debug_assertions)
+        .then(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dist/OpenComputerUse.apk"));
+    std::sync::Arc::new(ocu_mobile::MobilePlatform::new(ocu_mobile::MobileConfig {
+        cache: config::config_dir().join("mobile"),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        android_apk,
+    }))
+}
+
 fn init_stderr_log() {
     // Stdout belongs to the protocol.
     let _ = env_logger::Builder::from_env(env_logger::Env::new().filter_or("OCU_LOG", "warn"))
@@ -348,7 +367,7 @@ fn run_mcp() -> Result<()> {
     let platform = Arc::new(ocu_linux::LinuxPlatform::new());
     #[cfg(windows)]
     let platform = Arc::new(ocu_windows::WindowsPlatform::new());
-    let service = ocu_core::Service::new(platform, None);
+    let service = ocu_core::Service::with_devices(platform, Some(mobile_platform()), None);
     let client = service.client();
     let result = mcp::serve(Box::new(client));
     // The client is gone with `serve`'s box, ending its sessions; make sure.

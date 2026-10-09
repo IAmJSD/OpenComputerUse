@@ -26,11 +26,19 @@ pub trait Platform: Send + Sync {
     fn unlock(&self) -> Result<bool> {
         bail!("this backend cannot work while the screen is locked")
     }
+
+    /// Answers a question about mobile devices (the mobile backend).
+    fn query_devices(&self, _query: &DeviceQuery) -> Result<serde_json::Value> {
+        bail!("this backend has no mobile devices")
+    }
 }
 
 /// What a session tells the registry about itself.
 #[derive(Clone, Debug, Default)]
 pub struct Description {
+    /// Which backend runs the session, when it is not the platform's own
+    /// name: "ios-simulator", "android".
+    pub backend: Option<String>,
     pub app: String,
     pub pid: Option<u32>,
     pub details: BTreeMap<String, String>,

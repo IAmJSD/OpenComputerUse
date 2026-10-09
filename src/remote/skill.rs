@@ -197,6 +197,8 @@ EOF
 {HOW_TO_WORK}
 ## Tools
 
+Not every host offers every tool. A computer offers what its system has: `unlock_screen` and the iOS simulator tools only on a Mac, the Android emulator tools when the emulator is installed, and `run_recipe` once it is set up. A phone running the OpenComputerUse app offers only the session tools, for apps on that phone. A host answers a tool it doesn't have with an error.
+
 "#
     );
     s.push_str(&tools_section(tools));
@@ -262,6 +264,17 @@ mod tests {
             key_hash: String::new(),
             created: 0,
         }
+    }
+
+    /// The Android app ships the skill as a file; it must be this one.
+    #[test]
+    fn the_android_app_ships_this_skill() {
+        let shipped = include_str!("../../android/res/raw/skill.md");
+        assert!(
+            shipped == render_generic(&crate::tools::catalog()),
+            "android/res/raw/skill.md is out of date: regenerate it with \
+             `cargo run -- skill > android/res/raw/skill.md`"
+        );
     }
 
     #[test]

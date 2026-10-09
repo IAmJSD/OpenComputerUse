@@ -317,7 +317,11 @@ pub fn run(show: bool) -> Result<()> {
     log_to_file();
     let (tx, rx) = async_channel::unbounded();
     let updates_tx = tx.clone();
-    let service = Service::new(Arc::new(ocu_macos::MacPlatform), Some(Arc::new(Bus(tx))));
+    let service = Service::with_devices(
+        Arc::new(ocu_macos::MacPlatform),
+        Some(crate::mobile_platform()),
+        Some(Arc::new(Bus(tx))),
+    );
     if let Err(e) = crate::ipc::listen(service.clone(), &socket_path()) {
         // Another copy already serves; it will show itself if reopened.
         log::info!("not starting a second agent: {e:#}");
