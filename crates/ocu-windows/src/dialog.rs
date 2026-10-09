@@ -79,7 +79,20 @@ impl Dialog {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
+        // Focused first: a save dialog takes a change to the box as the
+        // user's own only while it has focus, and otherwise saves under the
+        // name it was given.
+        let _ = unsafe { self.name.SetFocus() };
         uia.set_element_value(&self.name, &text, "the dialog's file name box")?;
+        log::info!(
+            "the dialog's file name box now holds {:?}",
+            unsafe {
+                self.name
+                    .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            }
+            .and_then(|p| unsafe { p.CurrentValue() })
+            .map(|v| v.to_string())
+        );
         // The dialog reads the box as it closes, so it needs the button
         // rather than anything we could do to the text alone.
         let accept = self
