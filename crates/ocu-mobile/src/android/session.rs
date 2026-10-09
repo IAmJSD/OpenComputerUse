@@ -610,6 +610,15 @@ impl Session for AndroidSession {
         ))
     }
 
+    fn element_point(
+        &mut self,
+        window: Option<u64>,
+        element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        let (x, y) = self.elements.get(element)?.frame.center();
+        Ok((window, x, y))
+    }
+
     fn perform(&mut self, _window: Option<u64>, action: &Action) -> Result<()> {
         match action {
             Action::Click {
@@ -652,6 +661,7 @@ impl Session for AndroidSession {
                 Ok(())
             }
             Action::ChooseFile { .. } => bail!("a phone has no file panels to answer"),
+            Action::ClickElement { .. } => unreachable!(),
         }
     }
 

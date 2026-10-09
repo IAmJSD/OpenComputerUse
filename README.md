@@ -37,7 +37,7 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 | `end_session`, `list_sessions`, `list_windows` | Manage sessions |
 | `screenshot` | Capture a session window, even a covered one; `ui_tree: true` adds the accessibility tree |
 | `get_ui_tree` | One line per element: `[e12] Button "Save" @(x,y wxh) actions=press` |
-| `click`, `move_mouse`, `drag`, `scroll` | Pointer actions at window coordinates, or `click` with `element: "e12"` |
+| `click`, `move_mouse`, `drag`, `scroll` | Pointer actions at window coordinates, or `click` with `element: "e12"`; `count: 2` or `3` double- or triple-clicks, and `click` and `drag` take held `modifiers` |
 | `type_text`, `press_key` | Text, and chords such as `cmd+s` or `ctrl+shift+tab enter` |
 | `set_value`, `element_action` | Set an element's value (including a dropdown's option), or run press, focus, showmenu, increment and similar actions |
 | `choose_file` | Answer the file picker the app is showing (macOS): the paths to pick or save to, or none to cancel. Actions say when one is waiting |

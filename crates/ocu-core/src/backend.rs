@@ -68,6 +68,17 @@ pub trait Session: Send {
         bail!("this backend has no accessibility tree")
     }
 
+    /// Where an element of the last tree read is: the window it is in
+    /// (`window` when the backend can't tell) and its centre in that
+    /// window's coordinates.
+    fn element_point(
+        &mut self,
+        _window: Option<u64>,
+        _element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        bail!("this backend has no accessibility tree; click at x/y instead")
+    }
+
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()>;
 
     /// Something about the app's state worth telling the caller after an

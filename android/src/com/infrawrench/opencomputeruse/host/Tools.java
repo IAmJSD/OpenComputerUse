@@ -165,13 +165,13 @@ final class Tools {
                         "max_nodes", prop("integer", "Default 1500.")),
                 "session_id"));
         tools.put(tool("click",
-                "Tap the screen. Give x/y, or an element id. A right click is a long press; count 2 is a double tap. " + COORDS,
+                "Tap the screen. Give x/y, or an element id. A right click is a long press; count 2 is a double tap, 3 a triple tap. " + COORDS,
                 actionProps(
                         "x", prop("number", "Where to tap x, in screen points."),
                         "y", prop("number", "Where to tap y, in screen points."),
                         "element", prop("string", "An element id from the accessibility tree (e.g. \"e12\") to tap instead of x/y: its middle when it is on screen, else its own click action."),
                         "button", buttonProp,
-                        "count", prop("integer", "2 for a double tap. Default 1."),
+                        "count", prop("integer", "2 for a double tap, 3 for a triple tap. Default 1."),
                         "modifiers", prop("string", "Not used on the phone.")),
                 "session_id"));
         tools.put(tool("move_mouse",
@@ -499,30 +499,34 @@ final class Tools {
                         && !button.equals("middle")) {
                     throw new ToolError("unknown button \"" + button + "\"");
                 }
-                if (element != null) {
-                    if (count != 1) {
-                        throw new ToolError("element clicks are single left or right clicks; use x/y for others");
-                    }
-                    if ("middle".equals(button)) {
-                        throw new ToolError("element clicks are single left or right clicks; use x/y for others");
-                    }
+                if ("middle".equals(button)) {
+                    throw new ToolError("touch screens have no middle button");
+                }
+                long n = Math.max(1, Math.min(3, count));
+                if (element != null && (n == 1 || "right".equals(button))) {
                     elementAction(s, element, "right".equals(button) ? "showmenu" : null);
+                    break;
+                }
+                double x;
+                double y;
+                if (element != null) {
+                    // Several taps land where the element shows.
+                    Tree.Element e = element(s, element);
+                    double[] spot = e.node != null && e.node.refresh() ? visibleCentre(e.node) : null;
+                    x = spot != null ? spot[0] : e.cx();
+                    y = spot != null ? spot[1] : e.cy();
                 } else {
-                    double x = num(args, "x");
-                    double y = num(args, "y");
-                    if ("middle".equals(button)) {
-                        throw new ToolError("touch screens have no middle button");
-                    }
-                    if ("right".equals(button)) {
-                        Screen.longPress(x, y);
-                    } else {
-                        long n = Math.max(1, Math.min(3, count));
-                        for (int i = 0; i < n; i++) {
-                            if (i > 0) {
-                                Screen.sleep(80);
-                            }
-                            Screen.tap(x, y);
+                    x = num(args, "x");
+                    y = num(args, "y");
+                }
+                if ("right".equals(button)) {
+                    Screen.longPress(x, y);
+                } else {
+                    for (int i = 0; i < n; i++) {
+                        if (i > 0) {
+                            Screen.sleep(80);
                         }
+                        Screen.tap(x, y);
                     }
                 }
                 break;

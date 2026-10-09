@@ -307,6 +307,19 @@ pub enum Action {
         #[serde(default)]
         modifiers: Option<String>,
     },
+    /// A click at an element's centre, for the clicks its own actions
+    /// can't make: double and triple clicks, middle clicks, held keys.
+    /// The service turns it into a [`Action::Click`] before a session sees
+    /// it.
+    ClickElement {
+        element: String,
+        #[serde(default)]
+        button: MouseButton,
+        #[serde(default = "one")]
+        count: u32,
+        #[serde(default)]
+        modifiers: Option<String>,
+    },
     MoveMouse {
         x: f64,
         y: f64,
@@ -318,6 +331,9 @@ pub enum Action {
         to_y: f64,
         #[serde(default)]
         button: MouseButton,
+        /// Held from the press to the release, as in `Click`.
+        #[serde(default)]
+        modifiers: Option<String>,
     },
     Scroll {
         x: f64,

@@ -657,8 +657,20 @@ impl Session for LinuxSession {
                 to_x,
                 to_y,
                 button,
+                modifiers,
             } => {
+                let mods = match modifiers.as_deref().filter(|s| !s.is_empty()) {
+                    Some(s) => parse_chord(s)?.modifiers,
+                    None => Modifiers::default(),
+                };
+                let mod_codes: Vec<u8> = keys::modifier_keysyms(mods)
+                    .into_iter()
+                    .map(|ks| self.keymap.code_for(&self.conn, ks).map(|(c, _)| c))
+                    .collect::<Result<_>>()?;
                 self.move_to(&w, *from_x, *from_y)?;
+                for &m in &mod_codes {
+                    self.key(m, true)?;
+                }
                 self.button(x_button(*button), true)?;
                 self.conn.flush()?;
                 for i in 1..=12 {
@@ -671,6 +683,9 @@ impl Session for LinuxSession {
                     )?;
                 }
                 self.button(x_button(*button), false)?;
+                for &m in mod_codes.iter().rev() {
+                    self.key(m, false)?;
+                }
                 self.conn.flush()?;
             }
             Action::Scroll { x, y, dx, dy } => {
@@ -714,6 +729,7 @@ impl Session for LinuxSession {
                 }
             }
             Action::ElementAction { .. }
+            | Action::ClickElement { .. }
             | Action::SetValue { .. }
             | Action::Focus { .. }
             | Action::Wait { .. }

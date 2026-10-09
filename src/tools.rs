@@ -223,9 +223,9 @@ fn base_tools() -> Vec<Value> {
     let mut click_props = point("Where to click");
     click_props.as_object_mut().unwrap().extend(
         json!({
-            "element": { "type": "string", "description": "An element id from the accessibility tree (e.g. \"e12\") to click instead of x/y. Uses the element's own press action, the most reliable way to click in a background window." },
+            "element": { "type": "string", "description": "An element id from the accessibility tree (e.g. \"e12\") to click instead of x/y. A single left or right click uses the element's own action, the most reliable way to click in a background window; other clicks land at its centre." },
             "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Default left." },
-            "count": { "type": "integer", "description": "2 for a double click. Default 1." },
+            "count": { "type": "integer", "description": "2 for a double click (selects a word, opens an item), 3 for a triple click (selects a line or paragraph). Default 1." },
             "modifiers": { "type": "string", "description": "Keys held while clicking, e.g. \"cmd\" or \"shift+alt\"." },
         })
         .as_object()
@@ -307,11 +307,12 @@ fn base_tools() -> Vec<Value> {
         ),
         tool(
             "drag",
-            &format!("Press, drag and release. {COORDS}"),
+            &format!("Press, drag and release: to select text, move or resize something, or drag an item onto another. {COORDS}"),
             action_props(json!({
                 "from_x": { "type": "number" }, "from_y": { "type": "number" },
                 "to_x": { "type": "number" }, "to_y": { "type": "number" },
                 "button": { "type": "string", "enum": ["left", "right", "middle"] },
+                "modifiers": { "type": "string", "description": "Keys held throughout, e.g. \"alt\" to copy instead of move, or \"shift\" to extend a selection." },
             })),
             &["session_id", "from_x", "from_y", "to_x", "to_y"],
         ),
@@ -446,28 +447,43 @@ fn button(args: &Value) -> Result<MouseButton> {
     })
 }
 
+/// 1, 2 or 3: single, double or triple.
+fn click_count(args: &Value) -> u32 {
+    opt_u64(args, "count").unwrap_or(1).clamp(1, 3) as u32
+}
+
 /// Builds the action a tool call names.
 pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
     Ok(Some(match name {
         "click" => match opt_str(args, "element") {
             Some(element) => {
-                let action = match (button(args)?, opt_u64(args, "count").unwrap_or(1)) {
-                    (MouseButton::Left, 1) => None,
-                    (MouseButton::Right, 1) => Some("showmenu".to_string()),
-                    _ => {
-                        bail!("element clicks are single left or right clicks; use x/y for others")
-                    }
-                };
-                Action::ElementAction {
-                    element,
-                    name: action,
+                let button = button(args)?;
+                let count = click_count(args);
+                let modifiers = opt_str(args, "modifiers").filter(|m| !m.is_empty());
+                // A plain click is the element's own action, which works
+                // wherever it is; the rest are real clicks at its centre.
+                match (button, count, &modifiers) {
+                    (MouseButton::Left, 1, None) => Action::ElementAction {
+                        element,
+                        name: None,
+                    },
+                    (MouseButton::Right, 1, None) => Action::ElementAction {
+                        element,
+                        name: Some("showmenu".to_string()),
+                    },
+                    _ => Action::ClickElement {
+                        element,
+                        button,
+                        count,
+                        modifiers,
+                    },
                 }
             }
             None => Action::Click {
                 x: num(args, "x")?,
                 y: num(args, "y")?,
                 button: button(args)?,
-                count: opt_u64(args, "count").unwrap_or(1).clamp(1, 3) as u32,
+                count: click_count(args),
                 modifiers: opt_str(args, "modifiers"),
             },
         },
@@ -481,6 +497,7 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
             to_x: num(args, "to_x")?,
             to_y: num(args, "to_y")?,
             button: button(args)?,
+            modifiers: opt_str(args, "modifiers"),
         },
         "scroll" => Action::Scroll {
             x: num(args, "x")?,
@@ -805,6 +822,31 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str().map(str::to_string))
             .collect()
+    }
+
+    #[test]
+    fn element_clicks_its_own_action_cannot_make_land_at_its_centre() {
+        let click = |args: Value| action_for("click", &args).unwrap().unwrap();
+        assert!(matches!(
+            click(json!({ "element": "e3" })),
+            Action::ElementAction { name: None, .. }
+        ));
+        assert!(matches!(
+            click(json!({ "element": "e3", "button": "right" })),
+            Action::ElementAction { name: Some(n), .. } if n == "showmenu"
+        ));
+        assert!(matches!(
+            click(json!({ "element": "e3", "count": 3 })),
+            Action::ClickElement { count: 3, .. }
+        ));
+        assert!(matches!(
+            click(json!({ "element": "e3", "modifiers": "cmd" })),
+            Action::ClickElement { count: 1, modifiers: Some(m), .. } if m == "cmd"
+        ));
+        assert!(matches!(
+            click(json!({ "x": 1, "y": 2, "count": 9 })),
+            Action::Click { count: 3, .. }
+        ));
     }
 
     // One test, so nothing else reads OCU_MOBILE while it changes.

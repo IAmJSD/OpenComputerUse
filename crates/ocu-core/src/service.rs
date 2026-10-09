@@ -336,6 +336,27 @@ impl Service {
             } => {
                 let (s, desktop) = self.session(client, &session)?;
                 let mut s = s.lock().unwrap();
+                let (window, action) = match action {
+                    Action::ClickElement {
+                        element,
+                        button,
+                        count,
+                        modifiers,
+                    } => {
+                        let (window, x, y) = s.element_point(window, &element)?;
+                        (
+                            window,
+                            Action::Click {
+                                x,
+                                y,
+                                button,
+                                count,
+                                modifiers,
+                            },
+                        )
+                    }
+                    action => (window, action),
+                };
                 let target = s
                     .windows()
                     .ok()

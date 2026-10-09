@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{anyhow, bail, Context as _, Result};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2_app_kit::{
@@ -915,6 +915,29 @@ impl Session for MacSession {
         Ok(ax::read_tree(&root, origin, opts, &mut self.elements))
     }
 
+    fn element_point(
+        &mut self,
+        window: Option<u64>,
+        element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        let el = self.elements.get(element)?.clone();
+        let f = el
+            .frame()
+            .ok_or_else(|| anyhow!("element {element} has no position"))?;
+        // Its own window, which may be a sheet or panel rather than `window`.
+        let window = el
+            .element("AXWindow")
+            .and_then(|w| w.window_id())
+            .map(|id| id as u64)
+            .or(window);
+        let w = self.window(window)?;
+        Ok((
+            Some(w.id),
+            f.origin.x + f.size.width / 2.0 - w.frame.x,
+            f.origin.y + f.size.height / 2.0 - w.frame.y,
+        ))
+    }
+
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
         if self.foreground && !matches!(action, Action::Wait { .. }) {
             let w = self.window(window).ok();
@@ -996,12 +1019,20 @@ impl Session for MacSession {
                 to_x,
                 to_y,
                 button,
-            } => input::drag(
-                &t,
-                Self::point(&w, *from_x, *from_y),
-                Self::point(&w, *to_x, *to_y),
-                *button,
-            ),
+                modifiers,
+            } => {
+                let m = match modifiers.as_deref().filter(|s| !s.is_empty()) {
+                    Some(s) => parse_chord(s)?.modifiers,
+                    None => Default::default(),
+                };
+                input::drag(
+                    &t,
+                    Self::point(&w, *from_x, *from_y),
+                    Self::point(&w, *to_x, *to_y),
+                    *button,
+                    m,
+                )
+            }
             Action::Scroll { x, y, dx, dy } => input::scroll(&t, Self::point(&w, *x, *y), *dx, *dy),
             Action::TypeText { text } => input::type_text(&t, text),
             Action::PressKey { keys } => {
@@ -1012,6 +1043,7 @@ impl Session for MacSession {
                 Ok(())
             }
             Action::ElementAction { .. }
+            | Action::ClickElement { .. }
             | Action::SetValue { .. }
             | Action::Focus { .. }
             | Action::Wait { .. }
