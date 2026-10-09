@@ -178,6 +178,54 @@ pub fn window_element(pid: i32, window_id: Option<u32>) -> Result<Element> {
         })
 }
 
+/// The deepest element of app `pid` under a screen point.
+pub fn element_at(pid: i32, at: CGPoint) -> Option<Element> {
+    let app = Element::application(pid);
+    let mut out: *const AXUIElement = std::ptr::null();
+    let err = unsafe {
+        app.0
+            .copy_element_at_position(at.x as f32, at.y as f32, NonNull::from(&mut out))
+    };
+    if err != AXError::Success || out.is_null() {
+        return None;
+    }
+    Some(Element(unsafe {
+        CFRetained::from_raw(NonNull::new_unchecked(out as *mut AXUIElement))
+    }))
+}
+
+/// Whether `inner` is `outer` or sits inside it.
+pub fn is_within(inner: &Element, outer: &Element) -> bool {
+    let outer: &CFType = &outer.0;
+    let mut cur = inner.clone();
+    for _ in 0..64 {
+        if <CFType as PartialEq>::eq(&cur.0, outer) {
+            return true;
+        }
+        match cur.element("AXParent") {
+            Some(parent) => cur = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Whether the element sits in a web page (an AXWebArea above it), as
+/// opposed to the browser's own toolbar, tabs and address bar.
+pub fn in_web_area(el: &Element) -> bool {
+    let mut cur = el.clone();
+    for _ in 0..64 {
+        if cur.string("AXRole").as_deref() == Some("AXWebArea") {
+            return true;
+        }
+        match cur.element("AXParent") {
+            Some(parent) => cur = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
 /// Element ids handed out by the last tree read.
 #[derive(Default)]
 pub struct ElementTable {

@@ -103,6 +103,12 @@ fn frontmost_pid() -> Option<i32> {
         .map(|a| a.processIdentifier())
 }
 
+/// How long a browser window stays focused after a click or press in its
+/// page. A page only gets the clipboard while its document has focus, and a
+/// Copy button often writes it after an await; give the focus back at once
+/// and the write fails with "Document is not focused".
+const PAGE_HANDLER_GRACE: Duration = Duration::from_millis(250);
+
 const CHROMIUM_FLAGS: &[&str] = &[
     "--force-renderer-accessibility",
     "--disable-backgrounding-occluded-windows",
@@ -521,6 +527,41 @@ impl MacSession {
         }
     }
 
+    /// Presses an element in a browser's page. A bare AXPress leaves the
+    /// browser's keyboard focus where it was (typing after pressing a field
+    /// goes on into the address bar) and never gives the document focus (a
+    /// Copy button fails with "Document is not focused"). When the element
+    /// is the one under its own centre this clicks there instead, which does
+    /// both; when it is scrolled away or covered, it moves keyboard focus
+    /// onto the element and presses it.
+    fn press_in_page(&mut self, el: &Element) -> Result<()> {
+        let window = el.element("AXWindow").and_then(|w| w.window_id());
+        if let (Some(id), Some(f)) = (window, el.frame()) {
+            let at = CGPoint {
+                x: f.origin.x + f.size.width / 2.0,
+                y: f.origin.y + f.size.height / 2.0,
+            };
+            let visible = f.size.width >= 1.0 && f.size.height >= 1.0;
+            if visible && ax::element_at(self.pid, at).is_some_and(|hit| ax::is_within(&hit, el)) {
+                let w = self.window(Some(id as u64))?;
+                return self.perform(
+                    Some(id as u64),
+                    &Action::Click {
+                        x: at.x - w.frame.x,
+                        y: at.y - w.frame.y,
+                        button: MouseButton::Left,
+                        count: 1,
+                        modifiers: None,
+                    },
+                );
+            }
+        }
+        if el.settable("AXFocused") {
+            let _ = el.set("AXFocused", CFBoolean::new(true));
+        }
+        el.perform("AXPress")
+    }
+
     /// Picks an option of a pop-up button (a web page's <select>) by its
     /// text. Firefox says its AXValue was set and ignores it, and neither
     /// it nor Chrome opens the menu in the background, so the option is
@@ -671,8 +712,11 @@ impl Session for MacSession {
         }
         match action {
             Action::ElementAction { element, name } => {
-                let el = self.elements.get(element)?;
+                let el = self.elements.get(element)?.clone();
                 let action = ax::action_name(name.as_deref().unwrap_or("press"));
+                if (self.chromium || self.gecko) && action == "AXPress" && ax::in_web_area(&el) {
+                    return self.press_in_page(&el);
+                }
                 return el.perform(&action);
             }
             Action::SetValue { element, value } => {
@@ -723,7 +767,10 @@ impl Session for MacSession {
                     None => Default::default(),
                 };
                 if (self.chromium || self.gecko) && *button == MouseButton::Left {
-                    input::click_chromium(&t, Self::point(&w, *x, *y), *count, m)
+                    let clicked = input::click_chromium(&t, Self::point(&w, *x, *y), *count, m);
+                    // Keep the window focused while the page handles it.
+                    sleep(PAGE_HANDLER_GRACE);
+                    clicked
                 } else {
                     input::click(&t, Self::point(&w, *x, *y), *button, *count, m)
                 }
