@@ -42,6 +42,9 @@ jobs:
                 UPDATE t SET service = 'kTCCServiceSystemPolicyAppBundles';
                 INSERT OR REPLACE INTO access SELECT * FROM t;"
             done
+            # tccd caches the database; restart it so the grant is seen.
+            sudo killall tccd || true
+            killall tccd || true
           fi
 
       - uses: ilammy/msvc-dev-cmd@v1

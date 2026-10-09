@@ -1043,7 +1043,7 @@ impl Session for MacSession {
             ));
         }
         let w = self.panel_window(None)?;
-        let kind = panel::element(self.pid, &w)
+        let kind = panel::loaded(self.pid, &w, Duration::from_secs(1))
             .map(|el| panel::kind(&el))
             .ok()?;
         Some(match kind {

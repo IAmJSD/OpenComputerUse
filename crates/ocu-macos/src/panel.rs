@@ -142,6 +142,19 @@ pub fn element(app_pid: i32, host: &WindowInfo) -> Result<Element> {
         .ok_or_else(|| anyhow!("cannot read the panel in window {}", host.id))
 }
 
+/// The panel's element once its contents are readable. They fill in a
+/// moment after the panel appears or changes folder, and until then the
+/// panel reads as empty: no buttons, no name field.
+pub fn loaded(app_pid: i32, host: &WindowInfo, limit: Duration) -> Result<Element> {
+    let has_buttons = |p: &Element| {
+        p.elements("AXChildren")
+            .iter()
+            .any(|c| c.string("AXRole").as_deref() == Some("AXButton"))
+    };
+    wait_for(limit, || element(app_pid, host).ok().filter(has_buttons))
+        .map_or_else(|| element(app_pid, host), Ok)
+}
+
 /// Which panel a window shows, from its accessibility description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -323,16 +336,20 @@ fn press_button(app_pid: i32, host: &WindowInfo, attr: &str, fallback: &str) -> 
             })
         })
     };
-    if find().is_none() {
-        bail!("the panel has no {fallback} button");
-    }
+    // The button may not be readable yet (see `loaded`), or not enabled.
+    let mut seen = false;
     let Some(button) = wait_for(Duration::from_secs(3), || {
-        let found = find().filter(|b| b.bool("AXEnabled") != Some(false));
+        let found = find();
+        seen |= found.is_some();
+        let found = found.filter(|b| b.bool("AXEnabled") != Some(false));
         if found.is_none() {
             let _ = crate::capture::capture_composed(host, &[]);
         }
         found
     }) else {
+        if !seen {
+            bail!("the panel has no {fallback} button");
+        }
         bail!("the panel's {fallback} button stays disabled: it does not accept what is selected");
     };
     // Pressing through a remote view reports an error even when it works.
@@ -397,7 +414,7 @@ fn select_more(panel: &Element, target: &Target, names: &[String]) -> Result<()>
 /// Answers the panel showing in `host`, through accessibility and keys
 /// sent to the panel service: picks `paths`, or cancels without any.
 pub fn answer(app_pid: i32, host: &WindowInfo, target: &Target, paths: &[PathBuf]) -> Result<()> {
-    let panel = element(app_pid, host)?;
+    let panel = loaded(app_pid, host, Duration::from_secs(3))?;
     focus_panel(&panel, target)?;
     let gone = || {
         wait_for(Duration::from_secs(3), || {

@@ -63,6 +63,13 @@ fn main() {
     let app = app.to_string_lossy().into_owned();
     let hook = std::env::var("OCU_E2E_HOOK").is_ok_and(|v| v == "1");
     let platform = platform(hook);
+    for p in platform.permissions() {
+        println!(
+            "permission {}: {}",
+            p.name,
+            if p.granted { "granted" } else { "missing" }
+        );
+    }
     let mut failed = 0;
     for case in CASES {
         match run(platform.as_ref(), &app, hook, case) {
@@ -220,7 +227,7 @@ fn diagnose(session: &mut dyn Session) -> String {
         out.push_str(&format!("\nwindow {} {:?} {:?}", w.id, w.title, w.frame));
         let opts = TreeOptions {
             max_depth: 6,
-            max_nodes: 300,
+            max_nodes: 800,
         };
         match session.ui_tree(Some(w.id), &opts) {
             Ok(tree) => walk(&tree, 1, &mut out),

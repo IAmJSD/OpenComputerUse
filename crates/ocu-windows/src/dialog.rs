@@ -139,9 +139,11 @@ fn open(uia: &Uia, window: u64) -> Option<Dialog> {
 fn file_name(uia: &Uia, window: u64) -> Option<IUIAutomationElement> {
     // The edit, not the combo box around it with the same id: the dialog
     // reads the edit, and setting the combo box's value leaves it alone.
+    // A save dialog's edit has another id, so its label comes before any
+    // element with the id.
     uia.find_by_id_and_type(window, FILE_NAME_ID, UIA_EditControlTypeId)
-        .or_else(|| uia.find_by_id(window, FILE_NAME_ID))
         .or_else(|| uia.find_by_type(window, UIA_EditControlTypeId, "File name:"))
+        .or_else(|| uia.find_by_id(window, FILE_NAME_ID))
 }
 
 /// The Open or Save button, by automation id, then by name.
