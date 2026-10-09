@@ -11,6 +11,7 @@ mod ax;
 mod bidi;
 mod capture;
 mod cdp;
+mod hook;
 mod input;
 pub mod lock;
 mod pages;

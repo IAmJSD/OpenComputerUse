@@ -27,6 +27,7 @@ use crate::ax::{self, Element, ElementTable};
 use crate::bidi;
 use crate::capture;
 use crate::cdp::{self, Cdp};
+use crate::hook;
 use crate::input::{self, Target};
 use crate::pages::PageFiles;
 use crate::panel;
@@ -284,6 +285,23 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
                     bidi::clear(&profile);
                     spec.args.push(bidi::ARG.to_string());
                     bidi_profile = Some(profile);
+                }
+            }
+            // An app that lets our panel hook in hands us its open and save
+            // panels instead of showing them.
+            if piped.is_none() && (already.is_empty() || spec.new_instance) {
+                if let (Some(dylib), Some(socket)) = (hook::dylib(), hook::socket()) {
+                    if hook::injectable(&bundle) {
+                        log::info!("{} takes the panel hook", bundle.display());
+                        spec.env.insert(
+                            "DYLD_INSERT_LIBRARIES".into(),
+                            dylib.to_string_lossy().into_owned(),
+                        );
+                        spec.env.insert(
+                            "OCU_PANEL_SOCKET".into(),
+                            socket.to_string_lossy().into_owned(),
+                        );
+                    }
                 }
             }
             if let Some((child, c)) = piped {
@@ -659,7 +677,7 @@ impl MacSession {
     }
 
     /// Answers whatever is asking for files: a page's chooser held by the
-    /// browser link, or a panel on screen.
+    /// browser link, a panel held back by the hook, or a panel on screen.
     fn choose_file(&mut self, window: Option<u64>, paths: &[String]) -> Result<()> {
         let paths: Vec<PathBuf> = paths
             .iter()
@@ -671,6 +689,9 @@ impl MacSession {
         let w = loop {
             if let Some((pages, _)) = self.page_chooser() {
                 return pages.answer(&paths);
+            }
+            if hook::waiting(self.pid).is_some() {
+                return hook::answer(self.pid, &paths);
             }
             if let Some(w) = self.panel_window(window) {
                 break w;
@@ -1002,6 +1023,20 @@ impl Session for MacSession {
             return Some(format!(
                 "The page is asking for {} (a file input; no panel is shown): answer it with choose_file, giving the paths, or no paths to cancel.",
                 if multiple { "files" } else { "a file" }
+            ));
+        }
+        if let Some(r) = hook::waiting(self.pid) {
+            return Some(format!(
+                "The app is asking for {} (its {} panel is held back, so nothing shows): answer it with choose_file, giving the {}, or no paths to cancel.",
+                match (r.save, r.folders, r.multiple) {
+                    (true, ..) => "a place to save",
+                    (false, true, true) => "folders",
+                    (false, true, false) => "a folder",
+                    (false, false, true) => "files",
+                    (false, false, false) => "a file",
+                },
+                if r.save { "save" } else { "open" },
+                if r.save { "path to save to" } else { "paths" },
             ));
         }
         let w = self.panel_window(None)?;
