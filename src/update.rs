@@ -62,6 +62,7 @@ pub enum UpdateStatus {
 }
 
 /// Where an update in progress has got to.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Progress {
     Downloading { received: u64, total: u64 },
@@ -275,6 +276,7 @@ fn download_dir() -> PathBuf {
 }
 
 /// Throw away whatever [`download`] left behind.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn clean_downloads() {
     let _ = std::fs::remove_dir_all(download_dir());
 }
@@ -496,6 +498,7 @@ pub fn install_and_restart(_file: &Path) -> anyhow::Result<()> {
 // ---------------------------------------------------- automatic checking
 
 /// How long an automatic check waits after the last one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
 fn now_secs() -> u64 {
@@ -506,6 +509,7 @@ fn now_secs() -> u64 {
 }
 
 /// Whether an automatic check is due: once a day.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn check_due() -> bool {
     let dir = crate::config::config_dir();
     match std::fs::read_to_string(dir.join("last-update-check"))
@@ -526,10 +530,12 @@ pub fn mark_checked() {
 }
 
 /// Whether to check automatically. On unless turned off in the settings.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn check_automatically() -> bool {
     !crate::config::config_dir().join("no-update-check").exists()
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn set_check_automatically(on: bool) {
     let dir = crate::config::config_dir();
     let flag = dir.join("no-update-check");

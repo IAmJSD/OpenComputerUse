@@ -20,6 +20,7 @@ pub struct Issued {
     pub device: devices::Device,
     /// What the device adds under `hosts:` in its hosts file: this
     /// computer's name, URL and the key.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub host_entry: String,
     /// The generic skill, the same for every computer (no key).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -59,6 +60,8 @@ pub fn regenerate(id: &str, url: Option<&str>) -> Result<Issued> {
 /// replaced.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn save_download(folder: &str, file: &str, text: &str) -> Result<std::path::PathBuf> {
+    // Only the Unix branch below writes through a handle.
+    #[cfg(unix)]
     use std::io::Write as _;
 
     let home = std::env::var_os("HOME")
@@ -337,10 +340,13 @@ pub mod autostart {
     //! keeps its own permissions). Linux: a systemd user service. Windows:
     //! a Run key. The last two are for `opencomputeruse serve`.
 
-    use anyhow::{Context as _, Result};
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "macos")]
+    use anyhow::Context as _;
+    use anyhow::Result;
+    #[cfg(target_os = "linux")]
     use std::path::PathBuf;
 
+    #[cfg(target_os = "macos")]
     const LABEL: &str = "com.infrawrench.opencomputeruse";
 
     #[cfg(target_os = "macos")]

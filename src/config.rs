@@ -18,6 +18,7 @@ pub enum Provider {
 }
 
 impl Provider {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub const ALL: [Provider; 2] = [Provider::Typesafe, Provider::Cloudflare];
 
     pub fn label(self) -> &'static str {
@@ -205,6 +206,7 @@ impl Config {
         std::fs::rename(&tmp, &path).with_context(|| format!("saving {}", path.display()))
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn show_overlay(&self) -> bool {
         self.show_overlay.unwrap_or(true)
     }
