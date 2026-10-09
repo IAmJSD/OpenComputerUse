@@ -117,6 +117,8 @@ struct Remote {
     error: Option<String>,
     /// A failure of the Generate Skill form, shown with it.
     skill_error: Option<String>,
+    /// What the last Deploy button did: where the skill went, or why not.
+    deploy_note: Option<String>,
     /// "Every network adapter to every host" is unticked, but nothing is
     /// chosen yet, so the settings still say every adapter.
     limiting: bool,
@@ -576,6 +578,19 @@ impl Status {
         }
     }
 
+    /// Installs the generic skill (it holds no key) for one agent harness.
+    fn deploy_skill(&mut self, client: Client) {
+        let skill = skill::render_generic(&crate::tools::catalog());
+        self.remote.deploy_note = Some(match remote::deploy_skill(client, &skill) {
+            Ok(path) => format!(
+                "Installed for {}: {}. Start a new session to use it.",
+                client.label(),
+                path.display()
+            ),
+            Err(e) => format!("Couldn't install for {}: {e:#}", client.label()),
+        });
+    }
+
     fn regenerate(&mut self, id: &str) {
         match remote::regenerate(id, None) {
             Ok(issued) => self.show_issued(issued),
@@ -768,6 +783,8 @@ impl Status {
                 ),
             IssuedTab::Skill => {
                 let save = skill.clone();
+                let save_entry = entry.clone();
+                let download_entry = entry.clone();
                 modal
                     .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("1. The entry for {}", skill::HOSTS_FILE)))
                     .child(dim(format!(
@@ -780,8 +797,31 @@ impl Status {
                             .gap_2()
                             .child(mono(Block::Entry, entry.trim_end().to_string()).flex_1().min_w_0())
                             .child(
-                                copy_button("copy-entry", "Copy Entry", entry.clone(), "Copied the entry. It holds the key, so clear the clipboard once it's pasted.")
-                                    .flex_none(),
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .flex_none()
+                                    .child(copy_button("copy-entry", "Copy Entry", entry.clone(), "Copied the entry. It holds the key, so clear the clipboard once it's pasted."))
+                                    .child(Button::new("save-entry", "Save to hosts file").on_click(cx.listener(move |s, _, _, cx| {
+                                        let msg = match remote::save_host_entry(&save_entry) {
+                                            Ok(path) => format!("Saved to {}.", path.display()),
+                                            Err(e) => format!("Couldn't save: {e:#}"),
+                                        };
+                                        note_msg(s, msg);
+                                        cx.notify();
+                                    })))
+                                    .child(Button::new("download-entry", "Download Entry").on_click(cx.listener(move |s, _, _, cx| {
+                                        let msg = match remote::save_download(skill::GENERIC_SKILL_NAME, "hosts-entry.yaml", &download_entry) {
+                                            Ok(path) => {
+                                                let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&path).spawn();
+                                                format!("Saved {}. It holds the key; delete it once it's in place.", path.display())
+                                            }
+                                            Err(e) => format!("Couldn't save: {e:#}"),
+                                        };
+                                        note_msg(s, msg);
+                                        cx.notify();
+                                    }))),
                             ),
                     )
                     .child(div().pt_2().font_weight(gpui::FontWeight::MEDIUM).child("2. The skill"))
@@ -821,16 +861,40 @@ impl Status {
         let dim = |t: String| div().text_color(rgb(p.text_dim)).child(t);
         let section = div().flex().flex_col().gap_2();
         match &self.remote.panel {
-            None | Some(Panel::Issued { .. }) => section.child(
-                div().flex().child(
-                    Button::new("generate-skill", "Generate Skill…")
-                        .primary()
-                        .on_click(cx.listener(|s, _, _, cx| {
-                            s.open_form();
+            None | Some(Panel::Issued { .. }) => section
+                .child(
+                    div().flex().child(
+                        Button::new("generate-skill", "Generate Skill…")
+                            .primary()
+                            .on_click(cx.listener(|s, _, _, cx| {
+                                s.open_form();
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(dim(
+                    "Or install the skill, which holds no key, for an agent on this computer to drive the computers in its hosts file:".into(),
+                ).text_size(px(11.5)))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Button::new("deploy-claude-code", "Claude Code").on_click(cx.listener(|s, _, _, cx| {
+                            s.deploy_skill(Client::ClaudeCode);
                             cx.notify();
-                        })),
-                ),
-            ),
+                        })))
+                        .child(Button::new("deploy-codex", "Codex").on_click(cx.listener(|s, _, _, cx| {
+                            s.deploy_skill(Client::Codex);
+                            cx.notify();
+                        })))
+                        .child(Button::new("deploy-opencode", "OpenCode").on_click(cx.listener(|s, _, _, cx| {
+                            s.deploy_skill(Client::OpenCode);
+                            cx.notify();
+                        }))),
+                )
+                .when_some(self.remote.deploy_note.clone(), |d, n| {
+                    d.child(dim(n).text_size(px(11.5)))
+                }),
             Some(Panel::Form) => section.child(
                 div()
                     .flex()

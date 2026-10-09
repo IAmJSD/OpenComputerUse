@@ -274,6 +274,13 @@ and shows the key once, in a dialog with two tabs:
 - **Skill file**: the hosts-file entry and the skill, to put in place by
   hand. The skill is the same for every computer, so a device needs it only
   once; each computer it drives adds an entry.
+  **Save to hosts file** merges the entry into this computer's
+  `~/.config/opencomputeruse/hosts.yaml` (replacing an entry of the same
+  name, mode 0600), and **Download Entry** saves it to `~/Downloads`.
+
+Under **Generate Skill**, the **Claude Code**, **Codex** and **OpenCode**
+buttons install the key-free skill into that agent's skills folder on this
+computer.
 
 Keys are stored only as hashes, so that is the one place a key appears.
 Devices are listed in the app with **Regenerate Key** and **Remove**, and in
