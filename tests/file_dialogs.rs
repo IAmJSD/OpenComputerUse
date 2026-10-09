@@ -61,6 +61,9 @@ fn main() {
         return;
     };
     let app = app.to_string_lossy().into_owned();
+    // The backends' own logs say why a hook did not load.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
     let hook = std::env::var("OCU_E2E_HOOK").is_ok_and(|v| v == "1");
     let platform = platform(hook);
     for p in platform.permissions() {
@@ -72,7 +75,10 @@ fn main() {
     }
     let mut failed = 0;
     for case in CASES {
-        match run(platform.as_ref(), &app, hook, case) {
+        let done = watchdog(case.name);
+        let result = run(platform.as_ref(), &app, hook, case);
+        let _ = done.send(());
+        match result {
             Ok(()) => println!("ok      {} (hook {})", case.name, on(hook)),
             Err(e) => {
                 println!("FAILED  {} (hook {}): {e:#}", case.name, on(hook));
@@ -83,6 +89,22 @@ fn main() {
     if failed > 0 {
         std::process::exit(1);
     }
+}
+
+/// Ends the run if one case takes over three minutes: every wait in a case
+/// has its own limit, so that long means a call that never returns, and CI
+/// should say which case it was rather than time out silently.
+fn watchdog(name: &'static str) -> std::sync::mpsc::Sender<()> {
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if finished.recv_timeout(Duration::from_secs(180))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            println!("FAILED  {name}: stuck for three minutes; giving up");
+            std::process::exit(1);
+        }
+    });
+    done
 }
 
 fn on(hook: bool) -> &'static str {
@@ -143,9 +165,11 @@ fn run(platform: &dyn Platform, app: &str, hook: bool, case: &Case) -> Result<()
         args: vec![case.mode.into(), out.to_string_lossy().into_owned()],
         ..Default::default()
     })?;
+    println!("  {}: launched", case.name);
     let result = answer(session.as_mut(), hook, &paths, &out, expect.as_deref())
         .map_err(|e| anyhow!("{e:#}\n{}", diagnose(session.as_mut())));
     session.close();
+    println!("  {}: closed", case.name);
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
@@ -179,6 +203,7 @@ fn answer(
 
     let notice = wait(Duration::from_secs(30), || session.notice())
         .context("the app never asked for a file")?;
+    println!("  asked: {notice}");
     let hidden = notice.contains("nothing shows") || notice.contains("nothing is shown");
     ensure!(
         hidden == hook,
@@ -187,6 +212,7 @@ fn answer(
         on(hook)
     );
     session.perform(None, &choose)?;
+    println!("  answered");
 
     let got = wait(Duration::from_secs(20), || {
         std::fs::read_to_string(out).ok().filter(|s| !s.is_empty())
@@ -221,7 +247,7 @@ fn diagnose(session: &mut dyn Session) -> String {
             }
         }
     }
-    let mut out = String::from("the session then:");
+    let mut out = format!("the session then: {:?}", session.describe().details);
     let windows = session.windows().unwrap_or_default();
     for w in &windows {
         out.push_str(&format!("\nwindow {} {:?} {:?}", w.id, w.title, w.frame));

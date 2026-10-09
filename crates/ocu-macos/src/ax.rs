@@ -255,7 +255,7 @@ impl ElementTable {
 }
 
 /// Roles that only group others; unnamed ones are flattened away.
-const GROUPING: &[&str] = &["AXGroup", "AXUnknown", "AXSplitGroup", "AXLayoutArea"];
+pub(crate) const GROUPING: &[&str] = &["AXGroup", "AXUnknown", "AXSplitGroup", "AXLayoutArea"];
 
 pub fn read_tree(
     root: &Element,

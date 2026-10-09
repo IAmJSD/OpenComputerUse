@@ -18,6 +18,7 @@ jobs:
         os: [macos-latest, windows-latest, ubuntu-latest]
         hook: [on, off]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     env:
       OCU_E2E_HOOK: ${{ matrix.hook == 'on' && '1' || '0' }}
     steps:
@@ -33,14 +34,26 @@ jobs:
             OCU_SIGN_ID=- packaging/macos/panelhook/build.sh
             echo "OCU_PANEL_HOOK=$PWD/dist/OcuPanelHook.dylib" >> "$GITHUB_ENV"
             # The hook is only offered with App Management, which the runner
-            # image does not grant. Give it to whatever already has
-            # Accessibility there.
-            for db in "/Library/Application Support/com.apple.TCC/TCC.db" \
-                      "$HOME/Library/Application Support/com.apple.TCC/TCC.db"; do
-              sudo sqlite3 "$db" "
-                CREATE TEMP TABLE t AS SELECT * FROM access WHERE service = 'kTCCServiceAccessibility';
+            # image does not grant. Give it to whatever has Accessibility
+            # there: those rows live in the system database, App Management
+            # is looked up in both.
+            sys="/Library/Application Support/com.apple.TCC/TCC.db"
+            user="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+            for db in "$sys" "$user"; do
+              from=access
+              attach=
+              if [ "$db" = "$user" ]; then
+                from=sys.access
+                attach="ATTACH '$sys' AS sys;"
+              fi
+              sudo sqlite3 "$db" "$attach
+                CREATE TEMP TABLE t AS
+                  SELECT * FROM $from WHERE service = 'kTCCServiceAccessibility';
                 UPDATE t SET service = 'kTCCServiceSystemPolicyAppBundles';
-                INSERT OR REPLACE INTO access SELECT * FROM t;"
+                INSERT OR REPLACE INTO main.access SELECT * FROM t;"
+              echo "App Management in $db:"
+              sudo sqlite3 "$db" "SELECT client, auth_value FROM access
+                WHERE service = 'kTCCServiceSystemPolicyAppBundles'"
             done
             # tccd caches the database; restart it so the grant is seen.
             sudo killall tccd || true

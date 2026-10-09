@@ -147,12 +147,35 @@ pub fn element(app_pid: i32, host: &WindowInfo) -> Result<Element> {
 /// panel reads as empty: no buttons, no name field.
 pub fn loaded(app_pid: i32, host: &WindowInfo, limit: Duration) -> Result<Element> {
     let has_buttons = |p: &Element| {
-        p.elements("AXChildren")
+        parts(p)
             .iter()
             .any(|c| c.string("AXRole").as_deref() == Some("AXButton"))
     };
     wait_for(limit, || element(app_pid, host).ok().filter(has_buttons))
         .map_or_else(|| element(app_pid, host), Ok)
+}
+
+/// The panel's controls: its children, looking through the unnamed groups
+/// that newer macOS wraps its buttons and fields in, as the tree does.
+fn parts(panel: &Element) -> Vec<Element> {
+    fn add(el: &Element, depth: usize, out: &mut Vec<Element>) {
+        for c in el.elements("AXChildren") {
+            let unnamed = |attr: &str| c.string(attr).is_none_or(|s| s.is_empty());
+            let group = c
+                .string("AXRole")
+                .is_some_and(|r| ax::GROUPING.contains(&r.as_str()))
+                && unnamed("AXTitle")
+                && unnamed("AXDescription");
+            if group && depth > 0 {
+                add(&c, depth - 1, out);
+            } else {
+                out.push(c);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    add(panel, 4, &mut out);
+    out
 }
 
 /// Which panel a window shows, from its accessibility description.
@@ -177,7 +200,7 @@ pub fn kind(panel: &Element) -> Kind {
 /// A save panel's "Save As" field: a text field of its own, not the tag
 /// editor or the search field.
 fn name_field(panel: &Element) -> Option<Element> {
-    panel.elements("AXChildren").into_iter().find(|c| {
+    parts(panel).into_iter().find(|c| {
         c.string("AXRole").as_deref() == Some("AXTextField")
             && c.string("AXDescription").is_none_or(|d| d.is_empty())
             && c.elements("AXChildren").is_empty()
@@ -240,8 +263,8 @@ fn key(target: &Target, chord: &str) -> Result<()> {
 /// buttons there. A panel in a window of its own (TextEdit's) is not key
 /// until clicked; a sheet in a browser window is, and the click is harmless.
 fn focus_panel(panel: &Element, target: &Target) -> Result<()> {
-    let buttons: Vec<CGRect> = panel
-        .elements("AXChildren")
+    let parts = parts(panel);
+    let buttons: Vec<CGRect> = parts
         .iter()
         .filter(|c| c.string("AXRole").as_deref() == Some("AXButton"))
         .filter_map(|c| c.frame())
@@ -256,8 +279,7 @@ fn focus_panel(panel: &Element, target: &Target) -> Result<()> {
     let frame = panel.frame().unwrap_or(*b);
     let row = b.origin.y + b.size.height / 2.0;
     // The bar starts where the sidebar ends.
-    let left = panel
-        .elements("AXChildren")
+    let left = parts
         .iter()
         .find(|c| c.string("AXRole").as_deref() == Some("AXSplitter"))
         .and_then(|s| s.frame())
@@ -330,7 +352,7 @@ fn press_button(app_pid: i32, host: &WindowInfo, attr: &str, fallback: &str) -> 
     let find = || {
         let panel = element(app_pid, host).ok()?;
         panel.element(attr).or_else(|| {
-            panel.elements("AXChildren").into_iter().find(|c| {
+            parts(&panel).into_iter().find(|c| {
                 c.string("AXRole").as_deref() == Some("AXButton")
                     && c.string("AXTitle").as_deref() == Some(fallback)
             })
@@ -444,7 +466,7 @@ pub fn answer(app_pid: i32, host: &WindowInfo, target: &Target, paths: &[PathBuf
             let field =
                 name_field(&panel).ok_or_else(|| anyhow!("the save panel has no Save As field"))?;
             // The Go to sheet opens on "/" only away from the name field.
-            if let Some(view) = panel.elements("AXChildren").into_iter().find(|c| {
+            if let Some(view) = parts(&panel).into_iter().find(|c| {
                 matches!(
                     c.string("AXRole").as_deref(),
                     Some("AXBrowser" | "AXScrollArea" | "AXOutline" | "AXList")
