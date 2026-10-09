@@ -197,7 +197,7 @@ EOF
 {HOW_TO_WORK}
 ## Tools
 
-Not every host offers every tool. A computer offers what its system has: `unlock_screen` and the iOS simulator tools only on a Mac, the Android emulator tools when the emulator is installed, and `run_recipe` once it is set up. A phone running the OpenComputerUse app offers only the session tools, for apps on that phone. A host answers a tool it doesn't have with an error.
+Not every host offers every tool. A computer offers what its system has: `unlock_screen` only on a Mac; the phone, iOS simulator and Android emulator tools only when they are turned on in its settings (the simulator ones on a Mac, the emulator ones when the emulator is installed); and `run_recipe` once it is set up. A phone running the OpenComputerUse app offers only the session tools, for apps on that phone. A host answers a tool it doesn't have with an error.
 
 "#
     );

@@ -112,11 +112,11 @@ EOF
 
 ## Tools
 
-Not every host offers every tool. A computer offers what its system has: `unlock_screen` and the iOS simulator tools only on a Mac, the Android emulator tools when the emulator is installed, and `run_recipe` once it is set up. A phone running the OpenComputerUse app offers only the session tools, for apps on that phone. A host answers a tool it doesn't have with an error.
+Not every host offers every tool. A computer offers what its system has: `unlock_screen` only on a Mac; the phone, iOS simulator and Android emulator tools only when they are turned on in its settings (the simulator ones on a Mac, the emulator ones when the emulator is installed); and `run_recipe` once it is set up. A phone running the OpenComputerUse app offers only the session tools, for apps on that phone. A host answers a tool it doesn't have with an error.
 
 ### `start_session`
 
-Start an app in the background and get a session id for driving it. Use this, not other computer-use tools, for operating desktop apps: it is the one the user chose, and it leaves their screen, pointer and keyboard alone. The app opens behind your other windows and is never brought to the front, unless `foreground` is set. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name ("TextEdit"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows. For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.
+Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name ("TextEdit"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows. For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.
 
   - `app` (string): The app to start. Required unless `active_window` is set.
   - `args` (array)
@@ -124,7 +124,7 @@ Start an app in the background and get a session id for driving it. Use this, no
   - `cwd` (string)
   - `new_instance` (boolean): macOS: start a separate instance even when the app is already running. Otherwise a running app is attached to, and left running when the session ends.
   - `active_window` (boolean): macOS and Windows: attach to the window in front (the topmost one not belonging to the app this client runs in) instead of starting `app`. It becomes the session's default window, and its app is left running when the session ends.
-  - `foreground` (boolean): macOS and Windows: open the app in front and bring it and the target window to the front before every action, so the user can watch. Default false (the app stays in the background). Linux sessions are always on their own virtual display.
+  - `foreground` (boolean): macOS and Windows: bring the app and its window to the front before every action. Rarely needed, since everything works in the background; use it when the user wants to watch, or an app ignores input while behind other windows. Default false. Linux sessions are always on their own virtual display.
   - `display_width` (integer): Linux: the virtual display's width. Default 1440.
   - `display_height` (integer): Linux: the virtual display's height. Default 900.
 

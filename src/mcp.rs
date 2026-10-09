@@ -23,16 +23,27 @@ Computer use that runs in the background. Start a session with an app (start_ses
 screenshot and get_ui_tree to look; click, type_text, press_key, scroll, drag, set_value and element_action to act. \
 Actions return a fresh screenshot by default (screenshot: false skips it; ui_tree: true adds the accessibility tree). \
 Prefer element ids from the tree (click with element: \"e12\") over coordinates: they work reliably on background windows. \
-For apps on a phone, tablet, iOS simulator or Android emulator, start the session with phone_start_session, \
-ios_simulator_start_session or android_emulator_start_session (the matching *_list and *_apps tools show what is there); \
-the same tools then drive it, with taps for clicks and swipes for drags and scrolls. \
 When run_recipe is listed, it performs a fixed list of steps itself using a fast decision model. \
 End sessions with end_session when done; they also end when this server exits.";
+
+/// Said when phones, simulators and emulators are turned on.
+const DEVICE_INSTRUCTIONS: &str = "\
+For apps on a phone, tablet, iOS simulator or Android emulator, start the session with phone_start_session, \
+ios_simulator_start_session or android_emulator_start_session (the matching *_list and *_apps tools show what is there); \
+the same tools then drive it, with taps for clicks and swipes for drags and scrolls.";
+
+fn instructions() -> String {
+    if crate::config::Config::mobile_enabled() {
+        format!("{INSTRUCTIONS} {DEVICE_INSTRUCTIONS}")
+    } else {
+        INSTRUCTIONS.to_string()
+    }
+}
 
 pub fn serve(mut handler: Box<dyn Handler>) -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    watch_recipe_availability();
+    watch_tool_changes();
     let mut line = String::new();
     let mut input = stdin.lock();
     loop {
@@ -79,14 +90,21 @@ fn write(out: &mut std::io::Stdout, v: &Value) -> Result<()> {
     Ok(())
 }
 
-/// `run_recipe` is listed only once recipes are set up; tell the client
-/// when that changes (the settings live in the app, which saves the file).
-fn watch_recipe_availability() {
+/// `run_recipe` is listed only once recipes are set up, and the device
+/// tools only while they are turned on; tell the client when either
+/// changes (the settings live in the app, which saves the file).
+fn watch_tool_changes() {
+    fn offered() -> (bool, bool) {
+        (
+            crate::recipe::available(),
+            crate::config::Config::mobile_enabled(),
+        )
+    }
     std::thread::spawn(|| {
-        let mut was = crate::recipe::available();
+        let mut was = offered();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let now = crate::recipe::available();
+            let now = offered();
             if now != was {
                 was = now;
                 let note =
@@ -163,7 +181,7 @@ fn dispatch(handler: &mut dyn Handler, msg: &Value, local: bool) -> Option<Value
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": true } },
                 "serverInfo": { "name": "opencomputeruse", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": INSTRUCTIONS,
+                "instructions": instructions(),
             }))
         }
         "ping" => Ok(json!({})),
