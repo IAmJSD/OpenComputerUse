@@ -13,6 +13,7 @@ mod recipe;
 mod remote;
 mod tools;
 mod update;
+mod view;
 mod vision;
 
 mod agent;
@@ -25,20 +26,25 @@ const USAGE: &str = "\
 opencomputeruse: background computer use for agents, over MCP
 
 USAGE:
-    opencomputeruse mcp                   Run the MCP server on stdio (what clients launch)
+    opencomputeruse mcp [VIEW]            Run the MCP server on stdio (what clients launch)
     opencomputeruse install <client>      Register the MCP server with claude, claude-desktop, codex, opencode or kimi
     opencomputeruse uninstall <client>    Remove it again
     opencomputeruse clients               Show which clients run this copy
-    opencomputeruse serve [--port N] [--listen-on LIST]
+    opencomputeruse serve [--port N] [--listen-on LIST] [--token TOKEN] [VIEW]
                                           Run the HTTP server for other devices (the app does this on macOS).
                                           LIST limits it to some network adapters, addresses or ranges,
-                                          like en0,tailscale,192.168.1.0/24
+                                          like en0,tailscale,192.168.1.0/24. TOKEN (or OCU_SERVE_TOKEN) is
+                                          a key accepted beside the devices', for setting up without the app
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse skill                 Print the skill other devices use to drive a host
     opencomputeruse [agent]               Open the app's window (on macOS, --background starts it hidden)
     sudo opencomputeruse install-lock     Enable working while the Mac is locked (macOS; one-time)
     sudo opencomputeruse uninstall-lock   Undo install-lock, restoring the normal unlock
+
+VIEW is the live view of sessions (Linux): --view-listen ADDR:PORT and --view-token TOKEN (or
+OCU_VIEW_LISTEN and OCU_VIEW_TOKEN; serve falls back to its --token). With it, or a serve token,
+sessions are shared by every client until they are ended.
 
 Settings live in the config file printed by `opencomputeruse config-path`.";
 
@@ -53,7 +59,7 @@ fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let first = args.first().map(String::as_str);
     match first {
-        Some("mcp") => run_mcp(),
+        Some("mcp") => run_mcp(&args[1..]),
         Some("install") | Some("uninstall") => {
             let Some(client) = args.get(1) else {
                 bail!("name a client: claude, claude-desktop, codex, opencode or kimi")
@@ -196,8 +202,16 @@ fn run_serve(args: &[String]) -> Result<()> {
     }
     init_stderr_log();
     let flags = ServeFlags::parse(args)?;
+    let view = view::ViewFlags::parse(args)?.resolve(flags.token.as_deref())?;
     let service = ocu_core::Service::with_devices(platform(), Some(mobile_platform()), None);
-    let mut server = remote::server::HttpServer::new(service);
+    if flags.token.is_some() {
+        // One server for every harness: their sessions are each other's.
+        service.share_sessions();
+    }
+    if let Some((addr, token)) = view {
+        view::start(service.clone(), addr, token)?;
+    }
+    let mut server = remote::server::HttpServer::new(service, flags.token.clone());
     let mut shown: Option<(Vec<_>, Vec<String>)> = None;
     // Follow the settings and the network: adapters gain and lose addresses.
     loop {
@@ -236,11 +250,13 @@ fn run_serve(args: &[String]) -> Result<()> {
     }
 }
 
-/// `serve`'s `--port` and `--listen-on`, which win over the settings file.
+/// `serve`'s `--port`, `--listen-on` and `--token`, which win over the
+/// settings file.
 #[derive(Debug, Default, PartialEq)]
 struct ServeFlags {
     port: Option<u16>,
     listen_on: Option<Vec<String>>,
+    token: Option<String>,
 }
 
 impl ServeFlags {
@@ -268,8 +284,22 @@ impl ServeFlags {
                         .get_or_insert_with(Vec::new)
                         .extend(remote::interfaces::clean(&entries)?);
                 }
+                "--token" => {
+                    let token = it
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("--token takes a value"))?;
+                    flags.token = Some(token.clone());
+                }
                 _ => {}
             }
+        }
+        if flags.token.is_none() {
+            flags.token = std::env::var("OCU_SERVE_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty());
+        }
+        if let Some(t) = &flags.token {
+            view::check_token(t)?;
         }
         Ok(flags)
     }
@@ -328,8 +358,9 @@ pub fn platform() -> std::sync::Arc<dyn ocu_core::Platform> {
     #[cfg(target_os = "macos")]
     return std::sync::Arc::new(ocu_macos::MacPlatform);
     #[cfg(target_os = "linux")]
-    return std::sync::Arc::new(ocu_linux::LinuxPlatform::with_portal(
+    return std::sync::Arc::new(ocu_linux::LinuxPlatform::with_settings(
         config::Config::linux_file_portal,
+        config::Config::linux_display,
     ));
     #[cfg(windows)]
     return std::sync::Arc::new(ocu_windows::WindowsPlatform::with_hook(
@@ -358,15 +389,22 @@ fn init_stderr_log() {
 }
 
 #[cfg(target_os = "macos")]
-fn run_mcp() -> Result<()> {
+fn run_mcp(args: &[String]) -> Result<()> {
     init_stderr_log();
+    if view::ViewFlags::parse(args)?.listen.is_some() {
+        bail!("the live view is for Linux sessions; it is not available on macOS");
+    }
     mcp::serve(Box::new(macos::AgentLink::default()))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_mcp() -> Result<()> {
+fn run_mcp(args: &[String]) -> Result<()> {
     init_stderr_log();
+    let view = view::ViewFlags::parse(args)?.resolve(None)?;
     let service = ocu_core::Service::with_devices(platform(), Some(mobile_platform()), None);
+    if let Some((addr, token)) = view {
+        view::start(service.clone(), addr, token)?;
+    }
     let client = service.client();
     let result = mcp::serve(Box::new(client));
     // The client is gone with `serve`'s box, ending its sessions; make sure.

@@ -14,7 +14,8 @@ pub mod paths;
 pub mod portal;
 mod service;
 mod types;
+pub mod xkb;
 
-pub use backend::{pick_window, Description, Observer, Platform, Session};
+pub use backend::{pick_window, Description, Observer, Platform, Session, Viewer};
 pub use service::{Client, Handler, Observe, Request, Response, Service};
 pub use types::*;

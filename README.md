@@ -33,7 +33,7 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 
 | Tool | What it does |
 | --- | --- |
-| `start_session` | Start an app (a `.app` path, bundle id or name on macOS; an executable elsewhere) and return a session id and its windows; `foreground: true` (macOS, Windows) brings it to the front for every action instead of keeping it in the background, and `active_window: true` (macOS, Windows) attaches to the window in front instead of starting an app |
+| `start_session` | Start an app (a `.app` path, bundle id or name on macOS; an executable elsewhere) and return a session id and its windows; `foreground: true` (macOS, Windows) brings it to the front for every action instead of keeping it in the background, and `active_window: true` (macOS, Windows) attaches to the window in front instead of starting an app; `display: "wayland"` (Linux) runs it on a headless Wayland compositor instead of Xvfb |
 | `end_session`, `list_sessions`, `list_windows` | Manage sessions |
 | `screenshot` | Capture a session window, even a covered one; `ui_tree: true` adds the accessibility tree |
 | `get_ui_tree` | One line per element: `[e12] Button "Save" @(x,y wxh) actions=press` |
@@ -143,24 +143,44 @@ build, and macOS then asks for the permissions again.
 
 ### Linux (`crates/ocu-linux`)
 
-- **Display:** each session gets a private Xvfb display with its own cookie.
-  The app starts on it via `DISPLAY` and `XAUTHORITY`, with Wayland
-  disabled.
-- **Input and screenshots:** input goes through XTEST; screenshots read the
-  framebuffer, so menus and popups are included.
-- **Cleanup:** Xvfb and the app get `PR_SET_PDEATHSIG`, so they die with
+Each session gets a display server of its own, so nothing the app does
+touches your desktop. `start_session` takes `display`: `"x11"` (the default)
+or `"wayland"`. Change the default with `OCU_LINUX_DISPLAY=wayland` or
+`"linux_display": "wayland"` in the settings file.
+
+- **X11:** a private Xvfb with its own cookie. The app starts on it via
+  `DISPLAY` and `XAUTHORITY`, with Wayland disabled. Input goes through
+  XTEST; screenshots read the framebuffer, so menus and popups are
+  included. Xvfb is found at `$OCU_XVFB`, next to the binary, or on `PATH`.
+- **Wayland:** a headless compositor (Smithay, drawing in software with
+  pixman) that runs inside the server, so there is nothing to install and
+  no GPU is needed. The app gets `WAYLAND_DISPLAY` (an absolute path in a
+  private directory), no `DISPLAY`, and software rendering
+  (`GSK_RENDERER=cairo`, `LIBGL_ALWAYS_SOFTWARE=1` and the like). Windows
+  fill the virtual output; dialogs sit over their parent; popups and menus
+  are drawn into their window. Input goes through the compositor's seat.
+  Characters a US keyboard lacks are typed by briefly remapping some of its
+  keys to them, as a person on another layout would, so `type_text` handles
+  any text in any app (characters with no keysym, such as control
+  characters, are dropped). Needs `libpixman-1` and `xkb-data`, which
+  Xvfb and every desktop already have.
+- **Chromium on Wayland:** Chromium, Chrome, Edge, Brave and Vivaldi are
+  started with `--ozone-platform=wayland --disable-gpu
+  --disable-dev-shm-usage`, plus `--no-sandbox` when running as root (as in
+  most containers), unless the session's own arguments already set them.
+- **Cleanup:** displays and apps get `PR_SET_PDEATHSIG`, so they die with
   the server.
-- **Where Xvfb is found:** `$OCU_XVFB`, next to the binary, or on `PATH`.
 - **File dialogs:** off by default, apps draw their own. With **Answer open
   and save dialogs through a portal** on in the window (`linux_file_portal`,
   or `OCU_LINUX_FILE_PORTAL=1`), each app gets a private session bus whose
   file chooser portal is answered by `choose_file`; everything else is
   forwarded to your own bus. Needs `dbus-daemon`.
 - **Not yet:** the accessibility tree (AT-SPI), so element actions and
-  recipes are unavailable on Linux for now.
-- **Watching a session:** connect a VNC server to its display, for example
-  `x11vnc -display :N -auth <xauthority>`. The display and auth file are in
-  the session details.
+  recipes are unavailable on Linux for now. Wayland stays opt-in until it
+  has run widely; apps that only speak X11 need the X11 display.
+- **Watching a session:** see [Live view](#live-view), which works on both.
+  An X11 session's display can also take a VNC server, for example
+  `x11vnc -display :N -auth <xauthority>`; both are in the session details.
 
 ```sh
 docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm ocu-linux
@@ -274,6 +294,126 @@ The skill is the same from every host, phones included.
 `opencomputeruse skill` prints it, and the app ships that text as
 `android/res/raw/skill.md`. The tests fail when the two differ.
 
+## Live view
+
+On Linux, a person can watch a session's window and drive it alongside the
+agent, from a browser. Start the server with a view address and a token (at
+least 16 letters, digits or `-._~`):
+
+```sh
+opencomputeruse mcp --view-listen 0.0.0.0:7900 --view-token "$TOKEN"
+# or OCU_VIEW_LISTEN=0.0.0.0:7900 OCU_VIEW_TOKEN=$TOKEN opencomputeruse mcp
+```
+
+With the view on, sessions are shared: every client can use every session,
+and a session lasts until it is ended (or the server exits), not until the
+client that started it goes. `start_session` answers with the session's
+`view_path`.
+
+### One server in a container
+
+For one long-lived server that several harnesses and a web UI share, run
+`serve` with a token. The token is accepted beside the keys of
+[other devices](#other-devices-http), and with it sessions are shared too:
+
+```sh
+OCU_LINUX_DISPLAY=wayland opencomputeruse serve --port 7800 --token "$TOKEN" \
+  --view-listen 0.0.0.0:7900
+```
+
+Harnesses connect to `http://<host>:7800/mcp` with
+`Authorization: Bearer $TOKEN` (for example `claude mcp add --transport http
+ocu http://<host>:7800/mcp --header "Authorization: Bearer $TOKEN"`). The
+view uses the same token unless `--view-token` sets another. `--token` can
+also come from `OCU_SERVE_TOKEN`.
+
+### HTTP API
+
+Every request but `GET /health` needs the token, as `Authorization: Bearer
+<token>` or `?token=<token>` (browsers can't set headers on a WebSocket).
+Answers are JSON; errors are `{"error": "..."}`. CORS is open, since the
+token is the only credential.
+
+| Request | Answer |
+| --- | --- |
+| `GET /sessions` | `{"sessions": [Session]}` |
+| `POST /sessions` with `{"app", "args"?, "env"?, "cwd"?, "display"?, "display_width"?, "display_height"?}` | `201` and the new `Session` |
+| `GET /sessions/{id}` | `Session` |
+| `DELETE /sessions/{id}` | `{"ok": true}`, ending it |
+| `GET /sessions/{id}/screenshot[?window=ID]` | a PNG |
+| `GET /sessions/{id}/view` | the WebSocket below |
+
+A `Session` is `{"session_id", "session": {"id", "app", "pid", "backend",
+"details"}, "windows": [Window], "view_path"}`, and a `Window` is `{"id",
+"title", "frame": {"x", "y", "width", "height"}, "on_screen"}`.
+
+### The WebSocket
+
+`GET /sessions/{id}/view`, upgraded to a WebSocket. Optional query
+parameters: `window` (a window id; the session's first window otherwise),
+`format` (`jpeg`, the default, or `png`) and `quality` (JPEG, 1 to 100,
+default 75). The server accepts the `ocu-view` subprotocol when offered,
+and needs none.
+
+The server sends JSON text messages:
+
+- `{"type": "hello", "session": {...}, "windows": [Window], "window": ID,
+  "format": "jpeg"}` first.
+- `{"type": "windows", "windows": [Window], "window": ID}` when windows
+  open, close, move or are retitled. When the watched window goes, the
+  view moves to the first one (`window` is then `null` if there is none).
+- `{"type": "error", "message": "..."}` for a message it could not act on.
+  The connection stays open.
+- `{"type": "ended"}` when the session ends, before closing.
+
+and binary messages, each a 20-byte header (little-endian) then an image:
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | u8 | kind: `1` (an image) |
+| 1 | u8 | format: `1` JPEG, `2` PNG |
+| 2 | u16 | flags: bit 0 set for a keyframe (the image is the whole window) |
+| 4 | u32 | window id |
+| 8 | u16 | x of the image in the window |
+| 10 | u16 | y |
+| 12 | u16 | the image's width |
+| 14 | u16 | the image's height |
+| 16 | u16 | the window's width |
+| 18 | u16 | the window's height |
+
+The first picture, and the first after the window's size changes, is a
+keyframe; after that only the box that changed is sent, to draw at (x, y)
+over what the client holds. Pictures come when something changed, at most
+about 30 a second on Wayland and 10 on X11.
+
+The client sends JSON text messages. Coordinates are the window's pixels,
+the same grid as its pictures and the agent's tools:
+
+- `{"type": "pointer", "action": "move" | "down" | "up", "x", "y",
+  "button": 0 | 1 | 2}`: `button` is `MouseEvent.button` (left, middle,
+  right), default 0.
+- `{"type": "wheel", "x", "y", "dx", "dy"}`: `WheelEvent.deltaX` and
+  `deltaY` in pixels (multiply by about 40 for `deltaMode` 1); positive
+  `dy` scrolls down. 40 pixels make one wheel notch.
+- `{"type": "key", "action": "down" | "up", "code", "key"}`:
+  `KeyboardEvent.code` and `.key`. A key that types one printable character
+  with no Ctrl, Alt or Meta held (AltGr is fine) is typed as that
+  character, so any layout types what its keys say; its release is
+  ignored. Other keys (Enter, arrows, Backspace, shortcuts, modifiers) are
+  pressed by `code`, as the key in that place on a US keyboard. Send each
+  browser auto-repeat `keydown` as it comes: apps do not repeat keys
+  themselves. Keys still held when the socket closes are released.
+- `{"type": "text", "text"}`: text to type, such as an input method's or a
+  dead key's composition (`compositionend`, `beforeinput`) or a paste.
+- `{"type": "resize", "width", "height"}`: resizes the display and the
+  windows filling it (Wayland; 64 to 8192 pixels). X11 answers with an
+  error.
+- `{"type": "window", "id"}`: watches another window.
+- `{"type": "refresh"}`: the next picture is a keyframe.
+
+The agent keeps working while a person is connected, and both see each
+other's changes; neither locks the other out.
+
 ## Install into a client
 
 From the app's window, or:
@@ -318,6 +458,10 @@ and shows the key once, in a dialog with two tabs:
 Under **Generate Skill**, the **Claude Code**, **Codex** and **OpenCode**
 buttons install the key-free skill into that agent's skills folder on this
 computer.
+
+Where there is no app to make keys with, such as in a container, `serve
+--token TOKEN` (or `OCU_SERVE_TOKEN`) accepts one more key, given on the
+command line; see [One server in a container](#one-server-in-a-container).
 
 Keys are stored only as hashes, so that is the one place a key appears.
 Devices are listed in the app with **Regenerate Key** and **Remove**, and in
@@ -381,8 +525,9 @@ Tailscale connects.
 
 The settings file is at `opencomputeruse config-path`. On macOS it is
 edited from the app. Elsewhere, edit it by hand or set `TYPESAFE_API_KEY`,
-`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `OCU_RECIPE_PROVIDER` and
-`OCU_MOBILE` (`1` turns the mobile tools on, `0` off).
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `OCU_RECIPE_PROVIDER`,
+`OCU_MOBILE` (`1` turns the mobile tools on, `0` off) and
+`OCU_LINUX_DISPLAY` (`x11` or `wayland`).
 Set `OCU_LOG=debug` for logs on stderr. The macOS agent logs to
 `~/Library/Application Support/OpenComputerUse/agent.log`.
 

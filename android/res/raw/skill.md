@@ -116,7 +116,7 @@ Not every host offers every tool. A computer offers what its system has: `unlock
 
 ### `start_session`
 
-Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name ("TextEdit"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows. For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.
+Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name ("TextEdit"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual display: a private X server (Xvfb), or a headless Wayland compositor with `display: "wayland"`. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows. For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.
 
   - `app` (string): The app to start. Required unless `active_window` is set.
   - `args` (array)
@@ -127,6 +127,7 @@ Start an app and get a session id for driving it. Use this, not other computer-u
   - `foreground` (boolean): macOS and Windows: bring the app and its window to the front before every action. Rarely needed, since everything works in the background; use it when the user wants to watch, or an app ignores input while behind other windows. Default false. Linux sessions are always on their own virtual display.
   - `display_width` (integer): Linux: the virtual display's width. Default 1440.
   - `display_height` (integer): Linux: the virtual display's height. Default 900.
+  - `display` (string): Linux: the kind of virtual display. "x11" is a private Xvfb; "wayland" a headless Wayland compositor (Chromium-based browsers get the switches they need for it). Defaults to the server's setting (OCU_LINUX_DISPLAY), else x11. One of `x11`, `wayland`.
 
 ### `end_session`
 

@@ -1,6 +1,6 @@
 [package]
 name = "ocu-linux"
-description = "The Linux backend: each session gets its own Xvfb display, driven through XTEST"
+description = "The Linux backend: each session gets its own display, an Xvfb driven through XTEST or a headless Wayland compositor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,3 +12,6 @@ anyhow.workspace = true
 log.workspace = true
 libc.workspace = true
 x11rb = { version = "0.13", features = ["xtest"] }
+# The headless Wayland compositor: only the server half and the software
+# (pixman) renderer, so no GPU, DRM, libinput or seat library is needed.
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend", "desktop", "renderer_pixman"] }

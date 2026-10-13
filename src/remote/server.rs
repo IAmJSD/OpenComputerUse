@@ -60,6 +60,9 @@ impl Worker {
 
 struct State {
     service: Arc<Service>,
+    /// A key given on the command line (`serve --token`), for a server set
+    /// up without the app, such as in a container.
+    token: Option<String>,
     devices: Mutex<(Devices, Option<SystemTime>)>,
     /// Keyed by device id and key hash, so a regenerated key gets a fresh
     /// worker and the old one (and its sessions) goes.
@@ -70,6 +73,13 @@ impl State {
     /// The device a key belongs to, rereading devices.json when it changed
     /// and retiring workers whose device or key is gone.
     fn authenticate(&self, key: &str) -> Option<(String, String, String)> {
+        if self
+            .token
+            .as_deref()
+            .is_some_and(|t| crate::view::same(t, key))
+        {
+            return Some(("token".into(), "token".into(), "token".into()));
+        }
         let mtime = std::fs::metadata(super::devices::path())
             .and_then(|m| m.modified())
             .ok();
@@ -81,6 +91,11 @@ impl State {
                 .devices
                 .iter()
                 .map(|d| (d.id.clone(), d.key_hash.clone()))
+                .chain(
+                    self.token
+                        .as_ref()
+                        .map(|_| ("token".into(), "token".into())),
+                )
                 .collect();
             self.workers
                 .lock()
@@ -166,10 +181,12 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub fn new(service: Arc<Service>) -> Self {
+    /// A server for the devices in devices.json, and whoever has `token`.
+    pub fn new(service: Arc<Service>, token: Option<String>) -> Self {
         Self {
             state: Arc::new(State {
                 service,
+                token,
                 devices: Mutex::new((Devices::default(), None)),
                 workers: Mutex::new(HashMap::new()),
             }),

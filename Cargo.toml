@@ -63,6 +63,10 @@ if-addrs = "0.15"
 # The app's window, and on macOS the cursor overlay.
 gpui = { git = "https://github.com/IAmJSD/gpui", rev = "45a4fb3b7fa2a155368f34de09bfae59deda84ef" }
 async-channel = "2"
+# The live view: WebSockets, request heads, and pictures for browsers.
+tungstenite.workspace = true
+httparse = "1"
+jpeg-encoder = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
