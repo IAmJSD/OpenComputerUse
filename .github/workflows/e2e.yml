@@ -91,10 +91,13 @@ jobs:
 
   # Chrome on a headless Wayland session: the agent's tools, the live view
   # and the sessions API (scripts/linux/wayland_smoke.py), then the X11
-  # smoke test beside it.
+  # smoke test beside it. Both then read Chrome's and GTK's accessibility
+  # trees over AT-SPI (scripts/linux/a11y_checks.py).
   linux-wayland:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      OCU_SMOKE_BROWSER: google-chrome
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -103,12 +106,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb x11-apps foot python3-websocket xkb-data fonts-dejavu-core \
+            dbus python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
             libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libpixman-1-dev
       - run: cargo build --bin opencomputeruse
       - name: Wayland
-        env:
-          OCU_SMOKE_BROWSER: google-chrome
         run: python3 scripts/linux/wayland_smoke.py target/debug/opencomputeruse
       - name: X11
         run: python3 scripts/linux/smoke.py target/debug/opencomputeruse

@@ -17,12 +17,9 @@ use ocu_core::{Action, Handler, MouseButton, Observe, Request, Response, TreeOpt
 use crate::config::{Config, Provider, RecipeConfig};
 use crate::tools::Output;
 
-/// Whether recipes can run here: a decision model is set up that can find
-/// targets on this platform. Without accessibility trees (Linux, for now)
-/// only Clef, which reads screenshots, can.
+/// Whether recipes can run here: a decision model is set up.
 pub fn available() -> bool {
-    let r = Config::load().recipe;
-    r.is_configured() && (!cfg!(target_os = "linux") || r.provider == Provider::Cloudflare)
+    Config::load().recipe.is_configured()
 }
 
 pub fn tool_definition() -> Value {
@@ -294,6 +291,9 @@ const TARGETABLE: &[&str] = &[
     "ColorWell",
     "SplitButton",
     "DataItem",
+    "ToggleButton",
+    "SpinButton",
+    "Switch",
     "entry",
     "push button",
     "link",
@@ -396,7 +396,10 @@ fn collect<'a>(
             d.push_str(&format!(" ({desc})"));
         }
         // A toggle's value is its state, not text it contains.
-        let toggle = matches!(node.role.as_str(), "RadioButton" | "CheckBox" | "Switch");
+        let toggle = matches!(
+            node.role.as_str(),
+            "RadioButton" | "CheckBox" | "Switch" | "ToggleButton"
+        );
         match node.value.as_deref().filter(|v| !v.is_empty()) {
             Some("1" | "true") if toggle => d.push_str(", selected"),
             Some(_) if toggle => {}
@@ -759,7 +762,8 @@ fn locate(
     let deadline = Instant::now() + Duration::from_secs(6);
     let vision = config.provider == Provider::Cloudflare;
     loop {
-        // Backends without a tree (Linux, for now) leave only the picture.
+        // A window without a tree (an app whose toolkit has no AT-SPI, say)
+        // leaves only the picture.
         let root = tree(handler, session, window).ok();
         let mut candidates = Vec::new();
         if let Some(root) = &root {

@@ -175,15 +175,42 @@ or `"wayland"`. Change the default with `OCU_LINUX_DISPLAY=wayland` or
   or `OCU_LINUX_FILE_PORTAL=1`), each app gets a private session bus whose
   file chooser portal is answered by `choose_file`; everything else is
   forwarded to your own bus. Needs `dbus-daemon`.
-- **Not yet:** the accessibility tree (AT-SPI), so element actions and
-  recipes are unavailable on Linux for now. Wayland stays opt-in until it
-  has run widely; apps that only speak X11 need the X11 display.
+- **Tree and element actions:** AT-SPI, the same on both displays since it
+  runs over D-Bus rather than the display. Each session gets a private bus
+  (`dbus-daemon`) on which the server is the accessibility registry: the
+  app registers its tree there and the server reads it with method calls,
+  a level at a time, each call with a timeout and the whole read within 10
+  seconds, so a busy app slows a read but never the display or input.
+  Nothing else is on the bus, so sessions never see each other's apps, and
+  no desktop session or `at-spi2-registryd` is needed. Frames are in window
+  coordinates, matching screenshots on Wayland too. `set_value` uses
+  EditableText or Value, else focuses the field and types; element actions
+  use the Action interface (a press without one is a click at the
+  element's centre) and focus uses `Component.GrabFocus`. Recipes work
+  with either decision model.
+- **What apps get for it:** `AT_SPI_BUS_ADDRESS` pointing at the session's
+  bus, `GNOME_ACCESSIBILITY=1`, `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`,
+  `QT_ACCESSIBILITY=1` and `ACCESSIBILITY_ENABLED=1`, with `NO_AT_BRIDGE`
+  and `GTK_A11Y` removed. Chromium-based browsers also get
+  `--force-renderer-accessibility`, so web pages are in the tree and not
+  just the browser's own controls. Electron apps need that switch in the
+  session's `args`.
+- **In a container:** install `dbus` (for `dbus-daemon`); without it
+  sessions run without a tree. GTK 3 and Chromium bring their AT-SPI
+  bridge (`libatk-bridge2.0-0`) with them, and GTK 4 and Qt have theirs
+  built in; `at-spi2-core` is not needed. Run the server under an init
+  (`docker run --init`, or tini), or apps' helper processes are never
+  reaped and some apps never open a window.
+- **Not yet:** apps whose toolkit has no AT-SPI (Xt and Motif apps such as
+  xcalc, SDL, most games) have no tree, nor do Java apps without the ATK
+  wrapper; use screenshots and coordinates for those. Wayland stays opt-in
+  until it has run widely; apps that only speak X11 need the X11 display.
 - **Watching a session:** see [Live view](#live-view), which works on both.
   An X11 session's display can also take a VNC server, for example
   `x11vnc -display :N -auth <xauthority>`; both are in the session details.
 
 ```sh
-docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm ocu-linux
+docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm --init ocu-linux
 ```
 
 ### Windows (`crates/ocu-windows`)

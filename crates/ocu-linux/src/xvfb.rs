@@ -28,9 +28,10 @@ use ocu_core::image::{encode_png, Order};
 use ocu_core::keys::{parse_chord, parse_chords, Chord, Key, Modifiers, NamedKey};
 use ocu_core::{
     pick_window, Action, Description, Frame, LaunchSpec, MouseButton, Rect, Screenshot, Session,
-    Size, ViewInput, Viewer, WindowInfo,
+    Size, TreeOptions, UiNode, ViewInput, Viewer, WindowInfo,
 };
 
+use crate::atspi::{A11y, Coords};
 use crate::{die_with_parent, hex, keys, random_bytes};
 
 /// An Xauthority file with one cookie for any display, so only processes
@@ -178,6 +179,7 @@ pub struct LinuxSession {
     /// The session's private bus and the file chooser portal on it. Dropping
     /// the bus ends its dbus-daemon, and with it the portal's bridge.
     portal: crate::Portal,
+    a11y: Option<A11y>,
     viewer: Option<Arc<XView>>,
     alive: Arc<AtomicBool>,
     // Dropped last: the display outlives the connection and the app.
@@ -198,9 +200,12 @@ impl LinuxSession {
         // Started before the app so it finds the portal. Off, or without
         // dbus-daemon, the app keeps the user's bus and draws its own dialogs.
         let portal = if portal { crate::start_portal() } else { None };
+        let a11y = crate::start_a11y();
 
         let mut cmd = Command::new(&spec.app);
-        cmd.args(&spec.args)
+        let mut args = spec.args.clone();
+        crate::use_a11y(&mut cmd, &a11y, &spec.app, &mut args);
+        cmd.args(&args)
             .env("DISPLAY", display.name())
             .env("XAUTHORITY", display.auth_file())
             // Toolkits that prefer Wayland must use the X display instead.
@@ -230,6 +235,7 @@ impl LinuxSession {
             keymap,
             cookie,
             portal,
+            a11y,
             viewer: None,
             alive: Arc::new(AtomicBool::new(true)),
             display,
@@ -486,6 +492,7 @@ impl Session for LinuxSession {
             self.display.auth_file().display().to_string(),
         );
         details.insert("files".into(), crate::portal_detail(&self.portal));
+        details.insert("accessibility".into(), crate::a11y_detail(&self.a11y));
         Description {
             app: self.name.clone(),
             pid: Some(self.app.id()),
@@ -511,6 +518,20 @@ impl Session for LinuxSession {
         })
     }
 
+    fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
+        let w = self.window(window)?;
+        crate::a11y(&mut self.a11y)?.tree(&w, Coords::Screen, opts)
+    }
+
+    fn element_point(
+        &mut self,
+        _window: Option<u64>,
+        element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        let (w, x, y) = crate::a11y(&mut self.a11y)?.center(element)?;
+        Ok((Some(w), x, y))
+    }
+
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
         match action {
             Action::Wait { ms } => {
@@ -518,7 +539,13 @@ impl Session for LinuxSession {
                 return Ok(());
             }
             Action::ElementAction { .. } | Action::SetValue { .. } | Action::Focus { .. } => {
-                bail!("element actions need the accessibility tree, which the Linux backend does not read yet; use coordinates")
+                if let Some(then) = crate::a11y(&mut self.a11y)?.perform(action)? {
+                    for a in &then.actions {
+                        self.perform(Some(then.window), a)?;
+                        sleep(Duration::from_millis(40));
+                    }
+                }
+                return Ok(());
             }
             Action::ChooseFile { paths } => return crate::choose_file(&self.portal, paths),
             _ => {}

@@ -2,13 +2,16 @@
 """Drives Chromium on a Wayland session through the MCP server and the live
 view, checking each step through the page's title (which the window title
 follows): clicks, typing beyond a US keyboard, keys, scrolling, a view
-frame and a person's input, and the sessions API.
+frame and a person's input, and the sessions API. Then reads Chromium's and
+GTK's accessibility trees (a11y_checks.py).
 
     python3 scripts/linux/wayland_smoke.py [target/debug/opencomputeruse]
 """
 import base64, json, os, socket, struct, subprocess, sys, time, urllib.request
 
 import websocket  # python3-websocket
+
+from a11y_checks import check
 
 exe = sys.argv[1] if len(sys.argv) > 1 else "target/debug/opencomputeruse"
 browser = os.environ.get("OCU_SMOKE_BROWSER") or next(
@@ -189,6 +192,7 @@ except urllib.error.HTTPError as e:
     assert e.code == 401
 
 tool("end_session", session_id=s)
+check(lambda name, **args: tool(name, **args)[0], "wayland", browser)
 p.stdin.close()
 p.wait(timeout=20)
 if failures:
