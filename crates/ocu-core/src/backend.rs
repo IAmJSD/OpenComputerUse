@@ -4,6 +4,8 @@
 
 use std::collections::BTreeMap;
 
+use std::sync::Arc;
+
 use anyhow::{bail, Result};
 
 use crate::types::*;
@@ -91,6 +93,37 @@ pub trait Session: Send {
 
     /// Ends the app if the session started it. Idempotent.
     fn close(&mut self);
+
+    /// A handle for watching and driving the session live, beside the agent.
+    fn viewer(&mut self) -> Option<Arc<dyn Viewer>> {
+        None
+    }
+}
+
+/// A live view into a session for a person, who may take over from the
+/// agent. It works apart from the session's own lock, so a long action (a
+/// wait, a drag) never freezes the picture or the person's input.
+pub trait Viewer: Send + Sync {
+    /// The session's windows, best first.
+    fn windows(&self) -> Result<Vec<WindowInfo>>;
+
+    /// What `window` (or the main window) looks like now.
+    fn frame(&self, window: Option<u64>) -> Result<Frame>;
+
+    fn input(&self, window: Option<u64>, input: &ViewInput) -> Result<()>;
+
+    /// Resizes the display, and the windows filling it.
+    fn resize(&self, _size: Size) -> Result<()> {
+        bail!("this session's display has a fixed size")
+    }
+
+    /// A count that goes up whenever the picture may have changed, or
+    /// `None` when the backend can't tell and the picture has to be polled.
+    fn generation(&self) -> Option<u64> {
+        None
+    }
+
+    fn is_alive(&self) -> bool;
 }
 
 /// Hooks for a UI that shows what sessions are doing. All calls come from

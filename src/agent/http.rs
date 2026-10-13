@@ -49,7 +49,7 @@ impl HttpHost {
                     log::warn!("start at login: {e:#}");
                 }
             }
-            HttpServer::new(service.clone())
+            HttpServer::new(service.clone(), None)
         });
         let (addrs, mut errors) = match interfaces::listen_addrs(&http) {
             Ok(addrs) => (addrs, Vec::new()),

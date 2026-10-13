@@ -127,6 +127,11 @@ pub struct Config {
     /// and notifications still work. Off unless turned on.
     #[serde(default)]
     pub linux_file_portal: bool,
+    /// The display Linux sessions get unless `start_session` asks for one:
+    /// "x11" (a private Xvfb, the default) or "wayland" (a headless
+    /// compositor inside the server).
+    #[serde(default)]
+    pub linux_display: ocu_core::LinuxDisplay,
 }
 
 impl Config {
@@ -142,6 +147,16 @@ impl Config {
     #[cfg(target_os = "linux")]
     pub fn linux_file_portal() -> bool {
         env_flag("OCU_LINUX_FILE_PORTAL").unwrap_or_else(|| Self::load().linux_file_portal)
+    }
+
+    /// The display Linux sessions get by default: `OCU_LINUX_DISPLAY`
+    /// ("x11" or "wayland"), else the setting.
+    #[cfg(target_os = "linux")]
+    pub fn linux_display() -> ocu_core::LinuxDisplay {
+        std::env::var("OCU_LINUX_DISPLAY")
+            .ok()
+            .and_then(|v| ocu_core::LinuxDisplay::parse(&v))
+            .unwrap_or_else(|| Self::load().linux_display)
     }
 
     /// Whether the phone, simulator and emulator tools are on: the

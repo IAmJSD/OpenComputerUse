@@ -5,14 +5,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, RandomState};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{pick_window, Observer, Platform, Session};
+use crate::backend::{pick_window, Observer, Platform, Session, Viewer};
 use crate::types::*;
 
 type SharedSession = Arc<Mutex<Box<dyn Session>>>;
@@ -131,6 +131,8 @@ struct Entry {
     /// On this computer's screen, where the observer can draw over it; not
     /// for a phone or simulator.
     desktop: bool,
+    /// For watching it live, when the backend offers that.
+    viewer: Option<Arc<dyn Viewer>>,
 }
 
 pub struct Service {
@@ -146,6 +148,9 @@ pub struct Service {
     next_client: AtomicU64,
     ids: RandomState,
     next_session: AtomicU64,
+    /// Every client may use every session, and sessions outlive the client
+    /// that started them (see [`Service::share_sessions`]).
+    shared: AtomicBool,
 }
 
 impl Service {
@@ -168,7 +173,40 @@ impl Service {
             next_client: AtomicU64::new(1),
             ids: RandomState::new(),
             next_session: AtomicU64::new(1),
+            shared: AtomicBool::new(false),
         })
+    }
+
+    /// Lets every client use every session, and keeps sessions until they
+    /// are ended rather than until the client that started them goes: for
+    /// one long-lived server shared by several clients (an agent's MCP
+    /// connection, a person watching through the view server).
+    pub fn share_sessions(&self) {
+        self.shared.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_shared(&self) -> bool {
+        self.shared.load(Ordering::Relaxed)
+    }
+
+    /// One session's details.
+    pub fn session_info(&self, id: &str) -> Option<SessionInfo> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|e| e.info.clone())
+    }
+
+    /// The live view of a session, whoever owns it: callers check their own
+    /// authorisation.
+    pub fn viewer(&self, id: &str) -> Result<Arc<dyn Viewer>> {
+        let sessions = self.sessions.lock().unwrap();
+        let entry = sessions.get(id).ok_or_else(|| anyhow!("no session {id}"))?;
+        entry
+            .viewer
+            .clone()
+            .ok_or_else(|| anyhow!("session {id} can't be watched live (its backend has no view)"))
     }
 
     pub fn platform(&self) -> &dyn Platform {
@@ -237,7 +275,7 @@ impl Service {
         let entry = sessions.get(id).ok_or_else(|| {
             anyhow!("no session {id}; it may have ended (list_sessions shows the live ones)")
         })?;
-        if entry.owner != client.id {
+        if entry.owner != client.id && !self.is_shared() {
             bail!("session {id} belongs to another client");
         }
         Ok((entry.session.clone(), entry.desktop))
@@ -266,6 +304,7 @@ impl Service {
                     bail!("{} can't drive itself", d.app);
                 }
                 let windows = session.windows().unwrap_or_default();
+                let viewer = session.viewer();
                 let info = SessionInfo {
                     id: self.new_id(),
                     app: d.app,
@@ -286,6 +325,7 @@ impl Service {
                         owner: client.id,
                         session: Arc::new(Mutex::new(session)),
                         desktop,
+                        viewer,
                     },
                 );
                 if let Some(o) = &self.observer {
@@ -303,7 +343,7 @@ impl Service {
                 Ok(Response::Sessions(
                     sessions
                         .iter()
-                        .filter(|(_, e)| e.owner == client.id)
+                        .filter(|(_, e)| e.owner == client.id || self.is_shared())
                         .map(|(_, e)| e.info.clone())
                         .collect(),
                 ))
@@ -498,6 +538,9 @@ impl Handler for Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        if self.service.is_shared() {
+            return;
+        }
         let owned: Vec<(String, Entry)> = {
             let mut sessions = self.service.sessions.lock().unwrap();
             let ids: Vec<String> = sessions

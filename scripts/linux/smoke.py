@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Drives xcalc on a private Xvfb display through the MCP server."""
-import base64, json, subprocess, sys
+"""Drives xcalc on a private Xvfb display through the MCP server, and watches
+it through the live view."""
+import base64, json, struct, subprocess, sys
 
 exe = sys.argv[1] if len(sys.argv) > 1 else "target/debug/opencomputeruse"
-p = subprocess.Popen([exe, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+TOKEN = "smoke-test-token-0123456789"
+p = subprocess.Popen([exe, "mcp", "--view-listen", "127.0.0.1:7912", "--view-token", TOKEN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 n = 0
 def call(method, params):
     global n
@@ -27,4 +29,20 @@ s = json.loads(tool("start_session", app="xcalc"))["session_id"]
 tool("type_text", session_id=s, text="12*12=")
 tool("screenshot", session_id=s)
 tool("get_ui_tree", session_id=s)
+try:
+    import websocket
+except ImportError:
+    websocket = None
+if websocket:
+    ws = websocket.create_connection(f"ws://127.0.0.1:7912/sessions/{s}/view?token={TOKEN}", timeout=20)
+    assert json.loads(ws.recv())["type"] == "hello"
+    frame = ws.recv()
+    assert struct.unpack("<BBH", frame[:4]) == (1, 1, 1) and frame[20:22] == b"\xff\xd8"
+    ws.send(json.dumps({"type": "key", "action": "down", "code": "Escape", "key": "Escape"}))
+    ws.send(json.dumps({"type": "key", "action": "up", "code": "Escape", "key": "Escape"}))
+    ws.send(json.dumps({"type": "text", "text": "7"}))
+    ws.settimeout(5)
+    assert isinstance(ws.recv(), bytes), "no picture after typing through the view"
+    ws.close()
+    print("--- live view: a keyframe, and a picture after typing")
 tool("end_session", session_id=s)

@@ -38,11 +38,36 @@ pub struct LaunchSpec {
     /// The virtual display's size, where the backend makes one (Linux).
     #[serde(default)]
     pub display_size: Option<Size>,
+    /// Which kind of display a Linux session runs on. None takes the
+    /// server's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux_display: Option<LinuxDisplay>,
     /// Start the app on a phone, tablet, simulator or emulator instead of
     /// this computer. `app` is then a bundle id (iOS) or a package or
     /// activity (Android).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceTarget>,
+}
+
+/// The display server a Linux session gets to itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinuxDisplay {
+    /// A private Xvfb, driven through XTEST.
+    #[default]
+    X11,
+    /// A private headless Wayland compositor inside this server.
+    Wayland,
+}
+
+impl LinuxDisplay {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "x11" | "x" | "xvfb" => Some(Self::X11),
+            "wayland" => Some(Self::Wayland),
+            _ => None,
+        }
+    }
 }
 
 /// Which mobile device a session runs on.
@@ -393,6 +418,49 @@ impl Action {
             _ => None,
         }
     }
+}
+
+/// A window's pixels for someone watching live: 32-bit, `stride` bytes a
+/// row, in `order`.
+#[derive(Clone, Debug)]
+pub struct Frame {
+    pub window_id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub data: Vec<u8>,
+    pub order: crate::image::Order,
+}
+
+/// Input from a person watching a session. Coordinates are the window's,
+/// as in [`Action`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ViewInput {
+    Move {
+        x: f64,
+        y: f64,
+    },
+    Button {
+        x: f64,
+        y: f64,
+        button: MouseButton,
+        down: bool,
+    },
+    /// Positive `dy` scrolls content down, as in [`Action::Scroll`].
+    Wheel {
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    },
+    /// A key by its place on the keyboard: a DOM `KeyboardEvent.code`.
+    Key {
+        code: String,
+        down: bool,
+    },
+    Text {
+        text: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

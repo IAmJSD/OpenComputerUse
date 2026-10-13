@@ -245,7 +245,7 @@ fn base_tools() -> Vec<Value> {
     vec![
         tool(
             "start_session",
-            "Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual X display. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows.",
+            "Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual display: a private X server (Xvfb), or a headless Wayland compositor with `display: \"wayland\"`. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows.",
             json!({
                 "app": { "type": "string", "description": "The app to start. Required unless `active_window` is set." },
                 "args": { "type": "array", "items": { "type": "string" } },
@@ -256,6 +256,7 @@ fn base_tools() -> Vec<Value> {
                 "foreground": { "type": "boolean", "description": "macOS and Windows: bring the app and its window to the front before every action. Rarely needed, since everything works in the background; use it when the user wants to watch, or an app ignores input while behind other windows. Default false. Linux sessions are always on their own virtual display." },
                 "display_width": { "type": "integer", "description": "Linux: the virtual display's width. Default 1440." },
                 "display_height": { "type": "integer", "description": "Linux: the virtual display's height. Default 900." },
+                "display": { "type": "string", "enum": ["x11", "wayland"], "description": "Linux: the kind of virtual display. \"x11\" is a private Xvfb; \"wayland\" a headless Wayland compositor (Chromium-based browsers get the switches they need for it). Defaults to the server's setting (OCU_LINUX_DISPLAY), else x11." },
             }),
             &[],
         ),
@@ -555,14 +556,59 @@ fn devices(handler: &mut dyn Handler, query: DeviceQuery) -> Result<Value> {
     Ok(v)
 }
 
+/// A desktop app's [`LaunchSpec`] from `start_session`'s arguments.
+pub fn launch_spec(args: &Value) -> Result<LaunchSpec> {
+    let display_size = match (
+        opt_u64(args, "display_width"),
+        opt_u64(args, "display_height"),
+    ) {
+        (Some(w), Some(h)) => Some(ocu_core::Size {
+            width: w as u32,
+            height: h as u32,
+        }),
+        _ => None,
+    };
+    let active_window = flag(args, "active_window", false);
+    let app = match opt_str(args, "app") {
+        Some(app) => app,
+        None if active_window => String::new(),
+        None => bail!("missing \"app\" (or set \"active_window\": true)"),
+    };
+    Ok(LaunchSpec {
+        app,
+        args: serde_json::from_value(args.get("args").cloned().unwrap_or(json!([])))?,
+        env: serde_json::from_value(args.get("env").cloned().unwrap_or(json!({})))?,
+        cwd: opt_str(args, "cwd"),
+        new_instance: flag(args, "new_instance", false),
+        foreground: flag(args, "foreground", false),
+        active_window,
+        skip_pids: if active_window {
+            client_pids()
+        } else {
+            Vec::new()
+        },
+        display_size,
+        linux_display: match opt_str(args, "display") {
+            Some(d) => Some(
+                ocu_core::LinuxDisplay::parse(&d)
+                    .ok_or_else(|| anyhow!("display is \"x11\" or \"wayland\", not \"{d}\""))?,
+            ),
+            None => None,
+        },
+        device: None,
+    })
+}
+
 fn start(handler: &mut dyn Handler, spec: LaunchSpec) -> Result<Output> {
     let Response::Session { info, windows } = handler.handle(Request::StartSession(spec))? else {
         bail!("unexpected reply");
     };
+    let mut out = json!({ "session_id": info.id, "session": info, "windows": windows });
+    if let Some(path) = crate::view::path_for(&info) {
+        out["view_path"] = json!(path);
+    }
     Ok(Output {
-        text: serde_json::to_string_pretty(
-            &json!({ "session_id": info.id, "session": info, "windows": windows }),
-        )?,
+        text: serde_json::to_string_pretty(&out)?,
         image: None,
     })
 }
@@ -628,41 +674,7 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
         });
     }
     match name {
-        "start_session" => {
-            let display_size = match (
-                opt_u64(args, "display_width"),
-                opt_u64(args, "display_height"),
-            ) {
-                (Some(w), Some(h)) => Some(ocu_core::Size {
-                    width: w as u32,
-                    height: h as u32,
-                }),
-                _ => None,
-            };
-            let active_window = flag(args, "active_window", false);
-            let app = match opt_str(args, "app") {
-                Some(app) => app,
-                None if active_window => String::new(),
-                None => bail!("missing \"app\" (or set \"active_window\": true)"),
-            };
-            let spec = LaunchSpec {
-                app,
-                args: serde_json::from_value(args.get("args").cloned().unwrap_or(json!([])))?,
-                env: serde_json::from_value(args.get("env").cloned().unwrap_or(json!({})))?,
-                cwd: opt_str(args, "cwd"),
-                new_instance: flag(args, "new_instance", false),
-                foreground: flag(args, "foreground", false),
-                active_window,
-                skip_pids: if active_window {
-                    client_pids()
-                } else {
-                    Vec::new()
-                },
-                display_size,
-                device: None,
-            };
-            start(handler, spec)
-        }
+        "start_session" => start(handler, launch_spec(args)?),
         "ios_simulator_start_session"
         | "android_emulator_start_session"
         | "phone_start_session" => {
