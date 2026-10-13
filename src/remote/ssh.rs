@@ -1222,6 +1222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_unusable_ssh_on_path_is_an_error() {
         let base = std::env::temp_dir().join(format!("ocu-path-{}", std::process::id()));
         let (good, spaced) = (base.join("bin"), base.join("a b"));
@@ -1277,6 +1278,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn exposure_check_flags_any_other_listener() {
         let script = remote_script(&RemoteJob::Install {
             version: "0.6.0",
