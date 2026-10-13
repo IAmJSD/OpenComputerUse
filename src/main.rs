@@ -45,6 +45,9 @@ USAGE:
     opencomputeruse ssh-setup user@host --name NAME [-i KEYFILE]
                                           Install this version on a Linux host over SSH, serve it there
                                           on loopback only, and keep an SSH tunnel to it up from here
+    opencomputeruse ssh-setup user@host --name NAME --use-installed [--remote-port P]
+                                          Instead connect to an opencomputeruse already running there
+                                          (Linux or macOS; its HTTP server on port P, default 8642)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse skill                 Print the skill other devices use to drive a host
     opencomputeruse [agent]               Open the app's window (on macOS, --background starts it hidden)

@@ -1,7 +1,9 @@
 //! `opencomputeruse ssh-setup user@host --name NAME`: installs this version
 //! on a Linux host over SSH, has it serve on that host's loopback only,
 //! makes a device key there, and keeps an SSH tunnel to it up from this
-//! computer. The hosts file then holds a plain `http://127.0.0.1:PORT` URL,
+//! computer. With `--use-installed` it instead connects to an
+//! opencomputeruse already running there (Linux or macOS) and changes
+//! nothing on the host but the new device. The hosts file then holds a plain `http://127.0.0.1:PORT` URL,
 //! so the generic skill needs nothing new.
 //!
 //! The builders are pure; `setup` is the runner. Host, name and key path are
@@ -75,22 +77,40 @@ pub fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// What a remote host reports for `uname -sm`; only Linux on x86_64 or
-/// aarch64 has a release binary.
-pub fn parse_probe(out: &str) -> Result<String> {
+/// What a remote host reports for `uname -sm`. Installing needs a release
+/// binary, so only Linux on x86_64 or aarch64; connecting to an install that
+/// is already there (`connect`) also takes macOS.
+pub fn parse_probe(out: &str, connect: bool) -> Result<String> {
     let out = last_line(out);
     let mut it = out.split_whitespace();
     let (os, arch) = (it.next().unwrap_or_default(), it.next().unwrap_or_default());
     match (os, arch) {
         ("Linux", "x86_64" | "amd64" | "aarch64" | "arm64") => Ok(format!("{os} {arch}")),
-        ("Darwin", _) => {
-            bail!("macOS remotes are not supported yet; only Linux x86_64 and aarch64")
-        }
+        ("Linux" | "Darwin", _) if connect && !arch.is_empty() => Ok(format!("{os} {arch}")),
+        ("Darwin", _) => bail!(
+            "macOS remotes are not installed over ssh yet; with opencomputeruse already there, use --use-installed"
+        ),
+        _ if connect => bail!(
+            "unsupported remote \"{}\"; --use-installed needs Linux or macOS",
+            out.trim()
+        ),
         _ => bail!(
             "unsupported remote \"{}\"; only Linux x86_64 and aarch64 have a release",
             out.trim()
         ),
     }
+}
+
+/// The remote opencomputeruse path the check script reports: absolute, one
+/// line. It is not `validate_path`d: `$HOME` may hold spaces. It only ever
+/// reaches the remote as a quoted value.
+pub fn validate_remote_bin(path: &str) -> Result<()> {
+    ensure!(
+        path.starts_with('/') && !path.chars().any(char::is_control),
+        "the remote reported \"{}\" as opencomputeruse, which is not an absolute path",
+        path.escape_debug()
+    );
+    Ok(())
 }
 
 /// The last non-empty line: login banners come before a command's output.
@@ -159,11 +179,11 @@ pub fn ssh_args(t: &Target, mode: Mode, remote: &[&str]) -> Vec<String> {
 
 /// Arguments for the long-running tunnel from `127.0.0.1:local` to the
 /// remote loopback server. Never asks, never accepts an unknown host key.
-pub fn tunnel_args(t: &Target, local: u16) -> Vec<String> {
+pub fn tunnel_args(t: &Target, local: u16, remote_port: u16) -> Vec<String> {
     let mut a: Vec<String> = [
         "-N",
         "-L",
-        &format!("127.0.0.1:{local}:127.0.0.1:{REMOTE_PORT}"),
+        &format!("127.0.0.1:{local}:127.0.0.1:{remote_port}"),
         "-o",
         "BatchMode=yes",
         "-o",
@@ -185,10 +205,25 @@ pub fn tunnel_args(t: &Target, local: u16) -> Vec<String> {
 
 // ------------------------------------------------------- remote script
 
+/// `bin` is the remote opencomputeruse the check found; `None` is the one
+/// the install put in `~/.local/bin`.
 pub enum RemoteJob<'a> {
-    Install { version: &'a str, port: u16 },
-    DeviceAdd { name: &'a str, url: &'a str },
-    DeviceRemove { name: &'a str },
+    Install {
+        version: &'a str,
+        port: u16,
+    },
+    Check {
+        port: u16,
+    },
+    DeviceAdd {
+        bin: Option<&'a str>,
+        name: &'a str,
+        url: &'a str,
+    },
+    DeviceRemove {
+        bin: Option<&'a str>,
+        name: &'a str,
+    },
 }
 
 /// `s` as one shell word.
@@ -197,8 +232,9 @@ fn sh_quote(s: &str) -> String {
 }
 
 /// The awk program that turns /proc/net/tcp{,6} lines into `addr:port`
-/// for listeners on the port: loopback (v4, v6 and v4-mapped) as
-/// 127.0.0.1, all-zero as 0.0.0.0, anything else as `other`.
+/// for listeners on the port: loopback (v4 and v4-mapped) as 127.0.0.1, v6
+/// loopback as `[::1]` (a tunnel to 127.0.0.1 cannot reach it), all-zero as
+/// 0.0.0.0, anything else as `other`.
 macro_rules! proc_awk {
     () => {
         r#"
@@ -206,10 +242,34 @@ macro_rules! proc_awk {
         split($2, a, ":")
         if (a[2] != hex) next
         ip = a[1]
-        if (ip == "0100007F" || ip == "00000000000000000000000001000000" || ip == "0000000000000000FFFF00000100007F") print "127.0.0.1:" port
+        if (ip == "0100007F" || ip == "0000000000000000FFFF00000100007F") print "127.0.0.1:" port
+        else if (ip == "00000000000000000000000001000000") print "[::1]:" port
         else if (ip ~ /^0+$/) print "0.0.0.0:" port
         else print "other:" port
       }"#
+    };
+}
+
+/// The shell function `listeners`, which prints the `addr:port` of every
+/// listener, from ss or /proc/net/tcp; it fails with neither. `$OCU_PORT`
+/// must be set.
+macro_rules! listeners_fn {
+    () => {
+        concat!(
+            r#"listeners() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn | awk 'NR > 1 { print $4 }'
+  elif [ -r /proc/net/tcp ]; then
+    hex=$(printf '%04X' "$OCU_PORT")
+    cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v hex="$hex" -v port="$OCU_PORT" '"#,
+            proc_awk!(),
+            r#"'
+  else
+    return 1
+  fi
+}
+"#
+        )
     };
 }
 
@@ -248,19 +308,9 @@ loginctl enable-linger "$(id -un)" 2>/dev/null \
 
 "$bin" serve --install --port "$OCU_PORT" --listen-on 127.0.0.1
 
-listeners() {
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltn | awk 'NR > 1 { print $4 }'
-  elif [ -r /proc/net/tcp ]; then
-    hex=$(printf '%04X' "$OCU_PORT")
-    cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v hex="$hex" -v port="$OCU_PORT" '"#,
-    proc_awk!(),
-    r#"'
-  else
-    return 1
-  fi
-}
-i=0
+"#,
+    listeners_fn!(),
+    r#"i=0
 while :; do
   out=$(listeners) || fail "need ss or /proc/net/tcp to check what the server listens on"
   printf '%s\n' "$out" | grep -qx "127.0.0.1:$OCU_PORT" && break
@@ -274,12 +324,52 @@ echo "ocu-setup: serving on 127.0.0.1:$OCU_PORT" >&2
 "#
 );
 
+/// Finds an existing install and checks that it serves on `$OCU_PORT` where a
+/// tunnel to 127.0.0.1 gets through. Changes nothing on the host. stdout is
+/// the binary's path; the version and warnings go to stderr.
+const CHECK_BODY: &str = concat!(
+    r#"set -eu
+fail() { echo "ocu-setup: $*" >&2; exit 1; }
+bin=
+c=$(command -v opencomputeruse 2>/dev/null || true)
+case "$c" in /*) [ -x "$c" ] && bin=$c ;; esac
+for c in /Applications/OpenComputerUse.app/Contents/MacOS/opencomputeruse \
+  "$HOME/Applications/OpenComputerUse.app/Contents/MacOS/opencomputeruse" \
+  "$HOME/.local/bin/opencomputeruse"; do
+  if [ -z "$bin" ] && [ -x "$c" ]; then bin=$c; fi
+done
+[ -n "$bin" ] || fail "opencomputeruse is not installed on this host (looked on PATH, in /Applications, ~/Applications and ~/.local/bin); install it there, or run without --use-installed"
+ver=$("$bin" --version 2>/dev/null) || fail "$bin does not run here"
+"$bin" device 2>&1 | grep -q 'device add' || fail "remote opencomputeruse is too old, update it"
+echo "ocu-version: $ver" >&2
+
+"#,
+    listeners_fn!(),
+    r#"
+if [ "$(uname -s)" = Darwin ]; then
+  command -v lsof >/dev/null 2>&1 || fail "need lsof to check what the server listens on"
+  out=$(lsof -nP -iTCP:"$OCU_PORT" -sTCP:LISTEN -Fn | sed -n 's/^n//p')
+  none="cannot verify that anything listens on port $OCU_PORT (lsof shows only this user's processes); turn the HTTP server on first if it is off"
+else
+  out=$(listeners) || fail "need ss or /proc/net/tcp to check what the server listens on"
+  none="nothing listens on port $OCU_PORT; turn the HTTP server on first"
+fi
+mine=$(printf '%s\n' "$out" | grep -E ":$OCU_PORT\$" || true)
+[ -n "$mine" ] || fail "$none"
+reach=$(printf '%s\n' "$mine" | grep -xE '(127\.0\.0\.1|0\.0\.0\.0|\*|\[::\]|\[::ffff:127\.0\.0\.1\]|\[::ffff:0\.0\.0\.0\]):'"$OCU_PORT" || true)
+[ -n "$reach" ] || fail "the server listens only on $(printf '%s' "$mine" | tr '\n' ' '), which a tunnel to 127.0.0.1 cannot reach; set listen_on to 127.0.0.1 or all"
+open=$(printf '%s\n' "$mine" | grep -vxE '(127\.0\.0\.1|\[::1\]|\[::ffff:127\.0\.0\.1\]):'"$OCU_PORT" || true)
+[ -z "$open" ] || echo "ocu-setup: warning: the server also listens on $(printf '%s' "$open" | tr '\n' ' '), not just loopback; limit it with listen_on if that is unintended" >&2
+printf '%s\n' "$bin"
+"#
+);
+
 const DEVICE_ADD_BODY: &str = r#"set -eu
-exec "$HOME/.local/bin/opencomputeruse" device add --name "$OCU_NAME" --url "$OCU_URL"
+exec "${OCU_BIN:-$HOME/.local/bin/opencomputeruse}" device add --name "$OCU_NAME" --url "$OCU_URL"
 "#;
 
 const DEVICE_REMOVE_BODY: &str = r#"set -eu
-exec "$HOME/.local/bin/opencomputeruse" device remove "$OCU_NAME"
+exec "${OCU_BIN:-$HOME/.local/bin/opencomputeruse}" device remove "$OCU_NAME"
 "#;
 
 /// The script to feed `sh -s` on the remote: a few quoted assignments, then
@@ -301,7 +391,11 @@ pub fn remote_script(job: &RemoteJob) -> Result<String> {
             set("OCU_RELEASES", RELEASES_DOWNLOAD);
             INSTALL_BODY
         }
-        RemoteJob::DeviceAdd { name, url } => {
+        RemoteJob::Check { port } => {
+            set("OCU_PORT", &port.to_string());
+            CHECK_BODY
+        }
+        RemoteJob::DeviceAdd { bin, name, url } => {
             validate_name(name)?;
             ensure!(
                 url.starts_with("http://127.0.0.1:")
@@ -310,12 +404,20 @@ pub fn remote_script(job: &RemoteJob) -> Result<String> {
                         .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '.')),
                 "odd url \"{url}\""
             );
+            if let Some(b) = bin {
+                validate_remote_bin(b)?;
+                set("OCU_BIN", b);
+            }
             set("OCU_NAME", name);
             set("OCU_URL", url);
             DEVICE_ADD_BODY
         }
-        RemoteJob::DeviceRemove { name } => {
+        RemoteJob::DeviceRemove { bin, name } => {
             validate_name(name)?;
+            if let Some(b) = bin {
+                validate_remote_bin(b)?;
+                set("OCU_BIN", b);
+            }
             set("OCU_NAME", name);
             DEVICE_REMOVE_BODY
         }
@@ -448,21 +550,40 @@ struct Parsed {
     host: String,
     name: String,
     key: Option<String>,
+    /// Connect to an opencomputeruse already on the remote instead of
+    /// installing one.
+    use_installed: bool,
+    remote_port: u16,
 }
 
 fn parse_args(args: &[String]) -> Result<Parsed> {
-    let (mut host, mut name, mut key) = (None, None, None);
+    let (mut host, mut name, mut key, mut remote_port) = (None, None, None, None);
+    let mut use_installed = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--name" => name = it.next().cloned(),
             "-i" | "--identity" => key = it.next().cloned(),
+            "--use-installed" => use_installed = true,
+            "--remote-port" => {
+                let v = it.next().map(String::as_str).unwrap_or_default();
+                remote_port = Some(
+                    v.parse::<u16>()
+                        .ok()
+                        .filter(|p| *p != 0)
+                        .with_context(|| format!("--remote-port takes 1 to 65535, not \"{v}\""))?,
+                );
+            }
             _ if a.starts_with('-') => bail!("unknown option \"{a}\" for ssh-setup"),
             _ if host.is_none() => host = Some(a.clone()),
             _ => bail!("unexpected \"{a}\""),
         }
     }
-    let usage = "usage: opencomputeruse ssh-setup user@host --name NAME [-i KEYFILE]";
+    let usage = "usage: opencomputeruse ssh-setup user@host --name NAME [-i KEYFILE] [--use-installed [--remote-port P]]";
+    ensure!(
+        use_installed || remote_port.is_none(),
+        "--remote-port only goes with --use-installed"
+    );
     let (host, name) = (host.context(usage)?, name.context(usage)?);
     let key = key.map(|k| match k.strip_prefix("~/") {
         Some(rest) => crate::clients::home()
@@ -477,7 +598,48 @@ fn parse_args(args: &[String]) -> Result<Parsed> {
         validate_path(k)?;
         ensure!(Path::new(k).is_file(), "no key file at {k}");
     }
-    Ok(Parsed { host, name, key })
+    Ok(Parsed {
+        host,
+        name,
+        key,
+        use_installed,
+        remote_port: remote_port.unwrap_or(REMOTE_PORT),
+    })
+}
+
+/// What the remote check reported.
+#[derive(Debug, PartialEq)]
+struct Checked {
+    bin: String,
+    warnings: Vec<String>,
+}
+
+/// Reads the check script's output: the binary on the last stdout line, its
+/// version and the script's warnings on stderr. A different version from
+/// `local_version` is a warning, not an error.
+fn parse_check(stdout: &str, stderr: &str, local_version: &str) -> Result<Checked> {
+    let bin = last_line(stdout);
+    validate_remote_bin(bin)?;
+    let mut warnings: Vec<String> = stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("ocu-setup: warning: "))
+        .map(String::from)
+        .collect();
+    let remote = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("ocu-version: opencomputeruse "))
+        .map(str::trim);
+    match remote {
+        Some(v) if v == local_version => {}
+        Some(v) => warnings.push(format!(
+            "the remote runs opencomputeruse {v}, this computer {local_version}; they may not match"
+        )),
+        None => warnings.push("the remote did not report its version".into()),
+    }
+    Ok(Checked {
+        bin: bin.into(),
+        warnings,
+    })
 }
 
 /// The first `ssh` on PATH, which must be a path that is safe in a unit or
@@ -663,9 +825,9 @@ fn remove_tunnel(name: &str) {
     }
 }
 
-fn install_tunnel(t: &Target, name: &str, local: u16) -> Result<()> {
+fn install_tunnel(t: &Target, name: &str, local: u16, remote_port: u16) -> Result<()> {
     let ssh = find_ssh()?;
-    let args = tunnel_args(t, local);
+    let args = tunnel_args(t, local, remote_port);
     std::fs::create_dir_all(unit_dir())?;
     let text = if cfg!(target_os = "macos") {
         tunnel_plist(name, &ssh, &args)?
@@ -818,7 +980,7 @@ pub fn setup(args: &[String]) -> Result<()> {
         false,
         "connecting",
     )?;
-    println!("Remote: {}.", parse_probe(&probe.stdout)?);
+    println!("Remote: {}.", parse_probe(&probe.stdout, p.use_installed)?);
 
     let dir = unit_dir();
     let existing = if cfg!(target_os = "macos") {
@@ -831,23 +993,47 @@ pub fn setup(args: &[String]) -> Result<()> {
     })?;
     let url = format!("http://127.0.0.1:{local}");
 
-    println!(
-        "Installing opencomputeruse {} on the remote...",
-        env!("CARGO_PKG_VERSION")
-    );
-    let install = remote_script(&RemoteJob::Install {
-        version: env!("CARGO_PKG_VERSION"),
-        port: REMOTE_PORT,
-    })?;
     let batch = |remote: &[&str]| ssh_args(&target, Mode::Batch, remote);
-    run_checked(
-        &batch(&["sh", "-s"]),
-        Some(&install),
-        false,
-        "the remote install (key login is required from here on)",
-    )?;
+    let checked = if p.use_installed {
+        println!(
+            "Checking the opencomputeruse already on the remote (port {})...",
+            p.remote_port
+        );
+        let check = remote_script(&RemoteJob::Check {
+            port: p.remote_port,
+        })?;
+        let out = run_checked(
+            &batch(&["sh", "-s"]),
+            Some(&check),
+            true,
+            "the remote check (key login is required from here on)",
+        )?;
+        let c = parse_check(&out.stdout, &out.stderr, env!("CARGO_PKG_VERSION"))?;
+        for w in &c.warnings {
+            eprintln!("Warning: {w}");
+        }
+        Some(c)
+    } else {
+        println!(
+            "Installing opencomputeruse {} on the remote...",
+            env!("CARGO_PKG_VERSION")
+        );
+        let install = remote_script(&RemoteJob::Install {
+            version: env!("CARGO_PKG_VERSION"),
+            port: REMOTE_PORT,
+        })?;
+        run_checked(
+            &batch(&["sh", "-s"]),
+            Some(&install),
+            false,
+            "the remote install (key login is required from here on)",
+        )?;
+        None
+    };
+    let bin = checked.as_ref().map(|c| c.bin.as_str());
 
     let add = remote_script(&RemoteJob::DeviceAdd {
+        bin,
         name: &p.name,
         url: &url,
     })?;
@@ -859,11 +1045,17 @@ pub fn setup(args: &[String]) -> Result<()> {
     )?;
     let key = last_line(&added.stdout).to_string();
     let regenerated = added.stderr.contains("ocu-device: regenerated");
+    if regenerated && p.use_installed {
+        eprintln!(
+            "WARNING: the remote already had a device named \"{}\"; it got a new key, so whatever used the old key stops working. Pick an unused --name to avoid that.",
+            p.name
+        );
+    }
     let previous_tunnel = std::fs::read_to_string(tunnel_file(&p.name)).ok();
 
     let finish = || -> Result<PathBuf> {
         ensure!(is_key(&key), "the remote did not return a key");
-        install_tunnel(&target, &p.name, local)?;
+        install_tunnel(&target, &p.name, local, p.remote_port)?;
         check_tunnel(local, &key)?;
         super::save_host_entry(&skill::named_host_entry(&p.name, &url, &key))
     };
@@ -877,7 +1069,7 @@ pub fn setup(args: &[String]) -> Result<()> {
                     p.name
                 );
             } else {
-                let rm = remote_script(&RemoteJob::DeviceRemove { name: &p.name })?;
+                let rm = remote_script(&RemoteJob::DeviceRemove { bin, name: &p.name })?;
                 let undone = run_checked(
                     &batch(&["sh", "-s"]),
                     Some(&rm),
@@ -971,14 +1163,25 @@ mod tests {
 
     #[test]
     fn probe_output() {
-        assert!(parse_probe("Linux x86_64\n").is_ok());
-        assert!(parse_probe("Linux aarch64\n").is_ok());
-        assert!(parse_probe("Darwin arm64\n")
+        assert!(parse_probe("Linux x86_64\n", false).is_ok());
+        assert!(parse_probe("Linux aarch64\n", false).is_ok());
+        let mac = parse_probe("Darwin arm64\n", false)
             .unwrap_err()
-            .to_string()
-            .contains("macOS"));
-        assert!(parse_probe("Linux riscv64\n").is_err());
-        assert!(parse_probe("").is_err());
+            .to_string();
+        assert!(mac.contains("macOS") && mac.contains("--use-installed"));
+        assert!(parse_probe("Linux riscv64\n", false).is_err());
+        assert!(parse_probe("", false).is_err());
+        assert!(parse_probe("", true).is_err());
+    }
+
+    #[test]
+    fn connecting_accepts_macos_and_any_linux() {
+        assert_eq!(parse_probe("Darwin arm64\n", true).unwrap(), "Darwin arm64");
+        assert_eq!(
+            parse_probe("Linux riscv64\n", true).unwrap(),
+            "Linux riscv64"
+        );
+        assert!(parse_probe("FreeBSD amd64\n", true).is_err());
     }
 
     #[test]
@@ -1012,7 +1215,7 @@ mod tests {
 
     #[test]
     fn tunnel_argv_never_weakens_host_checking() {
-        let a = tunnel_args(&target(Some("/k/id")), 18650);
+        let a = tunnel_args(&target(Some("/k/id")), 18650, 8642);
         let joined = a.join(" ");
         assert!(joined.contains("-L 127.0.0.1:18650:127.0.0.1:8642"));
         for want in [
@@ -1051,11 +1254,21 @@ mod tests {
                 version: "0.6.0",
                 port: 8642,
             },
+            RemoteJob::Check { port: 8642 },
             RemoteJob::DeviceAdd {
+                bin: None,
                 name: "box-1",
                 url: "http://127.0.0.1:18642",
             },
-            RemoteJob::DeviceRemove { name: "box-1" },
+            RemoteJob::DeviceAdd {
+                bin: Some("/Users/me/My Apps/it's/opencomputeruse"),
+                name: "box-1",
+                url: "http://127.0.0.1:18642",
+            },
+            RemoteJob::DeviceRemove {
+                bin: Some("/opt/ocu"),
+                name: "box-1",
+            },
         ];
         for job in &jobs {
             let s = remote_script(job).unwrap();
@@ -1066,22 +1279,26 @@ mod tests {
     #[test]
     fn script_values_are_quoted_and_validated() {
         let s = remote_script(&RemoteJob::DeviceAdd {
+            bin: None,
             name: "n",
             url: "http://127.0.0.1:1",
         })
         .unwrap();
         assert!(s.starts_with("OCU_NAME='n'\nOCU_URL='http://127.0.0.1:1'\n"));
         assert!(remote_script(&RemoteJob::DeviceAdd {
+            bin: None,
             name: "n; id",
             url: "http://127.0.0.1:1"
         })
         .is_err());
         assert!(remote_script(&RemoteJob::DeviceAdd {
+            bin: None,
             name: "n",
             url: "http://evil:1"
         })
         .is_err());
         assert!(remote_script(&RemoteJob::DeviceAdd {
+            bin: None,
             name: "n",
             url: "http://127.0.0.1:1';id"
         })
@@ -1091,7 +1308,11 @@ mod tests {
             port: 1
         })
         .is_err());
-        assert!(remote_script(&RemoteJob::DeviceRemove { name: "$(id)" }).is_err());
+        assert!(remote_script(&RemoteJob::DeviceRemove {
+            bin: None,
+            name: "$(id)"
+        })
+        .is_err());
     }
 
     #[cfg(unix)]
@@ -1108,7 +1329,7 @@ mod tests {
 
     #[test]
     fn systemd_unit_text() {
-        let args = tunnel_args(&target(Some("/k/id")), 18650);
+        let args = tunnel_args(&target(Some("/k/id")), 18650, 8642);
         let unit = tunnel_unit("box", "me@box.example", "/usr/bin/ssh", &args).unwrap();
         for want in [
             "Restart=always\n",
@@ -1128,7 +1349,7 @@ mod tests {
 
     #[test]
     fn plist_text() {
-        let args = tunnel_args(&target(Some("/k/id")), 18650);
+        let args = tunnel_args(&target(Some("/k/id")), 18650, 8642);
         let plist = tunnel_plist("box", "/usr/bin/ssh", &args).unwrap();
         for want in [
             "<string>com.infrawrench.opencomputeruse.tunnel.box</string>",
@@ -1146,7 +1367,7 @@ mod tests {
 
     #[test]
     fn ports_are_read_back_from_units_and_plists() {
-        let args = tunnel_args(&target(None), 18661);
+        let args = tunnel_args(&target(None), 18661, 8642);
         let unit = tunnel_unit("a", "me@box.example", "/usr/bin/ssh", &args).unwrap();
         let plist = tunnel_plist("a", "/usr/bin/ssh", &args).unwrap();
         assert_eq!(tunnel_port(&unit), Some(18661));
@@ -1158,7 +1379,7 @@ mod tests {
     fn existing_tunnels_are_found_by_file_name() {
         let dir = std::env::temp_dir().join(format!("ocu-tunnels-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let args = tunnel_args(&target(None), 18643);
+        let args = tunnel_args(&target(None), 18643, 8642);
         std::fs::write(
             dir.join("ocu-tunnel-one.service"),
             tunnel_unit("one", "me@h", "/usr/bin/ssh", &args).unwrap(),
@@ -1202,7 +1423,7 @@ mod tests {
     fn banners_before_output_are_skipped() {
         assert_eq!(last_line("Welcome\n\nocu_ab12\n\n"), "ocu_ab12");
         assert_eq!(last_line(""), "");
-        assert!(parse_probe("Last login: x\nLinux x86_64\n").is_ok());
+        assert!(parse_probe("Last login: x\nLinux x86_64\n", false).is_ok());
     }
 
     #[test]
@@ -1273,7 +1494,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "127.0.0.1:8642\n127.0.0.1:8642\n127.0.0.1:8642\n0.0.0.0:8642\n0.0.0.0:8642\nother:8642\nother:8642\n"
+            "127.0.0.1:8642\n[::1]:8642\n127.0.0.1:8642\n0.0.0.0:8642\n0.0.0.0:8642\nother:8642\nother:8642\n"
         );
     }
 
@@ -1292,6 +1513,7 @@ mod tests {
             ("127.0.0.1:8642\n[::ffff:0.0.0.0]:8642", true),
             ("127.0.0.1:8642\n*:8642", true),
             ("127.0.0.1:8642\n0.0.0.0:80", false),
+            ("127.0.0.1:8642\n[::1]:8642", true),
         ] {
             let out = Command::new("sh")
                 .args([
@@ -1304,6 +1526,357 @@ mod tests {
                 .unwrap();
             assert_eq!(!out.stdout.is_empty(), exposed, "{listeners}");
         }
+    }
+
+    #[test]
+    fn connect_flags() {
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let base = ["me@box", "--name", "box"];
+        let with = |extra: &[&str]| s(&[&base[..], extra].concat());
+        let p = parse_args(&with(&[])).unwrap();
+        assert_eq!((p.use_installed, p.remote_port), (false, REMOTE_PORT));
+        let p = parse_args(&with(&["--use-installed"])).unwrap();
+        assert_eq!((p.use_installed, p.remote_port), (true, REMOTE_PORT));
+        let p = parse_args(&with(&["--use-installed", "--remote-port", "9000"])).unwrap();
+        assert_eq!(p.remote_port, 9000);
+        let p = parse_args(&with(&["--remote-port", "65535", "--use-installed"])).unwrap();
+        assert_eq!(p.remote_port, 65535);
+        for bad in ["0", "65536", "-1", "x", ""] {
+            assert!(
+                parse_args(&with(&["--use-installed", "--remote-port", bad])).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(parse_args(&with(&["--use-installed", "--remote-port"])).is_err());
+        assert!(parse_args(&with(&["--remote-port", "9000"])).is_err());
+    }
+
+    #[test]
+    fn tunnel_forwards_to_the_remote_port() {
+        let a = tunnel_args(&target(None), 18650, 9000);
+        assert!(a.contains(&"127.0.0.1:18650:127.0.0.1:9000".to_string()));
+        let unit = tunnel_unit("box", "me@box.example", "/usr/bin/ssh", &a).unwrap();
+        assert!(unit.contains("\"127.0.0.1:18650:127.0.0.1:9000\""));
+        assert_eq!(tunnel_port(&unit), Some(18650));
+    }
+
+    #[test]
+    fn remote_bin_must_be_one_absolute_line() {
+        assert!(validate_remote_bin("/Users/me/My Apps/opencomputeruse").is_ok());
+        for bad in ["", "opencomputeruse", "./x", "/a\nb", "/a\rb", "/a\u{0}b"] {
+            assert!(validate_remote_bin(bad).is_err(), "{bad:?}");
+            assert!(
+                remote_script(&RemoteJob::DeviceAdd {
+                    bin: Some(bad),
+                    name: "n",
+                    url: "http://127.0.0.1:1"
+                })
+                .is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_output_is_read_from_both_streams() {
+        let err = "ocu-version: opencomputeruse 1.2.3\nocu-setup: warning: exposed\n";
+        let c = parse_check("banner\n/opt/ocu\n", err, "1.2.3").unwrap();
+        assert_eq!(
+            c,
+            Checked {
+                bin: "/opt/ocu".into(),
+                warnings: vec!["exposed".into()]
+            }
+        );
+        let c = parse_check("/opt/ocu\n", err, "1.2.4").unwrap();
+        assert_eq!(c.warnings.len(), 2);
+        assert!(c.warnings[1].contains("1.2.3") && c.warnings[1].contains("1.2.4"));
+        assert!(parse_check("relative\n", err, "1.2.3").is_err());
+        assert!(parse_check("", err, "1.2.3").is_err());
+    }
+
+    /// A temp directory laid out like a remote host: a fake HOME and a first
+    /// PATH entry holding fake commands, so nothing real is consulted.
+    #[cfg(unix)]
+    struct Fake {
+        dir: PathBuf,
+        home: PathBuf,
+        bins: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Fake {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("ocu-fake-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self {
+                home: dir.join("home"),
+                bins: dir.join("bin"),
+                dir,
+            }
+        }
+
+        fn exe(&self, path: &Path, body: &str) {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn bin(&self, name: &str) -> PathBuf {
+            self.bins.join(name)
+        }
+
+        /// A fake opencomputeruse on PATH whose `device` prints `device_out`.
+        fn ocu(&self, device_out: &str) {
+            self.exe(
+                &self.bin("opencomputeruse"),
+                &format!(
+                    "case \"$1\" in --version) echo 'opencomputeruse 9.9.9' ;; device) echo '{device_out}' >&2; exit 1 ;; esac"
+                ),
+            );
+        }
+
+        /// Fake `uname -s` and `ss -ltn`, whose rows are `listeners`.
+        fn linux(&self, listeners: &[&str]) {
+            self.exe(&self.bin("uname"), "echo Linux");
+            let rows: String = listeners
+                .iter()
+                .map(|a| format!("LISTEN 0 128 {a} 0.0.0.0:*\n"))
+                .collect();
+            std::fs::write(
+                self.dir.join("ss.txt"),
+                format!("State Recv-Q Send-Q Local Address:Port Peer Address:Port\n{rows}"),
+            )
+            .unwrap();
+            self.exe(
+                &self.bin("ss"),
+                &format!("cat '{}'", self.dir.join("ss.txt").display()),
+            );
+        }
+
+        /// Fake `uname -s` and `lsof -Fn`, which lists `names`.
+        fn mac(&self, names: &[&str]) {
+            self.exe(&self.bin("uname"), "echo Darwin");
+            let rows: String = names.iter().map(|n| format!("p1\\nn{n}\\n")).collect();
+            self.exe(&self.bin("lsof"), &format!("printf '{rows}'"));
+        }
+
+        /// Runs `job` as the remote would, as `sh -s` with the fake HOME and
+        /// PATH; (success, stdout, stderr).
+        fn run(&self, job: &RemoteJob) -> (bool, String, String) {
+            let mut child = Command::new("sh")
+                .arg("-s")
+                .env_clear()
+                .env("HOME", &self.home)
+                .env("PATH", format!("{}:/usr/bin:/bin", self.bins.display()))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(remote_script(job).unwrap().as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        }
+
+        fn check(&self) -> (bool, String, String) {
+            self.run(&RemoteJob::Check { port: 8642 })
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[cfg(unix)]
+    const OLD: &str = "error: unknown command device";
+    #[cfg(unix)]
+    const NEW: &str = "usage: opencomputeruse device add --name N --url U | device remove NAME";
+
+    #[test]
+    #[cfg(unix)]
+    fn check_finds_a_loopback_listener() {
+        for listeners in [
+            &["127.0.0.1:8642"][..],
+            &["127.0.0.1:8642", "[::1]:8642"],
+            &["[::ffff:127.0.0.1]:8642", "0.0.0.0:22"],
+        ] {
+            let f = Fake::new("found");
+            f.ocu(NEW);
+            f.linux(listeners);
+            let (ok, out, err) = f.check();
+            assert!(ok, "{listeners:?}: {err}");
+            assert_eq!(out, format!("{}\n", f.bin("opencomputeruse").display()));
+            assert!(err.contains("ocu-version: opencomputeruse 9.9.9"), "{err}");
+            assert!(!err.contains("warning"), "{err}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_reports_a_binary_with_spaces_in_its_path() {
+        let mut f = Fake::new("spaces");
+        f.bins = f.dir.join("my bin");
+        f.ocu(NEW);
+        f.linux(&["127.0.0.1:8642"]);
+        let (ok, out, err) = f.check();
+        assert!(ok, "{err}");
+        assert_eq!(out, format!("{}\n", f.bin("opencomputeruse").display()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_fails_when_nothing_is_installed() {
+        let apps = [
+            "/Applications/OpenComputerUse.app/Contents/MacOS/opencomputeruse",
+            "/usr/bin/opencomputeruse",
+        ];
+        if apps.iter().any(|a| Path::new(a).exists()) {
+            return; // this machine has a real install the script would find
+        }
+        let f = Fake::new("none");
+        f.linux(&["127.0.0.1:8642"]);
+        let (ok, out, err) = f.check();
+        assert!(!ok && out.is_empty());
+        assert!(err.contains("not installed"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_fails_on_a_binary_without_device_add() {
+        let f = Fake::new("old");
+        f.ocu(OLD);
+        f.linux(&["127.0.0.1:8642"]);
+        let (ok, _, err) = f.check();
+        assert!(!ok && err.contains("too old"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_fails_when_nothing_listens() {
+        let f = Fake::new("quiet");
+        f.ocu(NEW);
+        f.linux(&["127.0.0.1:22", "0.0.0.0:80"]);
+        let (ok, _, err) = f.check();
+        assert!(!ok && err.contains("nothing listens on port 8642"), "{err}");
+        assert!(err.contains("turn the HTTP server on"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_fails_when_the_listener_is_not_reachable_through_127_0_0_1() {
+        for (listeners, shown) in [
+            (&["10.0.0.5:8642"][..], "10.0.0.5:8642"),
+            (&["[::1]:8642"], "[::1]:8642"),
+            (&["10.0.0.5:8642", "[::1]:8642"], "10.0.0.5:8642"),
+        ] {
+            let f = Fake::new("elsewhere");
+            f.ocu(NEW);
+            f.linux(listeners);
+            let (ok, out, err) = f.check();
+            assert!(!ok && out.is_empty(), "{listeners:?}");
+            assert!(
+                err.contains("listens only on") && err.contains(shown),
+                "{err}"
+            );
+            assert!(err.contains("listen_on"), "{err}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_warns_about_wildcard_and_extra_listeners_but_passes() {
+        for (listeners, shown) in [
+            (&["*:8642"][..], "*:8642"),
+            (&["0.0.0.0:8642"], "0.0.0.0:8642"),
+            (&["[::]:8642"], "[::]:8642"),
+            (&["127.0.0.1:8642", "10.0.0.5:8642"], "10.0.0.5:8642"),
+        ] {
+            let f = Fake::new("wild");
+            f.ocu(NEW);
+            f.linux(listeners);
+            let (ok, out, err) = f.check();
+            assert!(ok && !out.is_empty(), "{listeners:?}: {err}");
+            let warning = err
+                .lines()
+                .find(|l| l.starts_with("ocu-setup: warning:"))
+                .unwrap_or_else(|| panic!("no warning for {listeners:?}: {err}"));
+            assert!(warning.contains(shown), "{warning}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_on_macos_uses_lsof() {
+        let f = Fake::new("mac");
+        f.ocu(NEW);
+        f.mac(&["127.0.0.1:8642"]);
+        let (ok, _, err) = f.check();
+        assert!(ok && !err.contains("warning"), "{err}");
+
+        f.mac(&["*:8642"]);
+        let (ok, _, err) = f.check();
+        assert!(ok && err.contains("warning"), "{err}");
+
+        f.mac(&["[::1]:8642"]);
+        let (ok, _, err) = f.check();
+        assert!(!ok && err.contains("[::1]:8642"), "{err}");
+
+        f.mac(&[]);
+        let (ok, _, err) = f.check();
+        assert!(!ok && err.contains("cannot verify"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn device_jobs_run_the_located_binary_with_a_quoted_path() {
+        let f = Fake::new("device");
+        let tricky = f.dir.join("My Apps").join("it's");
+        let bin = tricky.join("opencomputeruse");
+        f.exe(&bin, "echo \"$@\"");
+        let bin = bin.to_string_lossy().into_owned();
+        let add = f.run(&RemoteJob::DeviceAdd {
+            bin: Some(&bin),
+            name: "box",
+            url: "http://127.0.0.1:18642",
+        });
+        assert_eq!(
+            add,
+            (
+                true,
+                "device add --name box --url http://127.0.0.1:18642\n".into(),
+                String::new()
+            )
+        );
+        let rm = f.run(&RemoteJob::DeviceRemove {
+            bin: Some(&bin),
+            name: "box",
+        });
+        assert_eq!(rm, (true, "device remove box\n".into(), String::new()));
+
+        f.exe(
+            &f.dir.join("home/.local/bin/opencomputeruse"),
+            "echo installed \"$1\"",
+        );
+        let add = f.run(&RemoteJob::DeviceAdd {
+            bin: None,
+            name: "box",
+            url: "http://127.0.0.1:18642",
+        });
+        assert_eq!(add.1, "installed device\n");
     }
 
     #[test]
