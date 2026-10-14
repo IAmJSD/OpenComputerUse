@@ -61,26 +61,9 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// Which coordinates element frames are asked for in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Coords {
-    /// Screen coordinates, less the window's position: X11, where the
-    /// screen is real.
-    Screen,
-    /// Coordinates within the toplevel, less the toplevel's own position in
-    /// them (a client-side shadow): Wayland, which has no screen positions.
-    Window,
-}
-
-impl Coords {
-    /// `ATSPI_COORD_TYPE_SCREEN` or `ATSPI_COORD_TYPE_WINDOW`.
-    fn atspi(self) -> u32 {
-        match self {
-            Coords::Screen => 0,
-            Coords::Window => 1,
-        }
-    }
-}
+/// `ATSPI_COORD_TYPE_WINDOW`: frames within the toplevel. Wayland has no
+/// screen positions, and GTK 4 reports wrong ones on X11 too.
+const WINDOW_COORDS: u32 = 1;
 
 /// Apps that have embedded themselves, newest last.
 type Apps = Arc<Mutex<Vec<ObjRef>>>;
@@ -137,7 +120,6 @@ pub struct A11y {
 /// The last tree read, for acting on its elements by id.
 struct Read {
     window: u64,
-    coords: Coords,
     /// Subtracted from frames to put them in the window's coordinates.
     origin: (f64, f64),
     refs: Vec<ObjRef>,
@@ -192,12 +174,7 @@ impl A11y {
     }
 
     /// Reads `window`'s tree. Ids stay good until the next read.
-    pub fn tree(
-        &mut self,
-        window: &WindowInfo,
-        coords: Coords,
-        opts: &TreeOptions,
-    ) -> Result<UiNode> {
+    pub fn tree(&mut self, window: &WindowInfo, opts: &TreeOptions) -> Result<UiNode> {
         // A freshly started app may not have registered yet.
         let deadline = Instant::now() + Duration::from_secs(5);
         let apps = loop {
@@ -215,20 +192,17 @@ impl A11y {
         }
         let conn = self.conn.clone();
         let (refs, raws) = self.block_on(async {
-            let root = find_window(&conn, &apps, window, coords).await?;
-            anyhow::Ok(walk(&conn, root, coords, opts).await)
+            let root = find_window(&conn, &apps, window).await?;
+            anyhow::Ok(walk(&conn, root, opts).await)
         })?;
-        let origin = match coords {
-            Coords::Screen => (window.frame.x, window.frame.y),
-            Coords::Window => raws[0]
-                .extents
-                .map_or((0.0, 0.0), |(x, y, _, _)| (x as f64, y as f64)),
-        };
+        // Less the toplevel's own position in them: a client-side shadow.
+        let origin = raws[0]
+            .extents
+            .map_or((0.0, 0.0), |(x, y, _, _)| (x as f64, y as f64));
         let mut elements = Vec::new();
         let tree = map::build(&raws, 0, origin, &mut elements);
         self.last = Some(Read {
             window: window.id,
-            coords,
             origin,
             refs,
             raws,
@@ -264,7 +238,7 @@ impl A11y {
     pub fn center(&self, id: &str) -> Result<(u64, f64, f64)> {
         let (read, r, _, mapped) = self.element(id)?;
         let fresh = self
-            .block_on(extents(&self.conn, r, read.coords))
+            .block_on(extents(&self.conn, r))
             .filter(|&(_, _, w, h)| w > 0 && h > 0)
             .map(|(x, y, w, h)| ocu_core::Rect {
                 x: x as f64 - read.origin.0,
@@ -476,8 +450,8 @@ async fn step(conn: &Connection, r: &ObjRef, up: bool) -> Result<()> {
     set_number(conn, r, if up { now + by } else { now - by }).await
 }
 
-async fn extents(conn: &Connection, r: &ObjRef, coords: Coords) -> Option<(i32, i32, i32, i32)> {
-    call(conn, r, COMPONENT, "GetExtents", &(coords.atspi(),))
+async fn extents(conn: &Connection, r: &ObjRef) -> Option<(i32, i32, i32, i32)> {
+    call(conn, r, COMPONENT, "GetExtents", &(WINDOW_COORDS,))
         .await
         .ok()
 }
@@ -493,18 +467,7 @@ async fn children(conn: &Connection, r: &ObjRef) -> Vec<ObjRef> {
 
 /// The toplevel that is `window`: by its title, else the active one, else
 /// the first shown.
-async fn find_window(
-    conn: &Connection,
-    apps: &[ObjRef],
-    window: &WindowInfo,
-    coords: Coords,
-) -> Result<ObjRef> {
-    let same_place = |e: Option<(i32, i32, i32, i32)>| {
-        let f = &window.frame;
-        e.is_some_and(|(x, y, w, h)| {
-            (x as f64, y as f64, w as f64, h as f64) == (f.x, f.y, f.width, f.height)
-        })
-    };
+async fn find_window(conn: &Connection, apps: &[ObjRef], window: &WindowInfo) -> Result<ObjRef> {
     let mut best: Option<(u32, ObjRef)> = None;
     for app in apps.iter().rev() {
         for top in children(conn, app).await {
@@ -522,9 +485,7 @@ async fn find_window(
                 4
             } else if !title.is_empty() && !name.is_empty() && title.contains(name.trim()) {
                 3
-            } else if states.has(map::state::ACTIVE)
-                || (coords == Coords::Screen && same_place(extents(conn, &top, coords).await))
-            {
+            } else if states.has(map::state::ACTIVE) {
                 2
             } else {
                 1
@@ -541,7 +502,7 @@ async fn find_window(
 
 /// Reads one element: what it is, and the references of its children.
 /// `None` for one that is gone, hidden, or does not answer.
-async fn read(conn: &Connection, r: &ObjRef, coords: Coords) -> Option<(Raw, Vec<ObjRef>)> {
+async fn read(conn: &Connection, r: &ObjRef) -> Option<(Raw, Vec<ObjRef>)> {
     let (role, states, interfaces, name, description, kids) = tokio::join!(
         call::<_, String>(conn, r, ACCESSIBLE, "GetRoleName", &()),
         call::<_, Vec<u32>>(conn, r, ACCESSIBLE, "GetState", &()),
@@ -569,7 +530,7 @@ async fn read(conn: &Connection, r: &ObjRef, coords: Coords) -> Option<(Raw, Vec
     let (extents, actions, text, value) = tokio::join!(
         async {
             if interfaces.component {
-                extents(conn, r, coords).await
+                extents(conn, r).await
             } else {
                 None
             }
@@ -643,12 +604,7 @@ async fn read(conn: &Connection, r: &ObjRef, coords: Coords) -> Option<(Raw, Vec
 
 /// Walks the tree under `root` a level at a time, within the node budget,
 /// the depth limit and [`WALK`]. The root is element 0.
-async fn walk(
-    conn: &Connection,
-    root: ObjRef,
-    coords: Coords,
-    opts: &TreeOptions,
-) -> (Vec<ObjRef>, Vec<Raw>) {
+async fn walk(conn: &Connection, root: ObjRef, opts: &TreeOptions) -> (Vec<ObjRef>, Vec<Raw>) {
     let deadline = Instant::now() + WALK;
     let mut refs: Vec<ObjRef> = Vec::new();
     let mut raws: Vec<Raw> = Vec::new();
@@ -663,7 +619,7 @@ async fn walk(
         level.retain(|(r, _)| seen.insert(r.clone()));
         let read: Vec<_> = stream::iter(level)
             .map(|(r, parent)| async move {
-                let got = read(conn, &r, coords).await;
+                let got = read(conn, &r).await;
                 (r, parent, got)
             })
             .buffered(CONCURRENT)

@@ -34,7 +34,7 @@ use ocu_core::{
     TreeOptions, UiNode, ViewInput, Viewer, WindowInfo,
 };
 
-use crate::atspi::{A11y, Coords};
+use crate::atspi::A11y;
 use crate::launch::{self, EnvChange};
 use compositor::{ClientState, Compositor};
 
@@ -380,8 +380,7 @@ impl Session for WaylandSession {
 
     fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
         let w = pick_window(&self.link.windows()?, window)?.clone();
-        // Wayland has no screen positions: frames are the toplevel's own.
-        crate::a11y(&mut self.a11y)?.tree(&w, Coords::Window, opts)
+        crate::a11y(&mut self.a11y)?.tree(&w, opts)
     }
 
     fn element_point(

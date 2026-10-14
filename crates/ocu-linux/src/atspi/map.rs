@@ -150,7 +150,8 @@ pub fn role(raw: &Raw) -> String {
         "panel" | "filler" | "section" | "grouping" | "form" | "article" | "landmark"
         | "block quote" | "paragraph" | "unknown" | "redundant object" | "layered pane"
         | "root pane" | "glass pane" | "html container" | "option pane" | "internal frame"
-        | "embedded" | "viewport" | "header" | "footer" | "info bar" | "invalid" | "" => "Group",
+        | "embedded" | "viewport" | "header" | "footer" | "info bar" | "generic" | "invalid"
+        | "" => "Group",
         other => return camel(other),
     };
     named.to_string()
@@ -388,6 +389,7 @@ mod tests {
         assert_eq!(role(&raw("document web", "")), "WebArea");
         assert_eq!(role(&raw("frame", "")), "Window");
         assert_eq!(role(&raw("section", "")), "Group");
+        assert_eq!(role(&raw("generic", "")), "Group");
         assert_eq!(role(&raw("date editor", "")), "DateEditor");
     }
 

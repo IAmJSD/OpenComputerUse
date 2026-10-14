@@ -7,4 +7,4 @@ pub mod map;
 mod bus;
 
 #[cfg(target_os = "linux")]
-pub use bus::{A11y, Coords};
+pub use bus::A11y;

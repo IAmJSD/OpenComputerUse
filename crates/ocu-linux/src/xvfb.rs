@@ -31,7 +31,7 @@ use ocu_core::{
     Size, TreeOptions, UiNode, ViewInput, Viewer, WindowInfo,
 };
 
-use crate::atspi::{A11y, Coords};
+use crate::atspi::A11y;
 use crate::{die_with_parent, hex, keys, random_bytes};
 
 /// An Xauthority file with one cookie for any display, so only processes
@@ -520,7 +520,7 @@ impl Session for LinuxSession {
 
     fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
         let w = self.window(window)?;
-        crate::a11y(&mut self.a11y)?.tree(&w, Coords::Screen, opts)
+        crate::a11y(&mut self.a11y)?.tree(&w, opts)
     }
 
     fn element_point(
