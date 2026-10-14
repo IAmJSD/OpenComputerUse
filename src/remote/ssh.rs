@@ -369,7 +369,7 @@ exec "${OCU_BIN:-$HOME/.local/bin/opencomputeruse}" device add --name "$OCU_NAME
 "#;
 
 const DEVICE_REMOVE_BODY: &str = r#"set -eu
-exec "${OCU_BIN:-$HOME/.local/bin/opencomputeruse}" device remove "$OCU_NAME"
+exec "${OCU_BIN:-$HOME/.local/bin/opencomputeruse}" device remove --name "$OCU_NAME"
 "#;
 
 /// The script to feed `sh -s` on the remote: a few quoted assignments, then
@@ -1865,7 +1865,10 @@ mod tests {
             bin: Some(&bin),
             name: "box",
         });
-        assert_eq!(rm, (true, "device remove box\n".into(), String::new()));
+        assert_eq!(
+            rm,
+            (true, "device remove --name box\n".into(), String::new())
+        );
 
         f.exe(
             &f.dir.join("home/.local/bin/opencomputeruse"),

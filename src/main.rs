@@ -41,7 +41,9 @@ USAGE:
     opencomputeruse device add --name N --url U
                                           Allow a device to drive this computer: prints its new key
                                           (an existing device of that name gets a new key)
-    opencomputeruse device remove NAME    Remove a device and its key
+    opencomputeruse device remove NAME    Remove a device by ID or name and its key
+    opencomputeruse device remove --name N
+                                          Remove only the device named N
     opencomputeruse ssh-setup user@host --name NAME [-i KEYFILE]
                                           Install this version on a Linux host over SSH, serve it there
                                           on loopback only, and keep an SSH tunnel to it up from here
@@ -300,7 +302,12 @@ fn run_device(args: &[String]) -> Result<()> {
             let Some(name) = args.get(1) else {
                 bail!("name the device to remove")
             };
-            let d = Devices::load().remove(name)?;
+            let d = if name == "--name" {
+                let name = value("--name").ok_or_else(|| anyhow::anyhow!("--name takes a name"))?;
+                Devices::load().remove_named(name)?
+            } else {
+                Devices::load().remove(name)?
+            };
             println!("Removed {} ({}); its key no longer works.", d.name, d.id);
             Ok(())
         }
