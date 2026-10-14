@@ -548,7 +548,8 @@ The server follows these as addresses come and go, and waits while none of
 them has one: `opencomputeruse serve --listen-on tailscale` listens once
 Tailscale connects.
 
-`opencomputeruse ssh-setup user@host --name NAME` reaches a Linux host
+`opencomputeruse ssh-setup HOST --name NAME`, with an SSH alias or `user@host`
+as HOST, reaches a Linux host
 without opening its port: it installs this version there, serves on loopback
 only, creates a device key and keeps an SSH tunnel up from this computer,
 writing the tunnel's `http://127.0.0.1:PORT` URL to the hosts file. With

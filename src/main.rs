@@ -44,10 +44,11 @@ USAGE:
     opencomputeruse device remove NAME    Remove a device by ID or name and its key
     opencomputeruse device remove --name N
                                           Remove only the device named N
-    opencomputeruse ssh-setup user@host --name NAME [-i KEYFILE]
+    opencomputeruse ssh-setup HOST --name NAME [-i KEYFILE]
+                                          HOST is an SSH alias or user@host
                                           Install this version on a Linux host over SSH, serve it there
                                           on loopback only, and keep an SSH tunnel to it up from here
-    opencomputeruse ssh-setup user@host --name NAME --use-installed [--remote-port P]
+    opencomputeruse ssh-setup HOST --name NAME --use-installed [--remote-port P]
                                           Instead connect to an opencomputeruse already running there
                                           (Linux or macOS; its HTTP server on port P, default 8642)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it

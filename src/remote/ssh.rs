@@ -1,4 +1,4 @@
-//! `opencomputeruse ssh-setup user@host --name NAME`: installs this version
+//! `opencomputeruse ssh-setup HOST --name NAME`: installs this version
 //! on a Linux host over SSH, has it serve on that host's loopback only,
 //! makes a device key there, and keeps an SSH tunnel to it up from this
 //! computer. With `--use-installed` it instead connects to an
@@ -38,15 +38,14 @@ fn plain(s: &str) -> bool {
         && !s.starts_with('-')
 }
 
-/// `user@host`, each part letters, digits and `._-`, neither starting with a
-/// dash, so it can never be read as an ssh option.
+/// An SSH alias or `user@host`, with plain parts that cannot be SSH options.
 pub fn validate_host(host: &str) -> Result<()> {
     let ok = host
         .split_once('@')
-        .is_some_and(|(user, host)| plain(user) && plain(host));
+        .map_or_else(|| plain(host), |(user, host)| plain(user) && plain(host));
     ensure!(
         ok,
-        "\"{host}\" is not user@host (letters, digits and . _ - only, no leading dash)"
+        "\"{host}\" is not an SSH alias or user@host (letters, digits and . _ - only, no leading dash)"
     );
     Ok(())
 }
@@ -579,7 +578,7 @@ fn parse_args(args: &[String]) -> Result<Parsed> {
             _ => bail!("unexpected \"{a}\""),
         }
     }
-    let usage = "usage: opencomputeruse ssh-setup user@host --name NAME [-i KEYFILE] [--use-installed [--remote-port P]]";
+    let usage = "usage: opencomputeruse ssh-setup HOST --name NAME [-i KEYFILE] [--use-installed [--remote-port P]] (HOST is an SSH alias or user@host)";
     ensure!(
         use_installed || remote_port.is_none(),
         "--remote-port only goes with --use-installed"
@@ -1111,14 +1110,20 @@ mod tests {
     }
 
     #[test]
-    fn hosts_are_user_at_host_and_never_options() {
+    fn hosts_are_aliases_or_user_at_host_and_never_options() {
+        assert!(validate_host("oma").is_ok());
+        assert!(validate_host("box.example").is_ok());
         assert!(validate_host("me@box.example").is_ok());
         assert!(validate_host("me@10.0.0.2").is_ok());
         for bad in [
             "user@-oProxyCommand=x",
             "-oProxyCommand=x@host",
             "-me@host",
-            "host",
+            "-oma",
+            "oma extra",
+            "oma\n",
+            "oma;id",
+            "oma$(id)",
             "me@host extra",
             "me@ho;st",
             "me@host$(id)",
@@ -1211,6 +1216,11 @@ mod tests {
             .iter()
             .any(|w| w.contains("BatchMode") || w.contains("accept-new")));
         assert_eq!(&i[i.len() - 4..], ["--", "me@box.example", "uname", "-sm"]);
+        let alias = Target::new("oma", None).unwrap();
+        let a = ssh_args(&alias, Mode::Batch, &["sh", "-s"]);
+        assert_eq!(&a[a.len() - 4..], ["--", "oma", "sh", "-s"]);
+        let tunnel = tunnel_args(&alias, 18642, 8642);
+        assert_eq!(&tunnel[tunnel.len() - 2..], ["--", "oma"]);
     }
 
     #[test]
@@ -1412,6 +1422,8 @@ mod tests {
             (p.host.as_str(), p.name.as_str(), p.key),
             ("me@box", "box", None)
         );
+        let p = parse_args(&s(&["oma", "--name", "box"])).unwrap();
+        assert_eq!(p.host, "oma");
         assert!(parse_args(&s(&["me@box"])).is_err());
         assert!(parse_args(&s(&["--name", "x"])).is_err());
         assert!(parse_args(&s(&["-oProxyCommand=x", "--name", "x"])).is_err());
