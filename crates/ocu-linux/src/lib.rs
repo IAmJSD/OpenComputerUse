@@ -3,9 +3,13 @@
 //! through XTEST (`xvfb`), or a headless Wayland compositor running inside
 //! this process (`wayland`).
 //!
+//! Both get the accessibility tree through AT-SPI (`atspi`): each session's
+//! app exports it to a private bus on which this process is the registry.
+//!
 //! Everything started here dies with the MCP server: displays and apps get
 //! `PR_SET_PDEATHSIG`, and an app that outlives its group loses its display.
 
+mod atspi;
 mod launch;
 
 #[cfg(target_os = "linux")]
@@ -31,6 +35,9 @@ mod platform {
     use anyhow::{anyhow, bail, Result};
 
     use ocu_core::{LaunchSpec, LinuxDisplay, Platform, Session};
+
+    use crate::atspi::A11y;
+    use crate::launch::EnvChange;
 
     pub struct LinuxPlatform {
         xvfb: Option<PathBuf>,
@@ -100,6 +107,16 @@ mod platform {
                     optional: wayland,
                 },
                 ocu_core::Permission {
+                    name: "Accessibility tree (AT-SPI)".into(),
+                    granted: on_path("dbus-daemon"),
+                    help: "Element ids, set_value and recipes read each app's tree over AT-SPI, on a \
+                           private bus per session. Install dbus-daemon (Debian/Ubuntu: apt install \
+                           dbus; Fedora: dnf install dbus-daemon). Without it, use screenshots and \
+                           coordinates."
+                        .into(),
+                    optional: true,
+                },
+                ocu_core::Permission {
                     name: "File chooser portal".into(),
                     granted: (self.portal)(),
                     help: "Answers apps' open and save dialogs without showing them. Each app runs on \
@@ -147,6 +164,54 @@ mod platform {
                 Ok(())
             });
         }
+    }
+
+    fn on_path(name: &str) -> bool {
+        std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+    }
+
+    /// The session's accessibility bus and registry. Without `dbus-daemon`
+    /// the session works without a tree.
+    pub(crate) fn start_a11y() -> Option<A11y> {
+        A11y::start()
+            .inspect_err(|e| log::warn!("no accessibility tree: {e:#}"))
+            .ok()
+    }
+
+    /// Has the app export its tree to the session's registry: the
+    /// environment every toolkit needs, and a Chromium-based browser's
+    /// switch. Comes before the session's own environment and arguments,
+    /// which may undo it.
+    pub(crate) fn use_a11y(
+        cmd: &mut Command,
+        a11y: &Option<A11y>,
+        app: &str,
+        args: &mut Vec<String>,
+    ) {
+        let Some(a11y) = a11y else { return };
+        for change in a11y.env() {
+            match change {
+                EnvChange::Set(k, v) => cmd.env(k, v),
+                EnvChange::Remove(k) => cmd.env_remove(k),
+            };
+        }
+        if crate::launch::is_chromium(app) {
+            args.splice(0..0, crate::launch::a11y_args(args));
+        }
+    }
+
+    pub(crate) fn a11y_detail(a11y: &Option<A11y>) -> String {
+        match a11y {
+            Some(a) => format!("AT-SPI, on a private bus at {}", a.address()),
+            None => "none (dbus-daemon is missing)".into(),
+        }
+    }
+
+    pub(crate) fn a11y(a11y: &mut Option<A11y>) -> Result<&mut A11y> {
+        a11y.as_mut().ok_or_else(|| {
+            anyhow!("this session has no accessibility tree (dbus-daemon is missing); use screenshots and coordinates")
+        })
     }
 
     pub(crate) fn random_bytes(n: usize) -> Result<Vec<u8>> {

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Drives xcalc on a private Xvfb display through the MCP server, and watches
-it through the live view."""
-import base64, json, struct, subprocess, sys
+it through the live view, then reads Chromium's and GTK's accessibility
+trees (a11y_checks.py)."""
+import base64, json, os, struct, subprocess, sys
+
+from a11y_checks import check
 
 exe = sys.argv[1] if len(sys.argv) > 1 else "target/debug/opencomputeruse"
 TOKEN = "smoke-test-token-0123456789"
@@ -22,13 +25,14 @@ def tool(name, **args):
             open(path, "wb").write(base64.b64decode(c["data"]))
             text += f"\n[image {path}, {len(c['data'])} b64 chars]"
     print(f"--- {name}{' ERROR' if r['isError'] else ''}\n{text[:800]}")
+    if r["isError"]:
+        raise SystemExit(f"{name} failed: {text}")
     return text
 call("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}})
 tool("permissions")
 s = json.loads(tool("start_session", app="xcalc"))["session_id"]
 tool("type_text", session_id=s, text="12*12=")
 tool("screenshot", session_id=s)
-tool("get_ui_tree", session_id=s)
 try:
     import websocket
 except ImportError:
@@ -46,3 +50,8 @@ if websocket:
     ws.close()
     print("--- live view: a keyframe, and a picture after typing")
 tool("end_session", session_id=s)
+browser = os.environ.get("OCU_SMOKE_BROWSER") or next(
+    b for b in ["chromium", "google-chrome", "chromium-browser"]
+    if subprocess.run(["which", b], capture_output=True).returncode == 0)
+check(tool, "x11", browser)
+print("all good")

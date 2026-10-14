@@ -1,6 +1,7 @@
-//! How an app is started on a Wayland session: its environment and, for
-//! Chromium-based browsers, the switches that put it on Wayland without a
-//! GPU. Kept apart from the compositor so it builds and tests anywhere.
+//! How an app is started: its environment on a Wayland session and for
+//! accessibility, and for Chromium-based browsers the switches that put it
+//! on Wayland without a GPU. Kept apart from the displays so it builds and
+//! tests anywhere.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::path::Path;
@@ -48,6 +49,42 @@ pub fn wayland_env(socket: &Path, runtime_dir: &Path, has_runtime_dir: bool) -> 
         env.push(Set("XDG_RUNTIME_DIR", runtime_dir.display().to_string()));
     }
     env
+}
+
+/// The environment that has an app export its accessibility tree to the
+/// registry on the bus at `address`. Toolkits find the bus through
+/// `AT_SPI_BUS_ADDRESS` before asking the session bus, so no desktop
+/// session is needed; the rest turns on bridges that are otherwise off
+/// until a screen reader runs.
+pub fn a11y_env(address: &str) -> Vec<EnvChange> {
+    use EnvChange::*;
+    vec![
+        Set("AT_SPI_BUS_ADDRESS", address.to_string()),
+        // GTK 3's bridge, and GTK 4's accessibility ("none" turns it off).
+        Remove("NO_AT_BRIDGE"),
+        Remove("GTK_A11Y"),
+        // GTK 2, Firefox and Java.
+        Set("GNOME_ACCESSIBILITY", "1".into()),
+        // Qt 5 and 6.
+        Set("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1".into()),
+        Set("QT_ACCESSIBILITY", "1".into()),
+        // Chromium, Chrome and Electron apps.
+        Set("ACCESSIBILITY_ENABLED", "1".into()),
+    ]
+}
+
+/// The switch a Chromium-based browser needs to export its pages, not just
+/// its own controls, unless the session already gives it.
+pub fn a11y_args(args: &[String]) -> Vec<String> {
+    let flag = "--force-renderer-accessibility";
+    if args
+        .iter()
+        .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+    {
+        Vec::new()
+    } else {
+        vec![flag.to_string()]
+    }
 }
 
 /// Whether `app` is a Chromium-based browser, which needs switches (not
@@ -127,6 +164,20 @@ mod tests {
         assert!(chromium_args(&none, true).contains(&"--no-sandbox".to_string()));
         let given = vec!["--ozone-platform=x11".to_string(), "--disable-gpu".into()];
         assert_eq!(chromium_args(&given, false), ["--disable-dev-shm-usage"]);
+    }
+
+    #[test]
+    fn accessibility_is_turned_on() {
+        let env = a11y_env("unix:path=/tmp/ocu-bus/x");
+        assert!(env.contains(&EnvChange::Set(
+            "AT_SPI_BUS_ADDRESS",
+            "unix:path=/tmp/ocu-bus/x".into()
+        )));
+        assert!(env.contains(&EnvChange::Remove("NO_AT_BRIDGE")));
+        assert!(env.contains(&EnvChange::Set("ACCESSIBILITY_ENABLED", "1".into())));
+        assert_eq!(a11y_args(&[]), ["--force-renderer-accessibility"]);
+        let given = vec!["--force-renderer-accessibility".to_string()];
+        assert!(a11y_args(&given).is_empty());
     }
 
     #[test]

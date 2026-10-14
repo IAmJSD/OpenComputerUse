@@ -30,10 +30,11 @@ use ocu_core::keys::{
     dom_code, modifier_evdev, named_evdev, parse_chord, parse_chords, us_key, Key, Modifiers,
 };
 use ocu_core::{
-    Action, Description, Frame, LaunchSpec, MouseButton, Screenshot, Session, Size, ViewInput,
-    Viewer, WindowInfo,
+    pick_window, Action, Description, Frame, LaunchSpec, MouseButton, Screenshot, Session, Size,
+    TreeOptions, UiNode, ViewInput, Viewer, WindowInfo,
 };
 
+use crate::atspi::A11y;
 use crate::launch::{self, EnvChange};
 use compositor::{ClientState, Compositor};
 
@@ -219,6 +220,7 @@ pub(crate) struct WaylandSession {
     link: Link,
     thread: Option<JoinHandle<()>>,
     portal: crate::Portal,
+    a11y: Option<A11y>,
     socket: PathBuf,
     /// Holds the socket; removed when the session ends.
     dir: PathBuf,
@@ -242,6 +244,7 @@ impl WaylandSession {
             }
         };
         let portal = if portal { crate::start_portal() } else { None };
+        let a11y = crate::start_a11y();
 
         let mut args = Vec::new();
         if launch::is_chromium(&spec.app) {
@@ -249,6 +252,7 @@ impl WaylandSession {
         }
         args.extend(spec.args.iter().cloned());
         let mut cmd = Command::new(&spec.app);
+        crate::use_a11y(&mut cmd, &a11y, &spec.app, &mut args);
         cmd.args(&args);
         let has_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|d| !d.is_empty());
         for change in launch::wayland_env(&socket, &dir, has_runtime_dir) {
@@ -283,6 +287,7 @@ impl WaylandSession {
             link,
             thread: Some(thread),
             portal,
+            a11y,
             socket,
             dir,
             closed: false,
@@ -350,6 +355,7 @@ impl Session for WaylandSession {
         details.insert("display".into(), "wayland".into());
         details.insert("wayland_display".into(), self.socket.display().to_string());
         details.insert("files".into(), crate::portal_detail(&self.portal));
+        details.insert("accessibility".into(), crate::a11y_detail(&self.a11y));
         Description {
             backend: Some("linux-wayland".into()),
             app: self.name.clone(),
@@ -372,16 +378,33 @@ impl Session for WaylandSession {
         })
     }
 
+    fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
+        let w = pick_window(&self.link.windows()?, window)?.clone();
+        crate::a11y(&mut self.a11y)?.tree(&w, opts)
+    }
+
+    fn element_point(
+        &mut self,
+        _window: Option<u64>,
+        element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        let (w, x, y) = crate::a11y(&mut self.a11y)?.center(element)?;
+        Ok((Some(w), x, y))
+    }
+
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
         let link = &self.link;
         match action {
             Action::Wait { ms } => sleep(Duration::from_millis(*ms)),
-            Action::ElementAction { .. }
-            | Action::SetValue { .. }
-            | Action::Focus { .. }
-            | Action::ClickElement { .. } => {
-                bail!("element actions need the accessibility tree, which the Linux backend does not read yet; use coordinates")
+            Action::ElementAction { .. } | Action::SetValue { .. } | Action::Focus { .. } => {
+                if let Some(then) = crate::a11y(&mut self.a11y)?.perform(action)? {
+                    for a in &then.actions {
+                        self.perform(Some(then.window), a)?;
+                        sleep(Duration::from_millis(40));
+                    }
+                }
             }
+            Action::ClickElement { .. } => bail!("click elements by their point"),
             Action::ChooseFile { paths } => return crate::choose_file(&self.portal, paths),
             Action::Click {
                 x,

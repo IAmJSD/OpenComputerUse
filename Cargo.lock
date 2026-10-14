@@ -4283,11 +4283,15 @@ name = "ocu-linux"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "libc",
  "log",
  "ocu-core",
+ "serde",
  "smithay",
+ "tokio",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]
