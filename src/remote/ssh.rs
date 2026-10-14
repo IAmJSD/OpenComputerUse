@@ -272,9 +272,21 @@ macro_rules! listeners_fn {
     };
 }
 
+macro_rules! device_cli_fn {
+    () => {
+        r#"require_device_cli() {
+  "$1" device 2>&1 | grep -q 'device add' || fail "remote opencomputeruse is too old, update it"
+}
+"#
+    };
+}
+
 const INSTALL_BODY: &str = concat!(
     r#"set -eu
 fail() { echo "ocu-setup: $*" >&2; exit 1; }
+"#,
+    device_cli_fn!(),
+    r#"
 [ "$(uname -s)" = Linux ] || fail "only Linux remotes are supported"
 case "$(uname -m)" in
   x86_64|amd64) arch=x86_64 ;;
@@ -295,9 +307,12 @@ if [ "$("$bin" --version 2>/dev/null || true)" != "opencomputeruse $OCU_VERSION"
   fetch "$tmp" "$OCU_RELEASES/v$OCU_VERSION/opencomputeruse-linux-$arch" \
     || { rm -f "$tmp"; fail "could not download release v$OCU_VERSION for $arch"; }
   chmod 755 "$tmp"
+  "$tmp" --version >/dev/null || fail "the downloaded binary does not run here"
+  require_device_cli "$tmp"
   mv -f "$tmp" "$bin"
 fi
 "$bin" --version >/dev/null || fail "the downloaded binary does not run here"
+require_device_cli "$bin"
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 systemctl --user show-environment >/dev/null 2>&1 \
@@ -329,6 +344,9 @@ echo "ocu-setup: serving on 127.0.0.1:$OCU_PORT" >&2
 const CHECK_BODY: &str = concat!(
     r#"set -eu
 fail() { echo "ocu-setup: $*" >&2; exit 1; }
+"#,
+    device_cli_fn!(),
+    r#"
 bin=
 c=$(command -v opencomputeruse 2>/dev/null || true)
 case "$c" in /*) [ -x "$c" ] && bin=$c ;; esac
@@ -339,7 +357,7 @@ for c in /Applications/OpenComputerUse.app/Contents/MacOS/opencomputeruse \
 done
 [ -n "$bin" ] || fail "opencomputeruse is not installed on this host (looked on PATH, in /Applications, ~/Applications and ~/.local/bin); install it there, or run without --use-installed"
 ver=$("$bin" --version 2>/dev/null) || fail "$bin does not run here"
-"$bin" device 2>&1 | grep -q 'device add' || fail "remote opencomputeruse is too old, update it"
+require_device_cli "$bin"
 echo "ocu-version: $ver" >&2
 
 "#,
@@ -1717,6 +1735,64 @@ mod tests {
     const OLD: &str = "error: unknown command device";
     #[cfg(unix)]
     const NEW: &str = "usage: opencomputeruse device add --name N --url U | device remove NAME";
+
+    #[test]
+    #[cfg(unix)]
+    fn installer_checks_device_support_before_replacing_or_starting() {
+        for downloaded in [false, true] {
+            for compatible in [false, true] {
+                let f = Fake::new("install-capability");
+                f.linux(&["127.0.0.1:8642"]);
+                f.exe(
+                    &f.bin("uname"),
+                    "case \"$1\" in -s) echo Linux ;; -m) echo aarch64 ;; esac",
+                );
+                let effects = f.dir.join("effects");
+                let binary = |version: &str, device_usage: &str| {
+                    format!(
+                        "case \"$1\" in --version) echo 'opencomputeruse {version}' ;; device) echo '{device_usage}' >&2; exit 1 ;; serve) echo serve >> '{}' ;; esac",
+                        effects.display()
+                    )
+                };
+                let usage = if compatible { NEW } else { OLD };
+                let installed = f.home.join(".local/bin/opencomputeruse");
+                f.exe(
+                    &installed,
+                    &binary(if downloaded { "old" } else { "9.9.9" }, usage),
+                );
+                let original = std::fs::read(&installed).unwrap();
+                let release = f.dir.join("release");
+                f.exe(&release, &binary("9.9.9", usage));
+                f.exe(
+                    &f.bin("curl"),
+                    &format!("cp '{}' \"$5\"", release.display()),
+                );
+                for cli in ["systemctl", "loginctl"] {
+                    f.exe(
+                        &f.bin(cli),
+                        &format!("echo {cli} >> '{}'", effects.display()),
+                    );
+                }
+                let (ok, _, err) = f.run(&RemoteJob::Install {
+                    version: "9.9.9",
+                    port: 8642,
+                });
+                if compatible {
+                    assert!(ok, "{err}");
+                    let effects = std::fs::read_to_string(&effects).unwrap();
+                    assert_eq!(effects, "systemctl\nloginctl\nserve\n");
+                    assert_eq!(
+                        std::fs::read(&installed).unwrap(),
+                        std::fs::read(&release).unwrap()
+                    );
+                } else {
+                    assert!(!ok && err.contains("too old"), "{err}");
+                    assert_eq!(std::fs::read(&installed).unwrap(), original);
+                    assert!(!effects.exists());
+                }
+            }
+        }
+    }
 
     #[test]
     #[cfg(unix)]
