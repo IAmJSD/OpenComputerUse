@@ -1969,16 +1969,16 @@ impl Render for Status {
                         d.child(Self::row("Account ID", self.input(Field::CloudflareAccount, "Cloudflare account id", cx)))
                             .child(Self::row("API token", self.input(Field::CloudflareToken, "Token with Workers AI access", cx)))
                             .child(Self::row("Model", self.input(Field::CloudflareModel, "@cf/cloudflare/clef-flash", cx)))
-                            .child(Self::row(
-                                "",
-                                Checkbox::new("cf-shots", "Send a screenshot with each step", self.config.recipe.cloudflare_screenshots)
-                                    .on_change(cx.listener(|s, checked: &bool, _, cx| {
-                                        s.config.recipe.cloudflare_screenshots = *checked;
-                                        s.saved = false;
-                                        cx.notify();
-                                    })),
-                            ))
                     })
+                    .child(Self::row(
+                        "",
+                        Checkbox::new("shots", "Send a screenshot with each step", self.config.recipe.screenshots)
+                            .on_change(cx.listener(|s, checked: &bool, _, cx| {
+                                s.config.recipe.screenshots = *checked;
+                                s.saved = false;
+                                cx.notify();
+                            })),
+                    ))
                     .child(Self::row("Minimum confidence", self.input(Field::MinConfidence, "0.6", cx)))
                     .child(
                         div()

@@ -37,9 +37,10 @@ pub struct RecipeConfig {
     pub cloudflare_account_id: String,
     pub cloudflare_api_token: String,
     pub cloudflare_model: String,
-    /// Send the window's screenshot with each decision (Clef only; it is
-    /// always sent when a window has no accessibility tree).
-    pub cloudflare_screenshots: bool,
+    /// Send the window's screenshot with each decision (it is always sent
+    /// when a window has no accessibility tree).
+    #[serde(alias = "cloudflare_screenshots")]
+    pub screenshots: bool,
     /// The least confidence at which a step acts on the element it picked.
     pub min_confidence: f64,
 }
@@ -53,7 +54,7 @@ impl Default for RecipeConfig {
             cloudflare_account_id: String::new(),
             cloudflare_api_token: String::new(),
             cloudflare_model: "@cf/cloudflare/clef-flash".into(),
-            cloudflare_screenshots: true,
+            screenshots: true,
             min_confidence: 0.6,
         }
     }

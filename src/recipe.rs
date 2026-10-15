@@ -481,8 +481,72 @@ fn encode_images(images: &[Vec<u8>]) -> Vec<Value> {
         .collect()
 }
 
-/// One decision-model call: questions in, `answers` out. `images` (PNG)
-/// go to Clef, which can look; Jev reads text only and never gets them.
+/// Jev's bounds on each side of an image. It refuses images outside them
+/// rather than resizing. The least side is 280, not the 256 TypeSafe also
+/// states, so a padded image also has the 78,400 pixels it needs.
+const JEV_MAX_SIDE: usize = 1568;
+const JEV_MIN_SIDE: usize = 280;
+
+/// A PNG within Jev's size bounds: shrunk until its longer side fits, padded
+/// at the bottom and right until its shorter one does. Returns it with the
+/// factor from its pixels back to the original's.
+fn fit_for_jev(png: &[u8]) -> Result<(Vec<u8>, f64, crate::vision::Image)> {
+    let img = crate::vision::Image::decode(png)?;
+    let fits = |i: &crate::vision::Image| {
+        i.width.max(i.height) <= JEV_MAX_SIDE && i.width.min(i.height) >= JEV_MIN_SIDE
+    };
+    if fits(&img) {
+        return Ok((png.to_vec(), 1.0, img));
+    }
+    let small = img.shrink(JEV_MAX_SIDE);
+    let scale = img.width as f64 / small.width as f64;
+    let sent = small.pad(JEV_MIN_SIDE);
+    Ok((sent.encode()?, scale, sent))
+}
+
+/// A reference for an image in a Jev request: TypeSafe finds and replaces
+/// it in every string, so it must not occur in anything else.
+fn image_ref() -> String {
+    let mut buf = [0u8; 8];
+    let _ = getrandom::fill(&mut buf);
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    format!("ocu-image-{hex}")
+}
+
+/// Images as Jev takes them: each one an asset under a unique reference,
+/// with the references put in the state where the image belongs.
+fn attach_jev_images(body: &mut Value, images: &[Vec<u8>]) -> Result<()> {
+    use base64::Engine as _;
+    let mut assets = Map::new();
+    let mut refs = Vec::new();
+    for png in images {
+        let (png, _, _) = fit_for_jev(png)?;
+        let r = image_ref();
+        assets.insert(
+            r.clone(),
+            json!({
+                "type": "image",
+                "format": "png",
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(png),
+            }),
+        );
+        refs.push(Value::String(r));
+    }
+    let state = &mut body["state"];
+    if !state.is_object() {
+        *state = json!({ "context": state.take() });
+    }
+    if refs.len() == 1 {
+        state["picture"] = refs.remove(0);
+    } else {
+        state["pictures"] = Value::Array(refs);
+    }
+    body["assets"] = Value::Object(assets);
+    Ok(())
+}
+
+/// One decision-model call: questions in, `answers` out, with `images`
+/// (PNG) for the model to look at.
 fn ask(
     config: &RecipeConfig,
     state: &Value,
@@ -499,10 +563,15 @@ fn ask(
             if config.typesafe_api_key.is_empty() {
                 bail!("no TypeSafe API key; add one in the OpenComputerUse settings (or set TYPESAFE_API_KEY)");
             }
+            let mut body =
+                json!({ "model": config.typesafe_model, "state": state, "questions": questions });
+            if !images.is_empty() {
+                attach_jev_images(&mut body, images)?;
+            }
             (
                 "https://api.typesafe.ai/v1/systemone".to_string(),
                 &config.typesafe_api_key,
-                json!({ "model": config.typesafe_model, "state": state, "questions": questions }),
+                body,
             )
         }
         Provider::Cloudflare => {
@@ -526,9 +595,16 @@ fn ask(
             )
         }
     };
-    let mut resp = agent
+    let mut req = agent
         .post(&url)
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", &format!("Bearer {token}"));
+    // Images and box questions are still in TypeSafe's "danger zone": off
+    // unless a request asks for them.
+    if config.provider == Provider::Typesafe && (body.get("assets").is_some() || has_box(questions))
+    {
+        req = req.header("TypeSafe-Danger-Zone-Images", "true");
+    }
+    let mut resp = req
         .send_json(&body)
         .with_context(|| format!("calling {}", config.provider.label()))?;
     let status = resp.status();
@@ -547,6 +623,12 @@ fn ask(
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("the decision model's reply has no answers: {reply}"))?;
     Ok(answers.clone())
+}
+
+fn has_box(questions: &Map<String, Value>) -> bool {
+    questions
+        .values()
+        .any(|q| q.get("type").and_then(Value::as_str) == Some("box"))
 }
 
 /// Most options a Choice question takes, per both APIs.
@@ -749,7 +831,7 @@ const SEEN: &str = "seen";
 
 /// Finds a step's target, waiting a little for it to appear if the model is
 /// unsure (the app may still be loading). From the accessibility tree when
-/// there is one; otherwise, with Clef, from the screenshot alone.
+/// there is one; otherwise from the screenshot alone.
 fn locate(
     handler: &mut dyn Handler,
     config: &RecipeConfig,
@@ -760,7 +842,6 @@ fn locate(
     min_confidence: f64,
 ) -> Result<(UiNode, f64, String)> {
     let deadline = Instant::now() + Duration::from_secs(6);
-    let vision = config.provider == Provider::Cloudflare;
     loop {
         // A window without a tree (an app whose toolkit has no AT-SPI, say)
         // leaves only the picture.
@@ -777,7 +858,7 @@ fn locate(
                 &mut candidates,
             );
         }
-        let shot = (vision && (config.cloudflare_screenshots || candidates.is_empty()))
+        let shot = (config.screenshots || candidates.is_empty())
             .then(|| screenshot(handler, session, window))
             .flatten();
         let (node, sure, ok, how) = if !candidates.is_empty() {
@@ -817,7 +898,12 @@ fn locate(
                 ),
             )
         } else if let Some(png) = &shot {
-            let (x, y, sure) = look(config, app, target, png)?;
+            // Jev before 1.14 has no box questions; the grid works with any
+            // model that can look.
+            let (x, y, sure) = match config.provider {
+                Provider::Typesafe => point_with_jev(config, app, target, png)?,
+                Provider::Cloudflare => look(config, app, target, png)?,
+            };
             let node = UiNode {
                 id: SEEN.into(),
                 role: "Point".into(),
@@ -837,14 +923,7 @@ fn locate(
                 format!("the point ({x:.0}, {y:.0}) in the screenshot"),
             )
         } else if Instant::now() > deadline {
-            bail!(
-                "the window has no accessibility tree to match \"{target}\" against{}",
-                if vision {
-                    ""
-                } else {
-                    "; Cloudflare's Clef can work from screenshots instead (choose it in the settings)"
-                }
-            );
+            bail!("the window has no accessibility tree to match \"{target}\" against, and no screenshot");
         } else {
             std::thread::sleep(Duration::from_millis(700));
             continue;
@@ -857,6 +936,205 @@ fn locate(
         }
         std::thread::sleep(Duration::from_millis(700));
     }
+}
+
+/// A box Jev put a target in, in the pixels of the image it was shown.
+struct Boxed {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    confidence: f64,
+    /// How likely the target is there at all, when that was asked.
+    there: Option<f64>,
+}
+
+/// Where Jev puts `target` in `img`, asking too whether it is there at all
+/// when `present` is set.
+fn ask_box(
+    config: &RecipeConfig,
+    app: &str,
+    target: &str,
+    img: &crate::vision::Image,
+    about: &str,
+    present: bool,
+) -> Result<Boxed> {
+    let (png, scale, sent) = fit_for_jev(&img.encode()?)?;
+    let state = json!({ "application": app, "step": target, "image": about });
+    let mut questions = Map::new();
+    questions.insert(
+        "where".into(),
+        json!({
+            "type": "box",
+            "instructions": format!("The part of the interface this step means, in the picture: \"{target}\""),
+        }),
+    );
+    // A box answer always has a box, so whether there is anything to point
+    // at is its own question.
+    if present {
+        questions.insert(
+            "there".into(),
+            json!({
+                "type": "noul",
+                "instructions": format!("Is the part of the interface this step means visible in the picture: \"{target}\"?"),
+            }),
+        );
+    }
+    let answers = ask(config, &state, &questions, &[png])?;
+    log::debug!(
+        "recipe: box for \"{target}\" in {}x{}: {answers:?}",
+        sent.width,
+        sent.height
+    );
+    let a = answers
+        .get("where")
+        .ok_or_else(|| anyhow!("the decision model gave no box"))?;
+    let edge = |k: &str| {
+        a.get("box")
+            .and_then(|b| b.get(k))
+            .and_then(Value::as_f64)
+            .ok_or_else(|| anyhow!("the decision model's box has no {k}"))
+    };
+    // Fractions of the image sent, which only differs from `img` by a scale
+    // and padding at the bottom and right.
+    let (w, h) = (sent.width as f64 * scale, sent.height as f64 * scale);
+    let (l, r, t, b) = (
+        edge("left")? * w,
+        edge("right")? * w,
+        edge("top")? * h,
+        edge("bottom")? * h,
+    );
+    let confidence = a.get("confidence").and_then(Value::as_f64).unwrap_or(0.0);
+    let there = answers
+        .get("there")
+        .and_then(|a| a.get("noul").and_then(Value::as_f64).or_else(|| a.as_f64()));
+    Ok(Boxed {
+        x: (l + r) / 2.0,
+        y: (t + b) / 2.0,
+        width: r - l,
+        height: b - t,
+        confidence,
+        there,
+    })
+}
+
+/// Points at `target` in a screenshot with a box question, asked of
+/// `boxes` (a Jev from 1.14). A small box is asked again on an enlarged crop
+/// around it, which places it more exactly. Returns window coordinates and
+/// how sure the model is, shown a dot where the click would land, that it
+/// hits the target: a box's own confidence is about its edges, and stays low
+/// for a button boxed exactly in a large window, while a box straddling two
+/// small icons can be confident and click between them.
+fn point(boxes: &RecipeConfig, app: &str, target: &str, png: &[u8]) -> Result<(f64, f64, f64)> {
+    use crate::vision::{Cell, Image};
+    let full = Image::decode(png)?;
+    let Boxed {
+        mut x,
+        mut y,
+        width: w,
+        height: h,
+        confidence,
+        there,
+    } = ask_box(
+        boxes,
+        app,
+        target,
+        &full,
+        "The picture is the app's window.",
+        true,
+    )?;
+    log::info!("recipe: \"{target}\" boxed at ({x:.0}, {y:.0}) {w:.0}×{h:.0}, box confidence {confidence:.2}, there {there:.2?}");
+    // A square of `side` around (x, y), inside the window.
+    let around = |x: f64, y: f64, side: usize| Cell {
+        x: (x as usize)
+            .saturating_sub(side / 2)
+            .min(full.width.saturating_sub(side)),
+        y: (y as usize)
+            .saturating_sub(side / 2)
+            .min(full.height.saturating_sub(side)),
+        width: side.min(full.width),
+        height: side.min(full.height),
+    };
+    let longest = full.width.max(full.height);
+    if w.max(h) * 8.0 < longest as f64 && longest > 640 {
+        let side = (w.max(h) * 4.0).max(320.0) as usize;
+        let region = around(x, y, side);
+        let scale = (640 / side.max(1)).clamp(1, 4);
+        let closer = ask_box(
+            boxes,
+            app,
+            target,
+            &full.crop(region, scale),
+            "The picture is an enlarged part of the app's window.",
+            false,
+        )?;
+        (x, y) = (
+            region.x as f64 + closer.x / scale as f64,
+            region.y as f64 + closer.y / scale as f64,
+        );
+    }
+    let mut marked = full.clone();
+    marked.dot(x, y, 5.0, [255, 40, 160]);
+    let side = (full.width.min(full.height) / 3).max(80);
+    let scale = (640 / side).clamp(1, 4);
+    let state = json!({
+        "application": app,
+        "step": target,
+        "image": "The picture is an enlarged part of the app's window, with a pink dot where the step would click.",
+    });
+    let mut questions = Map::new();
+    questions.insert(
+        "hit".into(),
+        json!({
+            "type": "noul",
+            "instructions": format!("Would clicking at the pink dot hit the part of the interface this step means: \"{target}\"?"),
+        }),
+    );
+    let answers = ask(
+        boxes,
+        &state,
+        &questions,
+        &[marked.crop(around(x, y, side), scale).encode()?],
+    )?;
+    let hit = answers
+        .get("hit")
+        .and_then(|a| a.get("noul").and_then(Value::as_f64).or_else(|| a.as_f64()))
+        .ok_or_else(|| anyhow!("the decision model gave no yes/no answer"))?;
+    log::info!("recipe: clicking ({x:.0}, {y:.0}) hits \"{target}\": {hit:.2}");
+    Ok((x, y, hit.min(there.unwrap_or(1.0))))
+}
+
+/// The Jev that answers box questions while `jev-latest` is still 1.13.
+const JEV_BOX_MODEL: &str = "jev-preview";
+
+/// Points with a box question: from the configured Jev, or from
+/// [`JEV_BOX_MODEL`] when that one has none, or else by narrowing a grid.
+fn point_with_jev(
+    config: &RecipeConfig,
+    app: &str,
+    target: &str,
+    png: &[u8],
+) -> Result<(f64, f64, f64)> {
+    let e = match point(config, app, target, png) {
+        Ok(p) => return Ok(p),
+        Err(e) => e,
+    };
+    if config.typesafe_model != JEV_BOX_MODEL {
+        log::info!(
+            "recipe: no box from {} ({e:#}); asking {JEV_BOX_MODEL}",
+            config.typesafe_model
+        );
+        let preview = RecipeConfig {
+            typesafe_model: JEV_BOX_MODEL.into(),
+            ..config.clone()
+        };
+        match point(&preview, app, target, png) {
+            Ok(p) => return Ok(p),
+            Err(e) => log::info!("recipe: no box from {JEV_BOX_MODEL} ({e:#})"),
+        }
+    }
+    log::info!("recipe: narrowing a grid instead");
+    look(config, app, target, png)
 }
 
 /// Points at `target` in a screenshot by elimination: a numbered 4×4 grid
@@ -1274,5 +1552,71 @@ mod tests {
             ..Default::default()
         };
         assert!(window_control(&title_bar.children[0], "TitleBar"));
+    }
+
+    fn blank(width: usize, height: usize) -> crate::vision::Image {
+        crate::vision::Image {
+            width,
+            height,
+            rgb: vec![245; width * height * 3],
+        }
+    }
+
+    #[test]
+    fn images_fit_jev_bounds() {
+        // A wide, short window: shrunk to 1568 across, then padded to 280 high.
+        let (png, scale, sent) = fit_for_jev(&blank(3136, 200).encode().unwrap()).unwrap();
+        assert_eq!((sent.width, sent.height), (1568, 280));
+        assert_eq!(scale, 2.0);
+        let back = crate::vision::Image::decode(&png).unwrap();
+        assert_eq!((back.width, back.height), (1568, 280));
+        // One already in bounds goes as it is.
+        let ok = blank(800, 600).encode().unwrap();
+        let (png, scale, _) = fit_for_jev(&ok).unwrap();
+        assert_eq!((png, scale), (ok, 1.0));
+    }
+
+    #[test]
+    fn jev_images_are_referenced_from_the_state() {
+        let mut body = json!({ "model": "jev-latest", "state": "plain", "questions": {} });
+        attach_jev_images(&mut body, &[blank(300, 300).encode().unwrap()]).unwrap();
+        let assets = body["assets"].as_object().unwrap();
+        assert_eq!(assets.len(), 1);
+        let (r, asset) = assets.iter().next().unwrap();
+        assert_eq!(body["state"]["picture"], json!(r));
+        assert_eq!(body["state"]["context"], json!("plain"));
+        assert_eq!(asset["format"], "png");
+        assert!(!asset["data_base64"].as_str().unwrap().starts_with("data:"));
+    }
+
+    /// Points at a red button drawn on a blank window, through TypeSafe's
+    /// API. Needs `TYPESAFE_API_KEY`; run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn jev_points_at_a_button() {
+        let Ok(key) = std::env::var("TYPESAFE_API_KEY") else {
+            return;
+        };
+        let mut img = blank(1400, 900);
+        for y in 600..640 {
+            for x in 1100..1220 {
+                let i = (y * img.width + x) * 3;
+                img.rgb[i..i + 3].copy_from_slice(&[210, 30, 30]);
+            }
+        }
+        let png = img.encode().unwrap();
+        for model in ["jev-preview", "jev-latest"] {
+            let config = RecipeConfig {
+                typesafe_api_key: key.clone(),
+                typesafe_model: model.into(),
+                ..Default::default()
+            };
+            let (x, y, sure) = point_with_jev(&config, "Test", "the red button", &png).unwrap();
+            eprintln!("{model}: ({x:.0}, {y:.0}) sure {sure:.2}");
+            assert!(
+                (1100.0..1220.0).contains(&x) && (600.0..640.0).contains(&y),
+                "{model}: ({x}, {y})"
+            );
+        }
     }
 }

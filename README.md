@@ -80,6 +80,15 @@ are supported, chosen in the app's settings:
 - **TypeSafe Jev** (`api.typesafe.ai`, model `jev-latest`)
 - **Cloudflare Clef / Clef-flash** on Workers AI (`@cf/cloudflare/clef-flash`)
 
+Both models are sent the window's screenshot with each step unless that is
+turned off in the settings. When a window has no accessibility tree, the
+step's target is found in the screenshot alone. Jev puts a `box` question
+around it (Jev 1.14; while `jev-latest` is still 1.13 those questions go to
+`jev-preview`), then checks a dot at the click point before acting. Clef
+narrows a numbered grid instead. Jev's images and box questions are in
+TypeSafe's "danger zone" and are sent with the
+`TypeSafe-Danger-Zone-Images: true` header.
+
 ## Platforms
 
 Each platform implements the `Platform` and `Session` traits in
