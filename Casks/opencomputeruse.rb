@@ -1,6 +1,6 @@
 cask "opencomputeruse" do
-  version "0.8.0"
-  sha256 "89b8142dbde217f61d02a4f0c998012e6799e377dc1aca9ac84e96a10b0863d7"
+  version "0.9.0"
+  sha256 "7da26d8e2bd709c7db5c9f805356a86aea4112744556fcb6cde74bbae3498ece"
 
   url "https://github.com/IAmJSD/OpenComputerUse/releases/download/v#{version}/OpenComputerUse.zip"
   name "OpenComputerUse"
