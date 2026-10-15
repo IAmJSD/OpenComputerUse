@@ -78,7 +78,19 @@ returns a screenshot and the tree so the caller can take over. Two models
 are supported, chosen in the app's settings:
 
 - **TypeSafe Jev** (`api.typesafe.ai`, model `jev-latest`)
-- **Cloudflare Clef / Clef-flash** on Workers AI (`@cf/cloudflare/clef-flash`)
+- **Cloudflare Clef / Clef-flash / Clef-omni** on Workers AI
+  (`@cf/cloudflare/clef-flash`; set the model to `@cf/cloudflare/clef` or
+  `@cf/cloudflare/clef-omni` in the settings). Clef-omni takes audio and
+  video too, which recipes don't use; on screenshots it is weaker than the
+  other two, and can't read the numbered grid used for windows without a
+  tree.
+
+A step whose request is too long for the model's context window is split:
+its questions go in separate requests, and a list of elements too long for
+one question is asked in smaller groups. A single question too long for
+Jev's 32k tokens is asked again with TypeSafe's long context
+(`TypeSafe-Danger-Zone-Long-Context: true`, 262k tokens). That mode is
+slower and less accurate, so it is only used when needed.
 
 Both models are sent the window's screenshot with each step unless that is
 turned off in the settings. When a window has no accessibility tree, the

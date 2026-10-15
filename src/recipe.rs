@@ -545,13 +545,74 @@ fn attach_jev_images(body: &mut Value, images: &[Vec<u8>]) -> Result<()> {
     Ok(())
 }
 
-/// One decision-model call: questions in, `answers` out, with `images`
-/// (PNG) for the model to look at.
+/// A request too long for the model's context window.
+#[derive(Debug)]
+struct ContextOverflow;
+
+impl std::fmt::Display for ContextOverflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the request is longer than the decision model's context window")
+    }
+}
+
+impl std::error::Error for ContextOverflow {}
+
+fn overflowed(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<ContextOverflow>().is_some()
+}
+
+/// [`ask_once`], fitted to the context window: a request too long for it is
+/// split into halves, each asked on its own (the questions are independent,
+/// so this changes nothing but the number of calls). A single question too
+/// long for Jev is asked again with TypeSafe's long context, which is slower
+/// and less accurate, so only then. One too long for Clef fails with
+/// [`ContextOverflow`] for the caller to shorten.
 fn ask(
     config: &RecipeConfig,
     state: &Value,
     questions: &Map<String, Value>,
     images: &[Vec<u8>],
+) -> Result<Map<String, Value>> {
+    match ask_once(config, state, questions, images, false) {
+        Err(e) if overflowed(&e) && questions.len() > 1 => {
+            let half = questions.len() / 2;
+            let first: Map<String, Value> = questions
+                .iter()
+                .take(half)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let second: Map<String, Value> = questions
+                .iter()
+                .skip(half)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            log::info!(
+                "recipe: {} questions overflow the context window; asking them in two halves",
+                questions.len()
+            );
+            let mut answers = ask(config, state, &first, images)?;
+            answers.extend(ask(config, state, &second, images)?);
+            Ok(answers)
+        }
+        Err(e) if overflowed(&e) && config.provider == Provider::Typesafe => {
+            log::info!(
+                "recipe: a question overflows Jev's context window; asking with long context"
+            );
+            ask_once(config, state, questions, images, true)
+        }
+        r => r,
+    }
+}
+
+/// One decision-model call: questions in, `answers` out, with `images`
+/// (PNG) for the model to look at. `long_context` asks Jev for its 262k
+/// window rather than the 64k (32k a question) one.
+fn ask_once(
+    config: &RecipeConfig,
+    state: &Value,
+    questions: &Map<String, Value>,
+    images: &[Vec<u8>],
+    long_context: bool,
 ) -> Result<Map<String, Value>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -604,6 +665,9 @@ fn ask(
     {
         req = req.header("TypeSafe-Danger-Zone-Images", "true");
     }
+    if config.provider == Provider::Typesafe && long_context {
+        req = req.header("TypeSafe-Danger-Zone-Long-Context", "true");
+    }
     let mut resp = req
         .send_json(&body)
         .with_context(|| format!("calling {}", config.provider.label()))?;
@@ -613,6 +677,28 @@ fn ask(
         .read_json()
         .context("reading the decision model's reply")?;
     if !status.is_success() {
+        // Jev says so in `detail`. Workers AI uses error 3030 once it has
+        // counted the tokens and 5021 when its estimate is already too many;
+        // Clef-omni says so in a general validation error (5012).
+        let jev = reply.pointer("/detail/error_type").and_then(Value::as_str)
+            == Some("max_tokens_exceeded");
+        let clef = reply
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|e| {
+                e.iter().any(|e| {
+                    matches!(e.get("code").and_then(Value::as_u64), Some(3030 | 5021))
+                        || e.get("message")
+                            .and_then(Value::as_str)
+                            .is_some_and(|m| m.contains("exceeds the Clef token limit"))
+                })
+            });
+        if jev || clef {
+            return Err(anyhow::Error::new(ContextOverflow).context(format!(
+                "{} answered {status}: {reply}",
+                config.provider.label()
+            )));
+        }
         bail!("{} answered {status}: {reply}", config.provider.label());
     }
     // Workers AI wraps answers in "result".
@@ -708,7 +794,10 @@ fn pick(
     let images: Vec<Vec<u8>> = shot.cloned().into_iter().collect();
     let indexed: Vec<(usize, &Candidate)> = candidates.iter().enumerate().collect();
     let mut round: Vec<(usize, &Candidate)> = indexed;
-    loop {
+    // Fewer options a question when one is too long for the model (Clef-flash
+    // has 24k tokens; Jev falls back to its long context first).
+    let mut per_group = MAX_OPTIONS;
+    'rounds: loop {
         if round.len() == 1 {
             return Ok(Pick {
                 index: round[0].0,
@@ -717,7 +806,7 @@ fn pick(
                 runner_up: 0.0,
             });
         }
-        let groups: Vec<&[(usize, &Candidate)]> = round.chunks(MAX_OPTIONS).collect();
+        let groups: Vec<&[(usize, &Candidate)]> = round.chunks(per_group).collect();
         let mut winners: Vec<(usize, &Candidate, f64, f64, f64)> = Vec::new();
         for batch in groups.chunks(MAX_QUESTIONS) {
             let questions: Map<String, Value> = batch
@@ -725,7 +814,14 @@ fn pick(
                 .enumerate()
                 .map(|(g, opts)| (format!("g{g}"), question(opts)))
                 .collect();
-            let answers = ask(config, &state, &questions, &images)?;
+            let answers = match ask(config, &state, &questions, &images) {
+                Err(e) if overflowed(&e) && per_group > 8 => {
+                    per_group /= 2;
+                    log::info!("recipe: a choice overflows the context window; {per_group} options a question");
+                    continue 'rounds;
+                }
+                r => r?,
+            };
             for (g, _) in batch.iter().enumerate() {
                 let Some((chosen, p, c, r)) = answers.get(&format!("g{g}")).and_then(choice) else {
                     bail!("the decision model gave no choice");
@@ -1184,6 +1280,10 @@ fn look(config: &RecipeConfig, app: &str, target: &str, png: &[u8]) -> Result<(f
             }),
         );
         let answers = ask(config, &state, &questions, &images)?;
+        log::debug!(
+            "recipe: grid level {level} for \"{target}\": {:?}",
+            answers.get("cell")
+        );
         let (chosen, p, c, _) = answers
             .get("cell")
             .and_then(choice)
@@ -1618,5 +1718,105 @@ mod tests {
                 "{model}: ({x}, {y})"
             );
         }
+    }
+
+    /// Rows with long descriptions, `target` among them at `at`.
+    fn long_rows(count: usize, words: usize, at: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| {
+                let filler: Vec<String> =
+                    (0..words).map(|w| format!("note{}x{w}", i % 7)).collect();
+                let name = if i == at {
+                    "Invoice 4471 from Larkspur Ltd".to_string()
+                } else {
+                    format!("Invoice {} from Supplier {i}", 1000 + i)
+                };
+                format!("Row \"{name}\" ({})", filler.join(" "))
+            })
+            .collect()
+    }
+
+    /// Picks a row from candidate lists too long for the default context:
+    /// one question past Jev's 32k (long context), several questions past
+    /// its 64k (split), and, with Clef-flash's 24k, groups made smaller.
+    /// Needs `TYPESAFE_API_KEY` and, for Clef, Cloudflare credentials in the
+    /// settings; run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn long_choices_fit_the_context() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let node = UiNode::default();
+        let mut configs = Vec::new();
+        if let Ok(key) = std::env::var("TYPESAFE_API_KEY") {
+            configs.push(RecipeConfig {
+                provider: Provider::Typesafe,
+                typesafe_api_key: key,
+                ..Default::default()
+            });
+        }
+        let saved = Config::load().recipe;
+        if !saved.cloudflare_api_token.is_empty() {
+            configs.push(RecipeConfig {
+                provider: Provider::Cloudflare,
+                ..saved
+            });
+        }
+        // ~45k tokens in one question; then three groups of ~25k each.
+        for (count, words, at) in [(250, 60, 173), (700, 13, 612)] {
+            let rows = long_rows(count, words, at);
+            let candidates: Vec<Candidate> = rows
+                .iter()
+                .map(|d| Candidate {
+                    node: &node,
+                    description: d.clone(),
+                })
+                .collect();
+            for config in &configs {
+                let p = pick(
+                    config,
+                    "Ledger",
+                    "click the Larkspur invoice",
+                    &candidates,
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("{:?} {count}: {e:#}", config.provider));
+                eprintln!(
+                    "{:?} {count}×{words}: e{} p {:.2}",
+                    config.provider, p.index, p.probability
+                );
+                assert_eq!(p.index, at, "{:?} {count}", config.provider);
+            }
+        }
+    }
+
+    /// The red button again, found by Clef through the grid. Needs
+    /// Cloudflare credentials in the settings; run with `--ignored`.
+    /// (Clef-omni can't read the grid's numbers, and fails this.)
+    #[test]
+    #[ignore]
+    fn clef_points_at_a_button() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let saved = Config::load().recipe;
+        if saved.cloudflare_api_token.is_empty() {
+            return;
+        }
+        let config = RecipeConfig {
+            provider: Provider::Cloudflare,
+            cloudflare_model: "@cf/cloudflare/clef-flash".into(),
+            ..saved
+        };
+        let mut img = blank(1400, 900);
+        for y in 600..640 {
+            for x in 1100..1220 {
+                let i = (y * img.width + x) * 3;
+                img.rgb[i..i + 3].copy_from_slice(&[210, 30, 30]);
+            }
+        }
+        let (x, y, sure) = look(&config, "Test", "the red button", &img.encode().unwrap()).unwrap();
+        eprintln!("clef-flash: ({x:.0}, {y:.0}) sure {sure:.2}");
+        assert!(
+            (1100.0..1220.0).contains(&x) && (600.0..640.0).contains(&y),
+            "({x}, {y})"
+        );
     }
 }
