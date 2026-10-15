@@ -151,6 +151,41 @@ impl Image {
         }
     }
 
+    /// The image on a white canvas at least `min`×`min`, at the top left so
+    /// its pixel positions are unchanged.
+    pub fn pad(&self, min: usize) -> Image {
+        if self.width >= min && self.height >= min {
+            return self.clone();
+        }
+        let (w, h) = (self.width.max(min), self.height.max(min));
+        let mut out = Image {
+            width: w,
+            height: h,
+            rgb: vec![255; w * h * 3],
+        };
+        for y in 0..self.height {
+            let src = &self.rgb[y * self.width * 3..(y + 1) * self.width * 3];
+            out.rgb[y * w * 3..y * w * 3 + src.len()].copy_from_slice(src);
+        }
+        out
+    }
+
+    /// A filled dot of radius `r` ringed in white, so it shows on any colour.
+    pub fn dot(&mut self, x: f64, y: f64, r: f64, color: [u8; 3]) {
+        let ring = r + 2.0;
+        let (x0, y0) = ((x - ring).max(0.0) as usize, (y - ring).max(0.0) as usize);
+        for py in y0..=(y + ring) as usize {
+            for px in x0..=(x + ring) as usize {
+                let d = ((px as f64 - x).powi(2) + (py as f64 - y).powi(2)).sqrt();
+                if d <= r {
+                    self.put(px, py, color);
+                } else if d <= ring {
+                    self.put(px, py, [255, 255, 255]);
+                }
+            }
+        }
+    }
+
     /// A rectangle outline, `thick` pixels wide.
     pub fn outline(&mut self, c: Cell, thick: usize, color: [u8; 3]) {
         for t in 0..thick {
