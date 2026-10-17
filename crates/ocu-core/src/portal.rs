@@ -105,14 +105,7 @@ impl Portal {
     /// Returns once the portal has claimed its name, so an app started after
     /// this finds it.
     pub fn start(private: &str, upstream: Option<String>) -> Result<Arc<Self>> {
-        let (out, out_rx) = tokio::sync::mpsc::unbounded_channel();
-        let portal = Arc::new(Portal {
-            state: Mutex::new(State {
-                pending: HashMap::new(),
-                next: 0,
-            }),
-            out,
-        });
+        let (portal, out_rx) = Self::new();
         // A worker thread or two: a forwarded call awaits the real bus, and
         // the bridge keeps serving while it does.
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -128,9 +121,9 @@ impl Portal {
             .spawn(move || {
                 runtime.block_on(async move {
                     match connect(&private, upstream.as_deref()).await {
-                        Ok(buses) => {
+                        Ok((buses, inbound)) => {
                             let _ = ready.send(Ok(()));
-                            run(buses, bridge, out_rx).await;
+                            run(buses, inbound, bridge, out_rx).await;
                         }
                         Err(e) => {
                             let _ = ready.send(Err(e));
@@ -143,6 +136,19 @@ impl Portal {
             .recv_timeout(Duration::from_secs(10))
             .map_err(|_| anyhow!("the portal did not claim {DESKTOP} in time"))??;
         Ok(portal)
+    }
+
+    /// A portal with nothing waiting, and the other end of its `out`.
+    fn new() -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Message>) {
+        let (out, out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let portal = Arc::new(Portal {
+            state: Mutex::new(State {
+                pending: HashMap::new(),
+                next: 0,
+            }),
+            out,
+        });
+        (portal, out_rx)
     }
 
     /// The chooser the app is waiting on, if any. There is at most one: a
@@ -309,15 +315,26 @@ struct Buses {
     upstream: Option<Connection>,
 }
 
+/// What each bus brings in, opened by [`connect`] rather than by the bridge
+/// loop. zbus drops a message that arrives while no stream is open, so a call
+/// an app makes the moment [`Portal::start`] returns would otherwise be lost
+/// if it beat the loop to its first poll.
+struct Inbound {
+    from_app: MessageStream,
+    from_real: Option<MessageStream>,
+}
+
 /// Connects both buses, claims the portal and forwarded names on the private
 /// one, and subscribes to the signals worth relaying from the real one.
-async fn connect(private: &str, upstream: Option<&str>) -> Result<Buses> {
+async fn connect(private: &str, upstream: Option<&str>) -> Result<(Buses, Inbound)> {
     // No interface is served: with the object server idle, zbus hands every
     // incoming call to our own stream instead of answering it itself.
     let private = zbus::connection::Builder::address(private)?
         .build()
         .await
         .map_err(|e| anyhow!("connecting to the private bus: {e}"))?;
+    // Open before the names are claimed, so nothing sent to them is dropped.
+    let from_app = MessageStream::from(&private);
     for name in std::iter::once(DESKTOP).chain(FORWARD_NAMES.iter().copied()) {
         private
             .request_name(name)
@@ -336,8 +353,16 @@ async fn connect(private: &str, upstream: Option<&str>) -> Result<Buses> {
         }
         None => None,
     };
+    // Nothing has been forwarded yet, so no reply can come before this.
+    let from_real = upstream.as_ref().map(MessageStream::from);
     log::info!("answering file choosers on {private:?}, forwarding the rest");
-    Ok(Buses { private, upstream })
+    Ok((
+        Buses { private, upstream },
+        Inbound {
+            from_app,
+            from_real,
+        },
+    ))
 }
 
 /// Asks the real bus for the signals the app will want relayed: a forwarded
@@ -375,11 +400,14 @@ async fn subscribe(upstream: &Connection) -> Result<()> {
 /// a strong handle would keep `out` open and the loop alive forever.
 async fn run(
     buses: Buses,
+    inbound: Inbound,
     portal: Weak<Portal>,
     mut out: tokio::sync::mpsc::UnboundedReceiver<Message>,
 ) {
-    let mut from_app = MessageStream::from(&buses.private);
-    let mut from_real = buses.upstream.as_ref().map(MessageStream::from);
+    let Inbound {
+        mut from_app,
+        mut from_real,
+    } = inbound;
     // Forwarded calls, by the serial they went out on, so a reply can be sent
     // back to the app that is waiting. Local to the one task that reads both
     // buses, so it needs no lock.
@@ -1143,22 +1171,10 @@ mod tests {
         /// and its reply comes back: here, a stub `Ping` on a forwarded name.
         #[tokio::test]
         async fn forwards_an_unknown_call_to_the_real_bus() {
-            // The stub "real" bus, with a service under a forwarded name.
-            let Ok(real) = Bus::start() else {
+            let Some((real, _service)) = stub_real_bus().await else {
                 eprintln!("no dbus-daemon here; skipping");
                 return;
             };
-            let service = zbus::connection::Builder::address(real.address())
-                .unwrap()
-                .name("org.freedesktop.Notifications")
-                .unwrap()
-                .serve_at("/org/freedesktop/Notifications", Stub)
-                .unwrap()
-                .build()
-                .await
-                .expect("the stub service");
-            let _ = &service;
-
             let Some((_bus, _portal, client, _proxy)) =
                 pair_with_upstream(Some(real.address().to_string())).await
             else {
@@ -1176,6 +1192,102 @@ mod tests {
                 .await
                 .expect("the forwarded call's reply");
             assert_eq!(echoed, "hi", "the real service answered through the bridge");
+        }
+
+        /// A call that reaches the portal's connection before the bridge loop
+        /// has first run is still answered, rather than dropped for want of
+        /// a reader. The loop is held back until a marker sent after the call
+        /// has arrived, so the call is certain to be in first.
+        #[tokio::test]
+        async fn answers_a_call_that_beats_the_bridge_loop() {
+            let Some((real, _service)) = stub_real_bus().await else {
+                eprintln!("no dbus-daemon here; skipping");
+                return;
+            };
+            let bus = Bus::start().expect("the app's bus");
+            let (buses, inbound) = connect(bus.address(), Some(real.address()))
+                .await
+                .expect("connecting the bridge");
+            let marker = MatchRule::builder()
+                .msg_type(Type::Signal)
+                .member("Marker")
+                .unwrap()
+                .build();
+            let mut marked = MessageStream::for_match_rule(marker, &buses.private, None)
+                .await
+                .expect("listening for the marker");
+
+            let client = zbus::connection::Builder::address(bus.address())
+                .unwrap()
+                .build()
+                .await
+                .expect("connecting to the app bus");
+            let mut replies = MessageStream::from(&client);
+            let call = Message::method_call("/org/freedesktop/Notifications", "Echo")
+                .unwrap()
+                .destination("org.freedesktop.Notifications")
+                .unwrap()
+                .interface("org.example.Stub")
+                .unwrap()
+                .build(&("hi",))
+                .unwrap();
+            let serial = call.primary_header().serial_num();
+            client.send(&call).await.expect("sending the call");
+            // The bus keeps one sender's messages in order, so once this is
+            // in, the call before it is too.
+            let portal_name = buses.private.unique_name().unwrap().to_owned();
+            client
+                .emit_signal(
+                    Some(portal_name),
+                    "/ocu/test",
+                    "org.example.Stub",
+                    "Marker",
+                    &(),
+                )
+                .await
+                .expect("sending the marker");
+            within(marked.next())
+                .await
+                .expect("the marker arrives")
+                .expect("the marker itself");
+
+            let (portal, out) = Portal::new();
+            let reply = async {
+                loop {
+                    let msg = replies.next().await.expect("the app's bus").unwrap();
+                    if msg.header().reply_serial() == Some(serial) {
+                        return msg;
+                    }
+                }
+            };
+            let reply = within(async {
+                tokio::select! {
+                    () = run(buses, inbound, Arc::downgrade(&portal), out) => {
+                        panic!("the bridge ended")
+                    }
+                    reply = reply => reply,
+                }
+            })
+            .await;
+            assert_eq!(reply.message_type(), Type::MethodReturn);
+            let echoed: String = reply.body().deserialize().expect("the reply's shape");
+            assert_eq!(echoed, "hi");
+        }
+
+        /// A stub of the user's real bus, with a service under a forwarded
+        /// name. None where there is no `dbus-daemon`.
+        async fn stub_real_bus() -> Option<(Arc<Bus>, Connection)> {
+            let real = Bus::start().ok()?;
+            let service = zbus::connection::Builder::address(real.address())
+                .unwrap()
+                .name("org.freedesktop.Notifications")
+                .unwrap()
+                .serve_at("/org/freedesktop/Notifications", Stub)
+                .unwrap()
+                .build()
+                .await
+                .expect("the stub service");
+            Some((real, service))
         }
 
         /// A call with no real bus to forward to fails cleanly rather than
