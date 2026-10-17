@@ -12,9 +12,12 @@
    the Linux and Windows binaries (`gh release view v0.2.2`). Phone sessions
    fetch the APK of their own version, so a release without it leaves
    Android apps on the phone's own screen.
-5. Bump `version` and `sha256` in `Casks/opencomputeruse.rb`, using the zip
-   from the release (`gh release download v0.2.2 -p OpenComputerUse.zip` then
-   `shasum -a 256 OpenComputerUse.zip`), and commit that.
+5. Once the Release run succeeds, `.github/workflows/bump-cask.yml` opens a
+   `cask: v0.2.2` pull request moving `version` and `sha256` in
+   `Casks/opencomputeruse.rb` to the release's zip. Merge it. A Release run
+   only succeeds when every platform built, so if one failed but the release
+   still went out, start it by hand: `gh workflow run bump-cask.yml -f
+   tag=v0.2.2`.
 
 Installed apps pick the release up through their own updater, which only
 installs builds signed by the same team, so don't publish an unsigned build.
