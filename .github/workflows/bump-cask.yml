@@ -1,0 +1,135 @@
+name: Bump cask
+
+# Releases created with GITHUB_TOKEN do not trigger release workflows.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable release tag, for example v0.7.1
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: bump-cask
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Verify release and open cask pull request
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+
+          def run(*args):
+              return subprocess.check_output(args, text=True).strip()
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          tag = os.environ['TAG']
+          require(re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag),
+                  'Expected a stable release tag like v1.2.3')
+          version = tag[1:]
+          repo = os.environ['GITHUB_REPOSITORY']
+          base = os.environ['DEFAULT_BRANCH']
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          if os.environ['GITHUB_EVENT_NAME'] == 'workflow_run':
+              workflow = event['workflow_run']
+              require(workflow['conclusion'] == 'success' and workflow['event'] == 'push'
+                      and workflow['head_repository']['full_name'] == repo,
+                      'Release run must be a successful push in this repository')
+              require(run('git', 'rev-parse', f'{tag}^{{commit}}') == workflow['head_sha'],
+                      'Release tag does not resolve to the Release run commit')
+          release = json.loads(run('gh', 'release', 'view', tag, '--repo', repo,
+                                   '--json', 'tagName,isDraft,isPrerelease,publishedAt'))
+          require(release['tagName'] == tag and not release['isDraft']
+                  and not release['isPrerelease'] and release['publishedAt'],
+                  'Expected a published stable release')
+          with tempfile.TemporaryDirectory() as download:
+              run('gh', 'release', 'download', tag, '--repo', repo,
+                  '--pattern', 'OpenComputerUse.zip', '--dir', download)
+              digest = hashlib.sha256(Path(download, 'OpenComputerUse.zip').read_bytes()).hexdigest()
+
+          cask = Path('Casks/opencomputeruse.rb')
+          original = cask.read_text()
+          version_pattern = r'^  version "([^"\n]+)"$'
+          hash_pattern = r'^  sha256 "([0-9a-f]{64})"$'
+          versions = re.findall(version_pattern, original, re.M)
+          hashes = re.findall(hash_pattern, original, re.M)
+          require(len(versions) == len(hashes) == 1
+                  and len(re.findall(r'^\s*version\b', original, re.M)) == 1
+                  and len(re.findall(r'^\s*sha256\b', original, re.M)) == 1,
+                  'Cask must have exactly one valid version and sha256 field')
+          require(re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', versions[0]),
+                  'Current cask version must be a stable numeric version')
+          require(tuple(map(int, version.split('.'))) >= tuple(map(int, versions[0].split('.'))),
+                  'Refusing to downgrade the cask')
+          if version == versions[0]:
+              require(digest == hashes[0], 'Release checksum changed for the current cask version')
+              print('Cask already matches this release')
+              raise SystemExit(0)
+          updated = re.sub(version_pattern, f'  version "{version}"', original, flags=re.M)
+          updated = re.sub(hash_pattern, f'  sha256 "{digest}"', updated, flags=re.M)
+          require(re.findall(version_pattern, updated, re.M) == [version]
+                  and re.findall(hash_pattern, updated, re.M) == [digest],
+                  'Cask rewrite validation failed')
+
+          branch = f'cask/{tag}'
+          remote = run('git', 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}')
+          if remote:
+              prs = json.loads(run('gh', 'pr', 'list', '--repo', repo, '--head', branch,
+                                   '--state', 'open', '--json', 'number,baseRefName,headRefOid'))
+              run('git', 'fetch', 'origin', f'refs/heads/{branch}')
+              sha = run('git', 'rev-parse', 'FETCH_HEAD')
+              files = run('git', 'diff', '--name-only', f'HEAD...{sha}').splitlines()
+              existing = subprocess.check_output(['git', 'show', f'{sha}:{cask}'], text=True)
+              require(files == [str(cask)] and existing == updated,
+                      'Cask branch already exists and does not match this bump')
+              require(len(prs) <= 1 and (not prs or (prs[0]['baseRefName'] == base
+                      and prs[0]['headRefOid'] == sha)), 'Existing pull request does not match this bump')
+              if prs:
+                  print(f"Existing matching pull request #{prs[0]['number']}")
+                  raise SystemExit(0)
+
+          else:
+              cask.write_text(updated)
+              run('git', 'config', 'user.name', 'github-actions[bot]')
+              run('git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
+              run('git', 'switch', '-c', branch)
+              run('git', 'add', '--', str(cask))
+              run('git', 'commit', '-m', f'cask: {tag}')
+              run('git', 'push', 'origin', f'HEAD:refs/heads/{branch}')
+          print(run('gh', 'pr', 'create', '--repo', repo, '--base', base, '--head', branch,
+                    '--title', f'cask: {tag}', '--body',
+                    f'Moves the cask to {tag}. SHA256 is of OpenComputerUse.zip from the published release.'))
