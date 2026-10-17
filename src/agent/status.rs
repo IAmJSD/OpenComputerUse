@@ -1151,9 +1151,9 @@ impl Status {
         let section = div().flex().flex_col().gap_2().pt_2();
         if !form.open {
             return section
-                .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Drive another computer"))
+                .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Drive a Linux computer"))
                 .child(dim(
-                    "Set up a computer you reach over SSH, and agents here drive it through a tunnel, with nothing opened on its network.".into(),
+                    "Set up a Linux computer you reach over SSH, and agents here drive it through a tunnel, with nothing opened on its network. This installs OpenComputerUse there; a Mac has to have it installed already.".into(),
                 ))
                 .child(
                     div().flex().child(
@@ -1169,9 +1169,9 @@ impl Status {
         }
         let running = form.step.is_some();
         let help = if form.use_installed {
-            "Connects to the opencomputeruse running there (Linux or macOS, its HTTP server on) and changes nothing there but adding this computer as a device."
+            "Connects to the opencomputeruse already running on the Linux computer (or a Mac), with its HTTP server on, and changes nothing there but adding this computer as a device."
         } else {
-            "Installs this version on a Linux host, serving on that host's loopback only."
+            "Linux only: installs this version on the Linux computer, serving on its loopback only."
         };
         section.child(
             div()
@@ -1182,7 +1182,7 @@ impl Status {
                 .rounded(px(8.0))
                 .border_1()
                 .border_color(rgb(p.edge))
-                .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Computer over SSH"))
+                .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Linux computer over SSH"))
                 .child(Self::row("Host", self.input(Field::SshHost, "user@host, or an alias from ~/.ssh/config", cx)))
                 .child(Self::row("Name", self.input(Field::SshName, "What agents here call it, like build-box", cx)))
                 .child(Self::row("Key file", self.input(Field::SshKey, "Optional, like ~/.ssh/id_ed25519", cx)))
