@@ -38,16 +38,18 @@ USAGE:
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
     opencomputeruse serve --install [--port N] [--listen-on LIST]
                                           Same, saving those settings first (Linux, Windows)
-    opencomputeruse device add --name N --url U
-                                          Allow a device to drive this computer: prints its new key
-                                          (an existing device of that name gets a new key)
+    opencomputeruse device add --name N --url U [--replace]
+                                          Allow a device to drive this computer: prints its new key.
+                                          A taken name is refused; --replace gives that device a new key
+    opencomputeruse device list           The devices allowed to drive this computer
     opencomputeruse device remove NAME    Remove a device by ID or name and its key
     opencomputeruse device remove --name N
                                           Remove only the device named N
-    opencomputeruse ssh-setup HOST --name NAME [-i KEYFILE]
+    opencomputeruse ssh-setup HOST --name NAME [-i KEYFILE] [--replace]
                                           HOST is an SSH alias or user@host
                                           Install this version on a Linux host over SSH, serve it there
-                                          on loopback only, and keep an SSH tunnel to it up from here
+                                          on loopback only, and keep an SSH tunnel to it up from here.
+                                          --replace gives a remote device of that name a new key
     opencomputeruse ssh-setup HOST --name NAME --use-installed [--remote-port P]
                                           Instead connect to an opencomputeruse already running there
                                           (Linux or macOS; its HTTP server on port P, default 8642)
@@ -272,7 +274,8 @@ fn run_serve(args: &[String]) -> Result<()> {
 }
 
 /// `device add --name N --url U` prints only the new key on stdout, so a
-/// caller can capture it; what happened goes to stderr.
+/// caller can capture it; what happened goes to stderr, as an `ocu-device:`
+/// line `ssh-setup` reads.
 fn run_device(args: &[String]) -> Result<()> {
     use remote::devices::Devices;
     let value = |flag: &str| {
@@ -291,12 +294,25 @@ fn run_device(args: &[String]) -> Result<()> {
                 .iter()
                 .find(|d| d.name.eq_ignore_ascii_case(name.trim()))
                 .map(|d| d.id.clone());
+            let replace = args.iter().any(|a| a == "--replace");
             let (key, what) = match existing {
-                Some(id) => (devices.regenerate(&id, Some(url))?.1, "regenerated"),
+                Some(id) if replace => (devices.regenerate(&id, Some(url))?.1, "regenerated"),
+                Some(_) => {
+                    eprintln!("ocu-device: exists");
+                    bail!("a device named \"{name}\" already exists; --replace gives it a new key, and its current key stops working")
+                }
                 None => (devices.add(name, url)?.1, "added"),
             };
             eprintln!("ocu-device: {what}");
             println!("{key}");
+            Ok(())
+        }
+        // Also what `ssh-setup` runs to tell a release with this command
+        // from an older one.
+        Some("list") => {
+            for d in Devices::load().devices {
+                println!("{}\t{}\t{}", d.name, d.url, d.id);
+            }
             Ok(())
         }
         Some("remove") => {
@@ -312,7 +328,9 @@ fn run_device(args: &[String]) -> Result<()> {
             println!("Removed {} ({}); its key no longer works.", d.name, d.id);
             Ok(())
         }
-        _ => bail!("usage: opencomputeruse device add --name N --url U | device remove NAME"),
+        _ => bail!(
+            "usage: opencomputeruse device add --name N --url U [--replace] | device list | device remove NAME"
+        ),
     }
 }
 

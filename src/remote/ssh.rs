@@ -214,10 +214,13 @@ pub enum RemoteJob<'a> {
     Check {
         port: u16,
     },
+    /// `replace` gives a device of the same name a new key; without it a
+    /// taken name fails.
     DeviceAdd {
         bin: Option<&'a str>,
         name: &'a str,
         url: &'a str,
+        replace: bool,
     },
     DeviceRemove {
         bin: Option<&'a str>,
@@ -272,10 +275,12 @@ macro_rules! listeners_fn {
     };
 }
 
+/// `device list` is the probe: releases before the device commands fail it
+/// as an unknown command.
 macro_rules! device_cli_fn {
     () => {
         r#"require_device_cli() {
-  "$1" device 2>&1 | grep -q 'device add' || fail "remote opencomputeruse is too old, update it"
+  "$1" device list >/dev/null 2>&1 || fail "remote opencomputeruse is too old, update it"
 }
 "#
     };
@@ -382,7 +387,7 @@ printf '%s\n' "$bin"
 );
 
 const DEVICE_ADD_BODY: &str = r#"set -eu
-exec "${OCU_BIN:-$HOME/.local/bin/opencomputeruse}" device add --name "$OCU_NAME" --url "$OCU_URL"
+exec "${OCU_BIN:-$HOME/.local/bin/opencomputeruse}" device add --name "$OCU_NAME" --url "$OCU_URL" ${OCU_REPLACE:+--replace}
 "#;
 
 const DEVICE_REMOVE_BODY: &str = r#"set -eu
@@ -412,7 +417,12 @@ pub fn remote_script(job: &RemoteJob) -> Result<String> {
             set("OCU_PORT", &port.to_string());
             CHECK_BODY
         }
-        RemoteJob::DeviceAdd { bin, name, url } => {
+        RemoteJob::DeviceAdd {
+            bin,
+            name,
+            url,
+            replace,
+        } => {
             validate_name(name)?;
             ensure!(
                 url.starts_with("http://127.0.0.1:")
@@ -427,6 +437,7 @@ pub fn remote_script(job: &RemoteJob) -> Result<String> {
             }
             set("OCU_NAME", name);
             set("OCU_URL", url);
+            set("OCU_REPLACE", if *replace { "1" } else { "" });
             DEVICE_ADD_BODY
         }
         RemoteJob::DeviceRemove { bin, name } => {
@@ -563,25 +574,68 @@ pub fn pick_port(
 
 // -------------------------------------------------------------- runner
 
-struct Parsed {
-    host: String,
-    name: String,
-    key: Option<String>,
+/// What a setup needs, from `ssh-setup`'s arguments or the app's form.
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub host: String,
+    pub name: String,
+    pub key: Option<String>,
     /// Connect to an opencomputeruse already on the remote instead of
     /// installing one.
-    use_installed: bool,
-    remote_port: u16,
+    pub use_installed: bool,
+    pub remote_port: u16,
+    /// Give a remote device of the same name a new key.
+    pub replace: bool,
 }
 
-fn parse_args(args: &[String]) -> Result<Parsed> {
+impl Options {
+    /// Checks the values, with a leading `~/` in the key path expanded.
+    pub fn new(
+        host: &str,
+        name: &str,
+        key: Option<&str>,
+        use_installed: bool,
+        remote_port: Option<u16>,
+        replace: bool,
+    ) -> Result<Self> {
+        ensure!(
+            use_installed || remote_port.is_none(),
+            "--remote-port only goes with --use-installed"
+        );
+        let key = key.map(|k| match k.strip_prefix("~/") {
+            Some(rest) => crate::clients::home()
+                .join(rest)
+                .to_string_lossy()
+                .into_owned(),
+            None => k.to_string(),
+        });
+        validate_host(host)?;
+        validate_name(name)?;
+        if let Some(k) = &key {
+            validate_path(k)?;
+            ensure!(Path::new(k).is_file(), "no key file at {k}");
+        }
+        Ok(Self {
+            host: host.into(),
+            name: name.into(),
+            key,
+            use_installed,
+            remote_port: remote_port.unwrap_or(REMOTE_PORT),
+            replace,
+        })
+    }
+}
+
+fn parse_args(args: &[String]) -> Result<Options> {
     let (mut host, mut name, mut key, mut remote_port) = (None, None, None, None);
-    let mut use_installed = false;
+    let (mut use_installed, mut replace) = (false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--name" => name = it.next().cloned(),
             "-i" | "--identity" => key = it.next().cloned(),
             "--use-installed" => use_installed = true,
+            "--replace" => replace = true,
             "--remote-port" => {
                 let v = it.next().map(String::as_str).unwrap_or_default();
                 remote_port = Some(
@@ -596,32 +650,16 @@ fn parse_args(args: &[String]) -> Result<Parsed> {
             _ => bail!("unexpected \"{a}\""),
         }
     }
-    let usage = "usage: opencomputeruse ssh-setup HOST --name NAME [-i KEYFILE] [--use-installed [--remote-port P]] (HOST is an SSH alias or user@host)";
-    ensure!(
-        use_installed || remote_port.is_none(),
-        "--remote-port only goes with --use-installed"
-    );
+    let usage = "usage: opencomputeruse ssh-setup HOST --name NAME [-i KEYFILE] [--replace] [--use-installed [--remote-port P]] (HOST is an SSH alias or user@host)";
     let (host, name) = (host.context(usage)?, name.context(usage)?);
-    let key = key.map(|k| match k.strip_prefix("~/") {
-        Some(rest) => crate::clients::home()
-            .join(rest)
-            .to_string_lossy()
-            .into_owned(),
-        None => k,
-    });
-    validate_host(&host)?;
-    validate_name(&name)?;
-    if let Some(k) = &key {
-        validate_path(k)?;
-        ensure!(Path::new(k).is_file(), "no key file at {k}");
-    }
-    Ok(Parsed {
-        host,
-        name,
-        key,
+    Options::new(
+        &host,
+        &name,
+        key.as_deref(),
         use_installed,
-        remote_port: remote_port.unwrap_or(REMOTE_PORT),
-    })
+        remote_port,
+        replace,
+    )
 }
 
 /// What the remote check reported.
@@ -686,38 +724,42 @@ struct Out {
 fn run_checked(
     argv: &[String],
     script: Option<&str>,
+    tty: bool,
     capture_stderr: bool,
     what: &str,
 ) -> Result<Out> {
-    let out = run_ssh_status(argv, script, capture_stderr)?;
-    ensure!(
-        out.0,
-        "{what} failed{}",
-        if out.1.stderr.trim().is_empty() {
-            String::new()
-        } else {
-            format!(": {}", out.1.stderr.trim())
-        }
-    );
-    Ok(out.1)
+    let (ok, out) = run_ssh_status(argv, script, tty, capture_stderr)?;
+    ensure!(ok, "{what} failed{}", detail(&out.stderr));
+    Ok(out)
 }
 
-/// Runs ssh with `script` on stdin if given. stdout is captured; stderr is
-/// captured only when asked, else passed through to the terminal.
+/// ": " and ssh's complaint, if it made one.
+fn detail(stderr: &str) -> String {
+    match stderr.trim() {
+        "" => String::new(),
+        e => format!(": {e}"),
+    }
+}
+
+/// Runs ssh with `script` on stdin if given. stdout is captured. With a
+/// terminal (`tty`) stderr is captured only when asked, else passed through,
+/// and without a script ssh may read the terminal; without one, stderr is
+/// always captured and there is nothing to read.
 fn run_ssh_status(
     argv: &[String],
     script: Option<&str>,
+    tty: bool,
     capture_stderr: bool,
 ) -> Result<(bool, Out)> {
     let mut cmd = Command::new(find_ssh()?);
     cmd.args(argv)
-        .stdin(if script.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::inherit()
+        .stdin(match (script, tty) {
+            (Some(_), _) => Stdio::piped(),
+            (None, true) => Stdio::inherit(),
+            (None, false) => Stdio::null(),
         })
         .stdout(Stdio::piped())
-        .stderr(if capture_stderr {
+        .stderr(if capture_stderr || !tty {
             Stdio::piped()
         } else {
             Stdio::inherit()
@@ -981,133 +1023,133 @@ fn is_key(s: &str) -> bool {
         .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// The SSH_AUTH_SOCK the tunnel's ssh gets from the service manager that
+/// runs it, which need not be this process's.
+fn service_agent_socket() -> Result<Option<String>> {
+    if cfg!(target_os = "macos") {
+        let out = Command::new("launchctl")
+            .args(["getenv", "SSH_AUTH_SOCK"])
+            .output()
+            .context("running launchctl")?;
+        let sock = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return Ok(Some(sock).filter(|s| !s.is_empty()));
+    }
+    let out = Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .output()
+        .context("running systemctl")?;
+    ensure!(
+        out.status.success(),
+        "no systemd user manager here, and the tunnel runs as a user service"
+    );
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("SSH_AUTH_SOCK="))
+        .map(String::from))
+}
+
+/// Logs in the way the tunnel will: unattended, with the service manager's
+/// agent. A key that only this terminal can use then fails here, before the
+/// remote changes, rather than leaving a tunnel that never comes up.
+fn check_unattended_login(t: &Target) -> Result<()> {
+    let sock = service_agent_socket()?;
+    let mut cmd = Command::new(find_ssh()?);
+    cmd.args(ssh_args(t, Mode::Batch, &["true"]))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    match &sock {
+        Some(s) => cmd.env("SSH_AUTH_SOCK", s),
+        None => cmd.env_remove("SSH_AUTH_SOCK"),
+    };
+    let out = cmd.output().context("running ssh")?;
+    let (runner, fix) = if cfg!(target_os = "macos") {
+        ("a login item", "one loaded in the agent or keychain")
+    } else {
+        (
+            "a systemd user service",
+            "an agent made visible to services with `systemctl --user import-environment SSH_AUTH_SOCK`",
+        )
+    };
+    ensure!(
+        out.status.success(),
+        "the tunnel runs as {runner}, which could not log in to {} on its own{}. Use a key that needs no prompt: one without a passphrase (-i KEYFILE), or {fix}",
+        t.host,
+        detail(&String::from_utf8_lossy(&out.stderr))
+    );
+    Ok(())
+}
+
+/// What to do about a first login the app could not make, having no
+/// terminal for ssh's questions.
+fn login_hint(host: &str, stderr: &str) -> Option<String> {
+    if stderr.contains("Host key verification failed") || stderr.contains("host key is known") {
+        Some(format!(
+            "This computer does not know {host}'s host key yet. Run `ssh {host}` in a terminal once to check and accept it, then try again."
+        ))
+    } else if stderr.contains("Permission denied") {
+        Some("The key must log in without a prompt: use one without a passphrase, or one loaded in the agent or keychain.".into())
+    } else {
+        None
+    }
+}
+
+/// What a running setup reports as it goes.
+#[derive(Debug, Clone)]
+pub enum Note {
+    /// The step it is starting.
+    Step(String),
+    /// Something it found out.
+    Info(String),
+    Warning(String),
+}
+
+/// A finished setup: the hosts file at `hosts` reaches `name` at `url`.
+#[derive(Debug, Clone)]
+pub struct Done {
+    pub name: String,
+    pub url: String,
+    pub hosts: PathBuf,
+}
+
+/// The remote already has a device of the setup's name, and replacing it
+/// was not asked for.
+#[derive(Debug)]
+pub struct NameTaken(pub String);
+
+impl std::fmt::Display for NameTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the remote already has a device named \"{}\". Replacing it gives it a new key, and whatever uses its current key stops working",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for NameTaken {}
+
+/// `opencomputeruse ssh-setup`.
 pub fn setup(args: &[String]) -> Result<()> {
     ensure!(
         cfg!(unix),
         "ssh-setup needs macOS or Linux on this computer"
     );
-    let p = parse_args(args)?;
-    let _lock = lock_setup()?;
-    let target = Target::new(&p.host, p.key.as_deref())?;
-
-    println!("Connecting to {} (answer any prompts here)...", p.host);
-    let probe = run_checked(
-        &ssh_args(&target, Mode::Interactive, &["uname", "-sm"]),
-        None,
-        false,
-        "connecting",
-    )?;
-    println!("Remote: {}.", parse_probe(&probe.stdout, p.use_installed)?);
-
-    let dir = unit_dir();
-    let existing = if cfg!(target_os = "macos") {
-        existing_tunnels(&dir, LABEL_PREFIX, ".plist")
-    } else {
-        existing_tunnels(&dir, UNIT_PREFIX, ".service")
-    };
-    let local = pick_port(&p.name, &existing, |port| {
-        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    let o = parse_args(args)?;
+    let done = connect(&o, true, &mut |note| match note {
+        Note::Step(s) => println!("{s}..."),
+        Note::Info(s) => println!("{s}"),
+        Note::Warning(w) => eprintln!("Warning: {w}"),
+    })
+    .map_err(|e| match e.downcast_ref::<NameTaken>() {
+        Some(taken) => anyhow::anyhow!("{taken}. Pick another --name, or pass --replace"),
+        None => e,
     })?;
-    let url = format!("http://127.0.0.1:{local}");
-
-    let batch = |remote: &[&str]| ssh_args(&target, Mode::Batch, remote);
-    let checked = if p.use_installed {
-        println!(
-            "Checking the opencomputeruse already on the remote (port {})...",
-            p.remote_port
-        );
-        let check = remote_script(&RemoteJob::Check {
-            port: p.remote_port,
-        })?;
-        let out = run_checked(
-            &batch(&["sh", "-s"]),
-            Some(&check),
-            true,
-            "the remote check (key login is required from here on)",
-        )?;
-        let c = parse_check(&out.stdout, &out.stderr, env!("CARGO_PKG_VERSION"))?;
-        for w in &c.warnings {
-            eprintln!("Warning: {w}");
-        }
-        Some(c)
-    } else {
-        println!(
-            "Installing opencomputeruse {} on the remote...",
-            env!("CARGO_PKG_VERSION")
-        );
-        let install = remote_script(&RemoteJob::Install {
-            version: env!("CARGO_PKG_VERSION"),
-            port: REMOTE_PORT,
-        })?;
-        run_checked(
-            &batch(&["sh", "-s"]),
-            Some(&install),
-            false,
-            "the remote install (key login is required from here on)",
-        )?;
-        None
-    };
-    let bin = checked.as_ref().map(|c| c.bin.as_str());
-
-    let add = remote_script(&RemoteJob::DeviceAdd {
-        bin,
-        name: &p.name,
-        url: &url,
-    })?;
-    let added = run_checked(
-        &batch(&["sh", "-s"]),
-        Some(&add),
-        true,
-        "creating the device key",
-    )?;
-    let key = last_line(&added.stdout).to_string();
-    let regenerated = added.stderr.contains("ocu-device: regenerated");
-    if regenerated && p.use_installed {
-        eprintln!(
-            "WARNING: the remote already had a device named \"{}\"; it got a new key, so whatever used the old key stops working. Pick an unused --name to avoid that.",
-            p.name
-        );
-    }
-    let previous_tunnel = std::fs::read_to_string(tunnel_file(&p.name)).ok();
-
-    let finish = || -> Result<PathBuf> {
-        ensure!(is_key(&key), "the remote did not return a key");
-        install_tunnel(&target, &p.name, local, p.remote_port)?;
-        check_tunnel(local, &key)?;
-        super::save_host_entry(&skill::named_host_entry(&p.name, &url, &key))
-    };
-    let hosts = match finish() {
-        Ok(path) => path,
-        Err(e) => {
-            undo_tunnel(&p.name, previous_tunnel.as_deref());
-            if regenerated {
-                eprintln!(
-                    "The remote device \"{}\" got a new key, so the old one in the hosts file no longer works.",
-                    p.name
-                );
-            } else {
-                let rm = remote_script(&RemoteJob::DeviceRemove { bin, name: &p.name })?;
-                let undone = run_checked(
-                    &batch(&["sh", "-s"]),
-                    Some(&rm),
-                    true,
-                    "removing the new device",
-                );
-                if let Err(e) = undone {
-                    eprintln!(
-                        "Could not remove the new device \"{}\" on the remote: {e:#}",
-                        p.name
-                    );
-                }
-            }
-            return Err(e.context("setup did not finish"));
-        }
-    };
-
     println!(
-        "Done. {} is in {} at {url}, through a tunnel that stays up ({}).",
-        p.name,
-        hosts.display(),
+        "Done. {} is in {} at {}, through a tunnel that stays up ({}).",
+        done.name,
+        done.hosts.display(),
+        done.url,
         if cfg!(target_os = "macos") {
             "a LaunchAgent: it starts at login, not at boot"
         } else {
@@ -1115,8 +1157,170 @@ pub fn setup(args: &[String]) -> Result<()> {
         }
     );
     println!("After the remote reboots, calls fail with resets until its server is back up (a minute or so).");
-    println!("The tunnel logs in without prompts: use a key without a passphrase, or one loaded in the agent or keychain (-i KEYFILE).");
     Ok(())
+}
+
+/// Sets up `o`. With `interactive`, the first connection may ask on this
+/// terminal (a new host key, a passphrase); without, as from the app,
+/// nothing may ask. Steps and warnings go to `note` as they happen.
+pub fn connect(o: &Options, interactive: bool, note: &mut dyn FnMut(Note)) -> Result<Done> {
+    ensure!(
+        cfg!(unix),
+        "ssh-setup needs macOS or Linux on this computer"
+    );
+    let _lock = lock_setup()?;
+    let target = Target::new(&o.host, o.key.as_deref())?;
+
+    note(Note::Step(if interactive {
+        format!("Connecting to {} (answer any prompts here)", o.host)
+    } else {
+        format!("Connecting to {}", o.host)
+    }));
+    let first = if interactive {
+        Mode::Interactive
+    } else {
+        Mode::Batch
+    };
+    let (ok, probe) = run_ssh_status(
+        &ssh_args(&target, first, &["uname", "-sm"]),
+        None,
+        interactive,
+        false,
+    )?;
+    if !ok {
+        match login_hint(&o.host, &probe.stderr) {
+            Some(hint) => bail!("connecting failed{}\n{hint}", detail(&probe.stderr)),
+            None => bail!("connecting failed{}", detail(&probe.stderr)),
+        }
+    }
+    note(Note::Info(format!(
+        "Remote: {}.",
+        parse_probe(&probe.stdout, o.use_installed)?
+    )));
+
+    note(Note::Step(
+        "Checking that the tunnel can log in on its own".into(),
+    ));
+    check_unattended_login(&target)?;
+
+    let dir = unit_dir();
+    let existing = if cfg!(target_os = "macos") {
+        existing_tunnels(&dir, LABEL_PREFIX, ".plist")
+    } else {
+        existing_tunnels(&dir, UNIT_PREFIX, ".service")
+    };
+    let local = pick_port(&o.name, &existing, |port| {
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    })?;
+    let url = format!("http://127.0.0.1:{local}");
+
+    let batch = |remote: &[&str]| ssh_args(&target, Mode::Batch, remote);
+    let checked = if o.use_installed {
+        note(Note::Step(format!(
+            "Checking the opencomputeruse already on the remote (port {})",
+            o.remote_port
+        )));
+        let check = remote_script(&RemoteJob::Check {
+            port: o.remote_port,
+        })?;
+        let out = run_checked(
+            &batch(&["sh", "-s"]),
+            Some(&check),
+            interactive,
+            true,
+            "the remote check",
+        )?;
+        let c = parse_check(&out.stdout, &out.stderr, env!("CARGO_PKG_VERSION"))?;
+        for w in &c.warnings {
+            note(Note::Warning(w.clone()));
+        }
+        Some(c)
+    } else {
+        note(Note::Step(format!(
+            "Installing opencomputeruse {} on the remote",
+            env!("CARGO_PKG_VERSION")
+        )));
+        let install = remote_script(&RemoteJob::Install {
+            version: env!("CARGO_PKG_VERSION"),
+            port: REMOTE_PORT,
+        })?;
+        run_checked(
+            &batch(&["sh", "-s"]),
+            Some(&install),
+            interactive,
+            false,
+            "the remote install",
+        )?;
+        None
+    };
+    let bin = checked.as_ref().map(|c| c.bin.as_str());
+
+    note(Note::Step("Creating the device key".into()));
+    let add = remote_script(&RemoteJob::DeviceAdd {
+        bin,
+        name: &o.name,
+        url: &url,
+        replace: o.replace,
+    })?;
+    let (ok, added) = run_ssh_status(&batch(&["sh", "-s"]), Some(&add), interactive, true)?;
+    if !ok && added.stderr.contains("ocu-device: exists") {
+        return Err(NameTaken(o.name.clone()).into());
+    }
+    ensure!(
+        ok,
+        "creating the device key failed{}",
+        detail(&added.stderr)
+    );
+    let key = last_line(&added.stdout).to_string();
+    let regenerated = added.stderr.contains("ocu-device: regenerated");
+    if regenerated {
+        note(Note::Info(format!(
+            "The remote device \"{}\" has a new key; its old one no longer works.",
+            o.name
+        )));
+    }
+    let previous_tunnel = std::fs::read_to_string(tunnel_file(&o.name)).ok();
+
+    note(Note::Step("Starting the tunnel".into()));
+    let finish = || -> Result<PathBuf> {
+        ensure!(is_key(&key), "the remote did not return a key");
+        install_tunnel(&target, &o.name, local, o.remote_port)?;
+        check_tunnel(local, &key)?;
+        super::save_host_entry(&skill::named_host_entry(&o.name, &url, &key))
+    };
+    let hosts = match finish() {
+        Ok(path) => path,
+        Err(e) => {
+            undo_tunnel(&o.name, previous_tunnel.as_deref());
+            if regenerated {
+                note(Note::Warning(format!(
+                    "the remote device \"{}\" got a new key, so the old one in the hosts file no longer works",
+                    o.name
+                )));
+            } else {
+                let rm = remote_script(&RemoteJob::DeviceRemove { bin, name: &o.name })?;
+                let undone = run_checked(
+                    &batch(&["sh", "-s"]),
+                    Some(&rm),
+                    interactive,
+                    true,
+                    "removing the new device",
+                );
+                if let Err(e) = undone {
+                    note(Note::Warning(format!(
+                        "could not remove the new device \"{}\" on the remote: {e:#}",
+                        o.name
+                    )));
+                }
+            }
+            return Err(e.context("setup did not finish"));
+        }
+    };
+    Ok(Done {
+        name: o.name.clone(),
+        url,
+        hosts,
+    })
 }
 
 #[cfg(test)]
@@ -1287,11 +1491,13 @@ mod tests {
                 bin: None,
                 name: "box-1",
                 url: "http://127.0.0.1:18642",
+                replace: false,
             },
             RemoteJob::DeviceAdd {
                 bin: Some("/Users/me/My Apps/it's/opencomputeruse"),
                 name: "box-1",
                 url: "http://127.0.0.1:18642",
+                replace: false,
             },
             RemoteJob::DeviceRemove {
                 bin: Some("/opt/ocu"),
@@ -1310,25 +1516,29 @@ mod tests {
             bin: None,
             name: "n",
             url: "http://127.0.0.1:1",
+            replace: false,
         })
         .unwrap();
-        assert!(s.starts_with("OCU_NAME='n'\nOCU_URL='http://127.0.0.1:1'\n"));
+        assert!(s.starts_with("OCU_NAME='n'\nOCU_URL='http://127.0.0.1:1'\nOCU_REPLACE=''\n"));
         assert!(remote_script(&RemoteJob::DeviceAdd {
             bin: None,
             name: "n; id",
-            url: "http://127.0.0.1:1"
+            url: "http://127.0.0.1:1",
+            replace: false,
         })
         .is_err());
         assert!(remote_script(&RemoteJob::DeviceAdd {
             bin: None,
             name: "n",
-            url: "http://evil:1"
+            url: "http://evil:1",
+            replace: false,
         })
         .is_err());
         assert!(remote_script(&RemoteJob::DeviceAdd {
             bin: None,
             name: "n",
-            url: "http://127.0.0.1:1';id"
+            url: "http://127.0.0.1:1';id",
+            replace: false,
         })
         .is_err());
         assert!(remote_script(&RemoteJob::Install {
@@ -1442,6 +1652,12 @@ mod tests {
         );
         let p = parse_args(&s(&["oma", "--name", "box"])).unwrap();
         assert_eq!(p.host, "oma");
+        assert!(!p.replace);
+        assert!(
+            parse_args(&s(&["oma", "--name", "box", "--replace"]))
+                .unwrap()
+                .replace
+        );
         assert!(parse_args(&s(&["me@box"])).is_err());
         assert!(parse_args(&s(&["--name", "x"])).is_err());
         assert!(parse_args(&s(&["-oProxyCommand=x", "--name", "x"])).is_err());
@@ -1599,7 +1815,8 @@ mod tests {
                 remote_script(&RemoteJob::DeviceAdd {
                     bin: Some(bad),
                     name: "n",
-                    url: "http://127.0.0.1:1"
+                    url: "http://127.0.0.1:1",
+                    replace: false,
                 })
                 .is_err(),
                 "{bad:?}"
@@ -1657,12 +1874,12 @@ mod tests {
             self.bins.join(name)
         }
 
-        /// A fake opencomputeruse on PATH whose `device` prints `device_out`.
-        fn ocu(&self, device_out: &str) {
+        /// A fake opencomputeruse on PATH whose `device` runs `device`.
+        fn ocu(&self, device: &str) {
             self.exe(
                 &self.bin("opencomputeruse"),
                 &format!(
-                    "case \"$1\" in --version) echo 'opencomputeruse 9.9.9' ;; device) echo '{device_out}' >&2; exit 1 ;; esac"
+                    "case \"$1\" in --version) echo 'opencomputeruse 9.9.9' ;; device) {device} ;; esac"
                 ),
             );
         }
@@ -1731,10 +1948,12 @@ mod tests {
         }
     }
 
+    /// What `device list` does in a release without the device commands,
+    /// and in one with them.
     #[cfg(unix)]
-    const OLD: &str = "error: unknown command device";
+    const OLD: &str = "echo 'opencomputeruse: unknown command \"device\"' >&2; exit 1";
     #[cfg(unix)]
-    const NEW: &str = "usage: opencomputeruse device add --name N --url U | device remove NAME";
+    const NEW: &str = "[ \"$2\" = list ]";
 
     #[test]
     #[cfg(unix)]
@@ -1748,9 +1967,9 @@ mod tests {
                     "case \"$1\" in -s) echo Linux ;; -m) echo aarch64 ;; esac",
                 );
                 let effects = f.dir.join("effects");
-                let binary = |version: &str, device_usage: &str| {
+                let binary = |version: &str, device: &str| {
                     format!(
-                        "case \"$1\" in --version) echo 'opencomputeruse {version}' ;; device) echo '{device_usage}' >&2; exit 1 ;; serve) echo serve >> '{}' ;; esac",
+                        "case \"$1\" in --version) echo 'opencomputeruse {version}' ;; device) {device} ;; serve) echo serve >> '{}' ;; esac",
                         effects.display()
                     )
                 };
@@ -1844,7 +2063,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn check_fails_on_a_binary_without_device_add() {
+    fn check_fails_on_a_binary_without_the_device_commands() {
         let f = Fake::new("old");
         f.ocu(OLD);
         f.linux(&["127.0.0.1:8642"]);
@@ -1940,6 +2159,7 @@ mod tests {
             bin: Some(&bin),
             name: "box",
             url: "http://127.0.0.1:18642",
+            replace: false,
         });
         assert_eq!(
             add,
@@ -1966,8 +2186,30 @@ mod tests {
             bin: None,
             name: "box",
             url: "http://127.0.0.1:18642",
+            replace: false,
         });
         assert_eq!(add.1, "installed device\n");
+
+        let add = f.run(&RemoteJob::DeviceAdd {
+            bin: Some(&bin),
+            name: "box",
+            url: "http://127.0.0.1:18642",
+            replace: true,
+        });
+        assert_eq!(
+            add.1,
+            "device add --name box --url http://127.0.0.1:18642 --replace\n"
+        );
+    }
+
+    #[test]
+    fn the_app_gets_a_hint_for_logins_it_cannot_make() {
+        let unknown = "No ED25519 host key is known for box and you have requested strict checking.\r\nHost key verification failed.";
+        assert!(login_hint("box", unknown).unwrap().contains("`ssh box`"));
+        assert!(login_hint("box", "me@box: Permission denied (publickey).")
+            .unwrap()
+            .contains("without a prompt"));
+        assert_eq!(login_hint("box", "Connection refused"), None);
     }
 
     #[test]

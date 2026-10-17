@@ -555,7 +555,10 @@ only, creates a device key and keeps an SSH tunnel up from this computer,
 writing the tunnel's `http://127.0.0.1:PORT` URL to the hosts file. With
 `--use-installed [--remote-port P]` it connects to an opencomputeruse already
 running on the host (Linux or macOS, HTTP server on) instead, changing
-nothing there but the new device.
+nothing there but the new device. A name the host already has a device for
+is refused; `--replace` gives that device a new key. The app does the same
+from Other devices → Set Up Over SSH, once the host's key is known (connect
+with `ssh` once) and a key logs in without a prompt.
 
 ## Settings
 

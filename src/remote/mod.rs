@@ -167,6 +167,18 @@ pub fn update_server_config(
     listen_on: Option<&[String]>,
 ) -> Result<Config> {
     let mut config = Config::load();
+    apply_server_settings(&mut config, enabled, port, listen_on)?;
+    config.save()?;
+    Ok(config)
+}
+
+/// Checks the server settings given and puts them in `config`.
+fn apply_server_settings(
+    config: &mut Config,
+    enabled: Option<bool>,
+    port: Option<u16>,
+    listen_on: Option<&[String]>,
+) -> Result<()> {
     if let Some(on) = enabled {
         config.http.enabled = on;
     }
@@ -177,8 +189,7 @@ pub fn update_server_config(
     if let Some(listen_on) = listen_on {
         config.http.listen_on = interfaces::clean(listen_on)?;
     }
-    config.save()?;
-    Ok(config)
+    Ok(())
 }
 
 // ------------------------------------------------------------- MCP tools
@@ -504,8 +515,8 @@ pub mod autostart {
         systemctl(&["daemon-reload"])?;
         let status = systemctl(&["enable", "--now", "opencomputeruse.service"])?;
         anyhow::ensure!(status.success(), "systemctl --user enable failed");
-        // `enable --now` leaves a running service alone, and it may have
-        // started before the settings it reads were saved.
+        // `enable --now` leaves a running service alone, and that one may
+        // run a binary that has since been replaced.
         let status = systemctl(&["restart", "opencomputeruse.service"])?;
         anyhow::ensure!(status.success(), "systemctl --user restart failed");
         Ok(())
@@ -559,19 +570,13 @@ mod tests {
     }
 
     #[test]
-    fn server_settings_persist() {
-        let dir = std::env::temp_dir().join(format!("ocu-set-server-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("config.json");
-        std::env::set_var("OCU_CONFIG", &file);
+    fn server_settings_are_checked_and_applied() {
+        let mut config = Config::default();
         let listen = vec!["127.0.0.1".to_string()];
-        let saved = update_server_config(None, Some(8700), Some(&listen)).unwrap();
-        assert_eq!(saved.http.port, 8700);
-        let loaded = Config::load();
-        assert_eq!(loaded.http.port, 8700);
-        assert_eq!(loaded.http.listen_on, ["127.0.0.1"]);
-        assert!(update_server_config(None, Some(80), None).is_err());
-        std::env::remove_var("OCU_CONFIG");
-        let _ = std::fs::remove_dir_all(&dir);
+        apply_server_settings(&mut config, None, Some(8700), Some(&listen)).unwrap();
+        assert_eq!(config.http.port, 8700);
+        assert_eq!(config.http.listen_on, ["127.0.0.1"]);
+        assert!(apply_server_settings(&mut config, None, Some(80), None).is_err());
+        assert_eq!(config.http.port, 8700);
     }
 }

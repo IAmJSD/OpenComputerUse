@@ -16,13 +16,13 @@ use ocu_core::{Permission, Service, SessionInfo};
 
 use super::ui::{
     icon, palette, Badge, Button, Checkbox, Chip, Divider, Heading, LineEdit, LineEditKey, Modal,
-    TextInput, TextInputColors, TextPress,
+    Spinner, TextInput, TextInputColors, TextPress,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clients::{self, Client};
 use crate::config::{Config, Provider};
-use crate::remote::{self, devices::Device, devices::Devices, skill};
+use crate::remote::{self, devices::Device, devices::Devices, skill, ssh};
 use crate::update::{self, Installer, Progress, UpdateStatus};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -37,11 +37,15 @@ enum Field {
     ListenOn,
     DeviceName,
     DeviceUrl,
+    SshHost,
+    SshName,
+    SshKey,
+    SshPort,
 }
 
 impl Field {
     /// Every field, in tab order.
-    const ALL: [Field; 10] = [
+    const ALL: [Field; 14] = [
         Field::TypesafeKey,
         Field::TypesafeModel,
         Field::CloudflareAccount,
@@ -52,6 +56,10 @@ impl Field {
         Field::ListenOn,
         Field::DeviceName,
         Field::DeviceUrl,
+        Field::SshHost,
+        Field::SshName,
+        Field::SshKey,
+        Field::SshPort,
     ];
 
     /// The fields Save writes to the recipe settings.
@@ -80,6 +88,10 @@ impl Field {
             Field::ListenOn => "listen-on",
             Field::DeviceName => "device-name",
             Field::DeviceUrl => "device-url",
+            Field::SshHost => "ssh-host",
+            Field::SshName => "ssh-name",
+            Field::SshKey => "ssh-key",
+            Field::SshPort => "ssh-port",
         }
     }
 }
@@ -127,6 +139,24 @@ struct Remote {
     limiting: bool,
     /// The server's state as last drawn, to redraw when it changes.
     server_seen: (Option<String>, Option<String>),
+    ssh: SshForm,
+}
+
+/// The Set Up Over SSH form, and the setup it runs.
+#[derive(Default)]
+struct SshForm {
+    open: bool,
+    use_installed: bool,
+    /// The step the running setup is on; `None` while none runs.
+    step: Option<String>,
+    /// What the setup found out and warned about as it went.
+    notes: Vec<String>,
+    error: Option<String>,
+    /// The last setup stopped at a name the remote already has, so
+    /// replacing that device is offered.
+    name_taken: bool,
+    /// What the last setup to finish set up.
+    done: Option<String>,
 }
 
 enum Panel {
@@ -388,7 +418,13 @@ impl Status {
                     Field::CloudflareModel => r.cloudflare_model.clone(),
                     Field::MinConfidence => format!("{}", r.min_confidence),
                     Field::HttpPort => config.http.port.to_string(),
-                    Field::ListenOn | Field::DeviceName | Field::DeviceUrl => String::new(),
+                    Field::ListenOn
+                    | Field::DeviceName
+                    | Field::DeviceUrl
+                    | Field::SshHost
+                    | Field::SshName
+                    | Field::SshKey
+                    | Field::SshPort => String::new(),
                 };
                 let mut edit = LineEdit::default();
                 edit.set_text(text);
@@ -648,6 +684,107 @@ impl Status {
             Ok(issued) => self.show_issued(issued),
             Err(e) => self.remote.skill_error = Some(format!("{e:#}")),
         }
+    }
+
+    fn open_ssh_form(&mut self) {
+        self.remote.ssh = SshForm {
+            open: true,
+            ..Default::default()
+        };
+        self.activate(Field::SshHost);
+        self.field(Field::SshHost).focus();
+    }
+
+    /// Sets up the form's host over SSH, off the main thread: installing
+    /// and the tunnel take a while. `replace` gives a remote device of the
+    /// same name a new key.
+    fn start_ssh_setup(&mut self, replace: bool, cx: &mut Context<Self>) {
+        if self.remote.ssh.step.is_some() {
+            return;
+        }
+        let use_installed = self.remote.ssh.use_installed;
+        let port = Some(self.text(Field::SshPort)).filter(|p| use_installed && !p.is_empty());
+        let port = match port.map(|p| p.parse::<u16>()) {
+            None => None,
+            Some(Ok(p)) if p != 0 => Some(p),
+            Some(_) => {
+                self.remote.ssh.error = Some("The remote port is a number from 1 to 65535.".into());
+                return;
+            }
+        };
+        let key = Some(self.text(Field::SshKey)).filter(|k| !k.is_empty());
+        let options = match ssh::Options::new(
+            &self.text(Field::SshHost),
+            &self.text(Field::SshName),
+            key.as_deref(),
+            use_installed,
+            port,
+            replace,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                self.remote.ssh.error = Some(format!("{e:#}"));
+                return;
+            }
+        };
+        let form = &mut self.remote.ssh;
+        form.step = Some("Starting".into());
+        form.notes.clear();
+        form.error = None;
+        form.name_taken = false;
+        form.done = None;
+        for (_, e) in &mut self.fields {
+            e.active = false;
+        }
+        cx.notify();
+        let (tx, rx) = async_channel::unbounded();
+        let task = cx.background_executor().spawn(async move {
+            ssh::connect(&options, false, &mut |note| {
+                let _ = tx.send_blocking(note);
+            })
+        });
+        // Its steps, as it goes.
+        cx.spawn(async move |this, cx| {
+            while let Ok(note) = rx.recv().await {
+                let shown = this.update(cx, |s, cx| {
+                    let form = &mut s.remote.ssh;
+                    match note {
+                        ssh::Note::Step(step) => form.step = Some(step),
+                        ssh::Note::Info(info) => form.notes.push(info),
+                        ssh::Note::Warning(w) => form.notes.push(format!("Warning: {w}")),
+                    }
+                    cx.notify();
+                });
+                if shown.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |s, cx| {
+                let form = &mut s.remote.ssh;
+                form.step = None;
+                match result {
+                    Ok(done) => {
+                        form.open = false;
+                        form.done = Some(format!(
+                            "Set up. Agents here reach {} at {} through a tunnel that stays up; the entry is in {}.",
+                            done.name,
+                            done.url,
+                            done.hosts.display()
+                        ));
+                    }
+                    Err(e) => {
+                        form.name_taken = e.downcast_ref::<ssh::NameTaken>().is_some();
+                        form.error = Some(format!("{e:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Installs the generic skill (it holds no key) for one agent harness.
@@ -1001,6 +1138,105 @@ impl Status {
         })
     }
 
+    /// Driving another computer from this one, through an SSH tunnel.
+    fn ssh_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette();
+        let dim = |t: String| {
+            div()
+                .text_color(rgb(p.text_dim))
+                .text_size(px(11.5))
+                .child(t)
+        };
+        let form = &self.remote.ssh;
+        let section = div().flex().flex_col().gap_2().pt_2();
+        if !form.open {
+            return section
+                .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Drive another computer"))
+                .child(dim(
+                    "Set up a computer you reach over SSH, and agents here drive it through a tunnel, with nothing opened on its network.".into(),
+                ))
+                .child(
+                    div().flex().child(
+                        Button::new("ssh-open", "Set Up Over SSH…").on_click(cx.listener(
+                            |s, _, _, cx| {
+                                s.open_ssh_form();
+                                cx.notify();
+                            },
+                        )),
+                    ),
+                )
+                .when_some(form.done.clone(), |d, m| d.child(dim(m)));
+        }
+        let running = form.step.is_some();
+        let help = if form.use_installed {
+            "Connects to the opencomputeruse running there (Linux or macOS, its HTTP server on) and changes nothing there but adding this computer as a device."
+        } else {
+            "Installs this version on a Linux host, serving on that host's loopback only."
+        };
+        section.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(rgb(p.edge))
+                .child(div().font_weight(gpui::FontWeight::MEDIUM).child("Computer over SSH"))
+                .child(Self::row("Host", self.input(Field::SshHost, "user@host, or an alias from ~/.ssh/config", cx)))
+                .child(Self::row("Name", self.input(Field::SshName, "What agents here call it, like build-box", cx)))
+                .child(Self::row("Key file", self.input(Field::SshKey, "Optional, like ~/.ssh/id_ed25519", cx)))
+                .child(Self::row(
+                    "",
+                    Checkbox::new("ssh-use-installed", "Use the opencomputeruse already running there", form.use_installed)
+                        .on_change(cx.listener(|s, on: &bool, _, cx| {
+                            s.remote.ssh.use_installed = *on;
+                            cx.notify();
+                        })),
+                ))
+                .when(form.use_installed, |d| {
+                    d.child(Self::row("Remote port", self.input(Field::SshPort, "8642", cx)))
+                })
+                .child(dim(format!(
+                    "{help} This computer must already know the host's key (connect once with ssh in a terminal), and the key must log in without a prompt."
+                )))
+                .when_some(form.step.clone(), |d, step| {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(Spinner::new("ssh-spinner"))
+                            .child(format!("{step}…")),
+                    )
+                })
+                .children(form.notes.iter().map(|n| dim(n.clone())))
+                .when_some(form.error.clone(), |d, e| {
+                    d.child(div().text_color(rgb(p.warning)).child(e))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(if form.name_taken && !running {
+                            Button::new("ssh-replace", "Replace It").primary().on_click(cx.listener(|s, _, _, cx| {
+                                s.start_ssh_setup(true, cx);
+                                cx.notify();
+                            }))
+                        } else {
+                            Button::new("ssh-connect", "Set Up").primary().disabled(running).on_click(cx.listener(|s, _, _, cx| {
+                                s.start_ssh_setup(false, cx);
+                                cx.notify();
+                            }))
+                        })
+                        .child(Button::new("ssh-cancel", "Cancel").ghost().disabled(running).on_click(cx.listener(|s, _, _, cx| {
+                            s.remote.ssh.open = false;
+                            cx.notify();
+                        }))),
+                ),
+        )
+    }
+
     fn remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Only the Mac app stays running with its window closed.
         #[cfg(target_os = "macos")]
@@ -1121,6 +1357,8 @@ impl Status {
                 d.child(div().text_color(rgb(p.warning)).child(e))
             })
             .child(self.skill_section(cx))
+            // The tunnel is ssh run by launchd or systemd.
+            .when(cfg!(unix), |d| d.child(self.ssh_section(cx)))
     }
 
     /// Asks GitHub for the latest release, off the main thread. `announce`,
@@ -1532,6 +1770,9 @@ impl Status {
                     Field::HttpPort => self.apply_port(),
                     Field::ListenOn => self.add_listen_entry(),
                     Field::DeviceName | Field::DeviceUrl => self.generate_skill(),
+                    Field::SshHost | Field::SshName | Field::SshKey | Field::SshPort => {
+                        self.start_ssh_setup(false, cx)
+                    }
                     _ => self.save(),
                 }
                 cx.notify();
