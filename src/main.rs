@@ -36,6 +36,23 @@ USAGE:
                                           like en0,tailscale,192.168.1.0/24. TOKEN (or OCU_SERVE_TOKEN) is
                                           a key accepted beside the devices', for setting up without the app
     opencomputeruse serve --install       Run it at login from now on (--uninstall stops that; Linux, Windows)
+    opencomputeruse serve --install [--port N] [--listen-on LIST]
+                                          Same, saving those settings first (Linux, Windows)
+    opencomputeruse device add --name N --url U [--replace]
+                                          Allow a device to drive this computer: prints its new key.
+                                          A taken name is refused; --replace gives that device a new key
+    opencomputeruse device list           The devices allowed to drive this computer
+    opencomputeruse device remove NAME    Remove a device by ID or name and its key
+    opencomputeruse device remove --name N
+                                          Remove only the device named N
+    opencomputeruse ssh-setup HOST --name NAME [-i KEYFILE] [--replace]
+                                          HOST is an SSH alias or user@host
+                                          Install this version on a Linux host over SSH, serve it there
+                                          on loopback only, and keep an SSH tunnel to it up from here.
+                                          --replace gives a remote device of that name a new key
+    opencomputeruse ssh-setup HOST --name NAME --use-installed [--remote-port P]
+                                          Instead connect to an opencomputeruse already running there
+                                          (Linux or macOS; its HTTP server on port P, default 8642)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse skill                 Print the skill other devices use to drive a host
     opencomputeruse [agent]               Open the app's window (on macOS, --background starts it hidden)
@@ -80,6 +97,8 @@ fn run() -> Result<()> {
             Ok(())
         }
         Some("serve") => run_serve(&args[1..]),
+        Some("device") => run_device(&args[1..]),
+        Some("ssh-setup") => remote::ssh::setup(&args[1..]),
         #[cfg(target_os = "macos")]
         Some("install-lock") => run_install_lock(&args[1..]),
         #[cfg(target_os = "macos")]
@@ -188,6 +207,10 @@ fn run_serve(args: &[String]) -> Result<()> {
         #[cfg(not(target_os = "macos"))]
         {
             let on = args.iter().any(|a| a == "--install");
+            if on {
+                let flags = ServeFlags::parse(args)?;
+                remote::update_server_config(None, flags.port, flags.listen_on.as_deref())?;
+            }
             remote::autostart::set(on)?;
             println!(
                 "{}",
@@ -247,6 +270,67 @@ fn run_serve(args: &[String]) -> Result<()> {
             shown = Some((listening, errors));
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// `device add --name N --url U` prints only the new key on stdout, so a
+/// caller can capture it; what happened goes to stderr, as an `ocu-device:`
+/// line `ssh-setup` reads.
+fn run_device(args: &[String]) -> Result<()> {
+    use remote::devices::Devices;
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .filter(|v| !v.starts_with("--"))
+    };
+    match args.first().map(String::as_str) {
+        Some("add") => {
+            let name = value("--name").ok_or_else(|| anyhow::anyhow!("--name takes a name"))?;
+            let url = value("--url").ok_or_else(|| anyhow::anyhow!("--url takes a URL"))?;
+            let mut devices = Devices::load();
+            let existing = devices
+                .devices
+                .iter()
+                .find(|d| d.name.eq_ignore_ascii_case(name.trim()))
+                .map(|d| d.id.clone());
+            let replace = args.iter().any(|a| a == "--replace");
+            let (key, what) = match existing {
+                Some(id) if replace => (devices.regenerate(&id, Some(url))?.1, "regenerated"),
+                Some(_) => {
+                    eprintln!("ocu-device: exists");
+                    bail!("a device named \"{name}\" already exists; --replace gives it a new key, and its current key stops working")
+                }
+                None => (devices.add(name, url)?.1, "added"),
+            };
+            eprintln!("ocu-device: {what}");
+            println!("{key}");
+            Ok(())
+        }
+        // Also what `ssh-setup` runs to tell a release with this command
+        // from an older one.
+        Some("list") => {
+            for d in Devices::load().devices {
+                println!("{}\t{}\t{}", d.name, d.url, d.id);
+            }
+            Ok(())
+        }
+        Some("remove") => {
+            let Some(name) = args.get(1) else {
+                bail!("name the device to remove")
+            };
+            let d = if name == "--name" {
+                let name = value("--name").ok_or_else(|| anyhow::anyhow!("--name takes a name"))?;
+                Devices::load().remove_named(name)?
+            } else {
+                Devices::load().remove(name)?
+            };
+            println!("Removed {} ({}); its key no longer works.", d.name, d.id);
+            Ok(())
+        }
+        _ => bail!(
+            "usage: opencomputeruse device add --name N --url U [--replace] | device list | device remove NAME"
+        ),
     }
 }
 

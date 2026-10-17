@@ -130,6 +130,17 @@ impl Devices {
         self.save()?;
         Ok(device)
     }
+
+    pub fn remove_named(&mut self, name: &str) -> Result<Device> {
+        let index = self
+            .devices
+            .iter()
+            .position(|d| d.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| anyhow!("no device named \"{name}\" (list_devices shows them)"))?;
+        let device = self.devices.remove(index);
+        self.save()?;
+        Ok(device)
+    }
 }
 
 /// "my-mac.ts.net:8642" → "http://my-mac.ts.net:8642", without a trailing slash.

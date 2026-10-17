@@ -7,6 +7,7 @@ pub mod devices;
 pub mod interfaces;
 pub mod server;
 pub mod skill;
+pub mod ssh;
 
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
@@ -150,7 +151,34 @@ pub fn set_server(
     port: Option<u16>,
     listen_on: Option<&[String]>,
 ) -> Result<Config> {
+    let config = update_server_config(enabled, port, listen_on)?;
+    if cfg!(target_os = "macos") {
+        if let Err(e) = autostart::set(config.http.enabled) {
+            log::warn!("start at login: {e:#}");
+        }
+    }
+    Ok(config)
+}
+
+/// The settings half of `set_server`: saved, with no login item touched.
+pub fn update_server_config(
+    enabled: Option<bool>,
+    port: Option<u16>,
+    listen_on: Option<&[String]>,
+) -> Result<Config> {
     let mut config = Config::load();
+    apply_server_settings(&mut config, enabled, port, listen_on)?;
+    config.save()?;
+    Ok(config)
+}
+
+/// Checks the server settings given and puts them in `config`.
+fn apply_server_settings(
+    config: &mut Config,
+    enabled: Option<bool>,
+    port: Option<u16>,
+    listen_on: Option<&[String]>,
+) -> Result<()> {
     if let Some(on) = enabled {
         config.http.enabled = on;
     }
@@ -161,13 +189,7 @@ pub fn set_server(
     if let Some(listen_on) = listen_on {
         config.http.listen_on = interfaces::clean(listen_on)?;
     }
-    config.save()?;
-    if cfg!(target_os = "macos") {
-        if let Err(e) = autostart::set(config.http.enabled) {
-            log::warn!("start at login: {e:#}");
-        }
-    }
-    Ok(config)
+    Ok(())
 }
 
 // ------------------------------------------------------------- MCP tools
@@ -488,16 +510,25 @@ pub mod autostart {
             return Ok(());
         }
         let exe = std::env::current_exe()?;
-        let unit = format!(
-            "[Unit]\nDescription=OpenComputerUse HTTP server\n\n[Service]\nExecStart={} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
-            exe.display()
-        );
         std::fs::create_dir_all(path.parent().unwrap())?;
-        std::fs::write(&path, unit)?;
+        std::fs::write(&path, service_unit(&exe))?;
         systemctl(&["daemon-reload"])?;
         let status = systemctl(&["enable", "--now", "opencomputeruse.service"])?;
         anyhow::ensure!(status.success(), "systemctl --user enable failed");
+        // `enable --now` leaves a running service alone, and that one may
+        // run a binary that has since been replaced.
+        let status = systemctl(&["restart", "opencomputeruse.service"])?;
+        anyhow::ensure!(status.success(), "systemctl --user restart failed");
         Ok(())
+    }
+
+    /// The systemd unit that runs `exe serve`, the path quoted for systemd.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) fn service_unit(exe: &std::path::Path) -> String {
+        format!(
+            "[Unit]\nDescription=OpenComputerUse HTTP server\n\n[Service]\nExecStart={} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+            super::ssh::systemd_quote(&exe.to_string_lossy())
+        )
     }
 
     #[cfg(windows)]
@@ -525,5 +556,27 @@ pub mod autostart {
         };
         anyhow::ensure!(status.success() || !on, "reg failed");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_unit_quotes_the_path() {
+        let unit = autostart::service_unit(std::path::Path::new("/home/a b/.local/bin/ocu"));
+        assert!(unit.contains("ExecStart=\"/home/a b/.local/bin/ocu\" serve\n"));
+    }
+
+    #[test]
+    fn server_settings_are_checked_and_applied() {
+        let mut config = Config::default();
+        let listen = vec!["127.0.0.1".to_string()];
+        apply_server_settings(&mut config, None, Some(8700), Some(&listen)).unwrap();
+        assert_eq!(config.http.port, 8700);
+        assert_eq!(config.http.listen_on, ["127.0.0.1"]);
+        assert!(apply_server_settings(&mut config, None, Some(80), None).is_err());
+        assert_eq!(config.http.port, 8700);
     }
 }

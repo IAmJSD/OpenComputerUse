@@ -208,11 +208,12 @@ Not every host offers every tool. A computer offers what its system has: `unlock
 /// What to add under `hosts:` in the hosts file of the device that will
 /// drive this computer: the computer's name, where to reach it, and the key.
 pub fn host_entry(device: &Device, key: &str) -> String {
-    format!(
-        "  {}:\n    url: \"{}\"\n    key: \"{key}\"\n",
-        host_slug(),
-        device.url
-    )
+    named_host_entry(&host_slug(), &device.url, key)
+}
+
+/// `host_entry` under a name of the caller's choosing.
+pub fn named_host_entry(name: &str, url: &str, key: &str) -> String {
+    format!("  {name}:\n    url: \"{url}\"\n    key: \"{key}\"\n")
 }
 
 /// The hosts file on this computer, from `HOSTS_FILE`.
