@@ -4266,7 +4266,7 @@ dependencies = [
 
 [[package]]
 name = "ocu-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4282,7 +4282,7 @@ dependencies = [
 
 [[package]]
 name = "ocu-linux"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -4298,7 +4298,7 @@ dependencies = [
 
 [[package]]
 name = "ocu-macos"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "block2",
@@ -4320,7 +4320,7 @@ dependencies = [
 
 [[package]]
 name = "ocu-mobile"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4336,7 +4336,7 @@ dependencies = [
 
 [[package]]
 name = "ocu-windows"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "log",
@@ -4404,7 +4404,7 @@ dependencies = [
 
 [[package]]
 name = "opencomputeruse"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
