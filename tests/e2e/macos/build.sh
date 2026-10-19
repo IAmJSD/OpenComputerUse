@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds a macOS test app as an ad hoc signed bundle (no hardened runtime,
-# so the panel hook may load into it): Dialog (the default) or Invoice.
+# so the panel hook may load into it): Dialog (the default), Invoice or Swatch.
 # Usage: build.sh <out dir> [name]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)

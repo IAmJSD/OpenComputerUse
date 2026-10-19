@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -19,8 +19,8 @@ use objc2_foundation::{NSArray, NSDictionary, NSError, NSString, NSURL};
 
 use ocu_core::keys::{parse_chord, parse_chords};
 use ocu_core::{
-    pick_window, Action, Description, LaunchSpec, MouseButton, Screenshot, Session, TreeOptions,
-    UiNode, WindowInfo,
+    pick_window, Action, Capturer, Description, LaunchSpec, MouseButton, Screenshot, Session,
+    TreeOptions, UiNode, WindowInfo,
 };
 
 use crate::ax::{self, Element, ElementTable};
@@ -1082,6 +1082,10 @@ impl Session for MacSession {
             panel::Kind::Open => format!("An open panel is showing (window {}): answer it with choose_file, giving the paths to pick, or no paths to cancel.", w.id),
             panel::Kind::Save => format!("A save panel is showing (window {}): answer it with choose_file, giving the path to save to, or no paths to cancel.", w.id),
         })
+    }
+
+    fn capturer(&mut self) -> Option<Arc<dyn Capturer>> {
+        Some(Arc::new(crate::stream::Streamer { pid: self.pid }))
     }
 
     fn is_alive(&mut self) -> bool {

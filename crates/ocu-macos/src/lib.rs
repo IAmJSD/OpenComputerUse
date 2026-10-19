@@ -16,6 +16,7 @@ pub mod lock;
 mod panel;
 mod session;
 mod sky;
+mod stream;
 
 use anyhow::Result;
 use objc2_application_services::AXIsProcessTrustedWithOptions;

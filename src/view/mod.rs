@@ -30,8 +30,8 @@ use protocol::{changed, encode, ClientMessage, Format, Keys};
 static RUNNING: OnceLock<()> = OnceLock::new();
 
 /// Where a session's live view is, when the view server runs and the
-/// session is on a desktop: its own display on Linux, its screenshots and
-/// actions on Windows and macOS. A phone's or emulator's has none.
+/// session is on a desktop: its own display on Linux, its window capture
+/// and actions on Windows and macOS. A phone's or emulator's has none.
 pub fn path_for(info: &SessionInfo) -> Option<String> {
     let desktop =
         info.backend.starts_with("linux") || matches!(info.backend.as_str(), "windows" | "macos");
@@ -504,8 +504,8 @@ fn watch(
     let mut shown = windows;
     let mut checked = Instant::now();
     let mut sent = Instant::now() - Duration::from_secs(1);
-    // Wayland says when the picture changed; X is looked at ten times a
-    // second.
+    // Wayland and the Windows and macOS capture streams say when the picture
+    // changed; X is looked at ten times a second.
     let interval = if viewer.generation().is_some() {
         Duration::from_millis(33)
     } else {

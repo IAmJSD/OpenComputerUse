@@ -40,6 +40,11 @@ path = "src/main.rs"
 name = "file_dialogs"
 harness = false
 
+# Watching a session live; skips itself unless OCU_E2E_SWATCH_APP is set.
+[[test]]
+name = "live_view"
+harness = false
+
 [dependencies]
 ocu-core.workspace = true
 # Phones, tablets, iOS simulators and Android emulators.

@@ -306,11 +306,12 @@ impl Service {
                 }
                 let windows = session.windows().unwrap_or_default();
                 let viewer = session.viewer();
+                let capturer = session.capturer();
                 let session = Arc::new(Mutex::new(session));
                 // A backend with no display to watch is watched through its
-                // own screenshots and actions (Windows, macOS).
-                let viewer =
-                    viewer.or_else(|| desktop.then(|| ScreenshotViewer::watching(&session)));
+                // own capture and actions (Windows, macOS).
+                let viewer = viewer
+                    .or_else(|| desktop.then(|| ScreenshotViewer::watching(&session, capturer)));
                 let info = SessionInfo {
                     id: self.new_id(),
                     app: d.app,

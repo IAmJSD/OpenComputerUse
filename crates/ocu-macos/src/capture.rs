@@ -207,7 +207,7 @@ pub fn capture_composed(window: &WindowInfo, with: &[u64]) -> Result<Screenshot>
     shoot(window, &filter, &config)
 }
 
-fn find_window(content: &SCShareableContent, id: u64) -> Result<Retained<SCWindow>> {
+pub(crate) fn find_window(content: &SCShareableContent, id: u64) -> Result<Retained<SCWindow>> {
     let windows = unsafe { content.windows() };
     windows
         .iter()
