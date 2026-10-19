@@ -24,6 +24,8 @@ screenshot and get_ui_tree to look; click, type_text, press_key, scroll, drag, s
 Actions return a fresh screenshot by default (screenshot: false skips it; ui_tree: true adds the accessibility tree). \
 Prefer element ids from the tree (click with element: \"e12\") over coordinates: they work reliably on background windows. \
 When run_recipe is listed, it performs a fixed list of steps itself using a fast decision model. \
+When extract is listed, it reads typed values (text, numbers, dates, lists) or the element id of a described control \
+from a window's tree and screenshot in one call, cheaper than reading a large tree yourself. \
 End sessions with end_session when done; they also end when this server exits.";
 
 /// Said when phones, simulators and emulators are turned on.
@@ -90,13 +92,14 @@ fn write(out: &mut std::io::Stdout, v: &Value) -> Result<()> {
     Ok(())
 }
 
-/// `run_recipe` is listed only once recipes are set up, and the device
-/// tools only while they are turned on; tell the client when either
-/// changes (the settings live in the app, which saves the file).
+/// `run_recipe` and `extract` are listed only once they are set up, and
+/// the device tools only while they are turned on; tell the client when
+/// any changes (the settings live in the app, which saves the file).
 fn watch_tool_changes() {
-    fn offered() -> (bool, bool) {
+    fn offered() -> (bool, bool, bool) {
         (
             crate::recipe::available(),
+            crate::extract::available(),
             crate::config::Config::mobile_enabled(),
         )
     }

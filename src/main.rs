@@ -8,6 +8,7 @@
 
 mod clients;
 mod config;
+mod extract;
 mod mcp;
 mod recipe;
 mod remote;
@@ -53,6 +54,14 @@ USAGE:
     opencomputeruse ssh-setup HOST --name NAME --use-installed [--remote-port P]
                                           Instead connect to an opencomputeruse already running there
                                           (Linux or macOS; its HTTP server on port P, default 8642)
+    opencomputeruse extract FIELDS (--app APP [--wait MS] | --active-window | --state TEXT | --state-file F)
+                            [--image PNG]... [--context TEXT] [--reference-date DATE] [--no-screenshot]
+                                          Read typed values with Cloudflare's Clairic extraction model.
+                                          FIELDS is --fields JSON (or @file) and/or --field NAME=TYPE[:INSTRUCTIONS],
+                                          repeated; TYPE is text, number, date, time, datetime, duration or
+                                          list (of text). --app starts the app, waits MS (default 3000), and reads
+                                          its window's accessibility tree with a screenshot, naming the element
+                                          of each text answer; --state reads text instead (--state-file - for stdin)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse skill                 Print the skill other devices use to drive a host
     opencomputeruse [agent]               Open the app's window (on macOS, --background starts it hidden)
@@ -99,6 +108,7 @@ fn run() -> Result<()> {
         Some("serve") => run_serve(&args[1..]),
         Some("device") => run_device(&args[1..]),
         Some("ssh-setup") => remote::ssh::setup(&args[1..]),
+        Some("extract") => run_extract(&args[1..]),
         #[cfg(target_os = "macos")]
         Some("install-lock") => run_install_lock(&args[1..]),
         #[cfg(target_os = "macos")]
@@ -399,6 +409,187 @@ impl ServeFlags {
     }
 }
 
+/// `extract`'s arguments: the fields, and what to read them from.
+#[derive(Debug, Default)]
+struct ExtractFlags {
+    fields: serde_json::Map<String, serde_json::Value>,
+    app: Option<String>,
+    active_window: bool,
+    wait_ms: u64,
+    state: Option<String>,
+    images: Vec<std::path::PathBuf>,
+    context: Option<String>,
+    reference_date: Option<String>,
+    screenshot: bool,
+}
+
+impl ExtractFlags {
+    fn parse(args: &[String]) -> Result<Self> {
+        use serde_json::{json, Value};
+        let mut flags = Self {
+            wait_ms: 3000,
+            screenshot: true,
+            ..Default::default()
+        };
+        let mut it = args.iter();
+        let value = |it: &mut std::slice::Iter<String>, flag: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("{flag} takes a value"))
+        };
+        let read = |path: &str| -> Result<String> {
+            use std::io::Read as _;
+            let mut s = String::new();
+            if path == "-" {
+                std::io::stdin().read_to_string(&mut s)?;
+            } else {
+                s = std::fs::read_to_string(path)
+                    .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+            }
+            Ok(s)
+        };
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--fields" => {
+                    let v = value(&mut it, a)?;
+                    let text = match v.strip_prefix('@') {
+                        Some(path) => read(path)?,
+                        None => v,
+                    };
+                    let parsed: Value = serde_json::from_str(&text)
+                        .map_err(|e| anyhow::anyhow!("--fields is a JSON object: {e}"))?;
+                    let Value::Object(m) = parsed else {
+                        bail!("--fields is a JSON object of field name to spec")
+                    };
+                    flags.fields.extend(m);
+                }
+                "--field" => {
+                    let v = value(&mut it, a)?;
+                    let (name, rest) = v
+                        .split_once('=')
+                        .ok_or_else(|| anyhow::anyhow!("--field is NAME=TYPE[:INSTRUCTIONS]"))?;
+                    let (kind, instructions) = match rest.split_once(':') {
+                        Some((k, i)) => (k, Some(i)),
+                        None => (rest, None),
+                    };
+                    let mut spec = json!({ "type": kind.trim() });
+                    if kind.trim() == "list" {
+                        spec["items"] = json!("text");
+                    }
+                    if let Some(i) = instructions.filter(|i| !i.trim().is_empty()) {
+                        spec["instructions"] = json!(i.trim());
+                    }
+                    flags.fields.insert(name.trim().to_string(), spec);
+                }
+                "--app" => flags.app = Some(value(&mut it, a)?),
+                "--active-window" => flags.active_window = true,
+                "--wait" => {
+                    flags.wait_ms = value(&mut it, a)?
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("--wait takes milliseconds"))?
+                }
+                "--state" => flags.state = Some(value(&mut it, a)?),
+                "--state-file" => flags.state = Some(read(&value(&mut it, a)?)?),
+                "--image" => flags.images.push(value(&mut it, a)?.into()),
+                "--context" => flags.context = Some(value(&mut it, a)?),
+                "--reference-date" => flags.reference_date = Some(value(&mut it, a)?),
+                "--no-screenshot" => flags.screenshot = false,
+                other => bail!("unknown option \"{other}\" for extract"),
+            }
+        }
+        // Checks names and types, before anything is started.
+        flags.fields =
+            extract::fields_arg(Some(&Value::Object(std::mem::take(&mut flags.fields))))?;
+        let window = flags.app.is_some() || flags.active_window;
+        if window && flags.state.is_some() {
+            bail!("give --app or --active-window, or --state, not both");
+        }
+        if window && !flags.images.is_empty() {
+            bail!("--image is for --state; a window's screenshot is sent by itself");
+        }
+        if !window && flags.state.is_none() && flags.images.is_empty() {
+            bail!("say what to read: --app APP, --active-window, --state TEXT, --state-file FILE or --image FILE");
+        }
+        Ok(flags)
+    }
+}
+
+/// `extract`: Clairic on an app's window, or on text and images given here.
+fn run_extract(args: &[String]) -> Result<()> {
+    use serde_json::{json, Value};
+    let flags = ExtractFlags::parse(args)?;
+    let config = config::Config::load();
+    // Before starting an app only to find nothing to call.
+    extract::require_credentials(&config.recipe)?;
+    if flags.app.is_none() && !flags.active_window {
+        let mut state = flags.state.clone().unwrap_or_default();
+        if let Some(c) = &flags.context {
+            state = format!("{state}\n{c}");
+        }
+        let images = flags
+            .images
+            .iter()
+            .map(|p| std::fs::read(p).map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display())))
+            .collect::<Result<Vec<_>>>()?;
+        let input = extract::Input {
+            state,
+            images,
+            fields: flags.fields,
+            reference_date: flags.reference_date,
+        };
+        // The state is the caller's own, so its spans mean something to them.
+        let reply = extract::call(&config.recipe, &config.extract, &input)?;
+        println!("{}", serde_json::to_string_pretty(&reply)?);
+        return Ok(());
+    }
+    init_stderr_log();
+    let mut handler = cli_handler();
+    let mut start = json!({ "active_window": flags.active_window });
+    if let Some(app) = &flags.app {
+        start["app"] = json!(app);
+    }
+    let started = tools::call(&mut *handler, "start_session", &start)?;
+    let session = serde_json::from_str::<Value>(&started.text)?["session_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("start_session returned no session id"))?
+        .to_string();
+    if flags.app.is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(flags.wait_ms));
+    }
+    let mut call = json!({
+        "session_id": session,
+        "fields": flags.fields,
+        "screenshot": flags.screenshot,
+    });
+    if let Some(c) = &flags.context {
+        call["context"] = json!(c);
+    }
+    if let Some(d) = &flags.reference_date {
+        call["reference_date"] = json!(d);
+    }
+    let result = tools::call(&mut *handler, "extract", &call);
+    let _ = tools::call(
+        &mut *handler,
+        "end_session",
+        &json!({ "session_id": session }),
+    );
+    println!("{}", result?.text);
+    Ok(())
+}
+
+/// Sessions for a command run here: through the app on macOS, in this
+/// process elsewhere (they end with it).
+#[cfg(target_os = "macos")]
+fn cli_handler() -> Box<dyn ocu_core::Handler> {
+    Box::new(macos::AgentLink::default())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cli_handler() -> Box<dyn ocu_core::Handler> {
+    let service = ocu_core::Service::with_devices(platform(), None, None);
+    Box::new(service.client())
+}
+
 /// The command-line update: report, and on macOS install over this bundle.
 fn run_update(check_only: bool) -> Result<()> {
     use std::sync::atomic::AtomicU64;
@@ -631,6 +822,34 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(none.apply(saved).listen_on, ["en1"]);
+    }
+
+    #[test]
+    fn extract_flags() {
+        let f = ExtractFlags::parse(&args(&[
+            "--field",
+            "total=number:Amount due",
+            "--field",
+            "names=list",
+            "--fields",
+            r#"{"due": {"type": "date"}}"#,
+            "--state",
+            "Invoice total $10",
+        ]))
+        .unwrap();
+        assert_eq!(f.fields["total"]["instructions"], "Amount due");
+        assert_eq!(f.fields["names"]["items"], "text");
+        assert_eq!(f.fields["due"]["type"], "date");
+        assert_eq!(f.state.as_deref(), Some("Invoice total $10"));
+        // Something to read, and only one of a window or text.
+        assert!(ExtractFlags::parse(&args(&["--field", "a=text"])).is_err());
+        assert!(
+            ExtractFlags::parse(&args(&["--field", "a=text", "--app", "X", "--state", "s"]))
+                .is_err()
+        );
+        assert!(ExtractFlags::parse(&args(&["--field", "a=colour", "--state", "s"])).is_err());
+        assert!(ExtractFlags::parse(&args(&["--state", "s"])).is_err());
+        assert!(ExtractFlags::parse(&args(&["--field", "a=text", "--app", "X"])).is_ok());
     }
 
     #[test]

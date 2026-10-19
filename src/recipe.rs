@@ -447,11 +447,11 @@ fn collect<'a>(
 /// its size before decoding the images, so a full-size screenshot (half a
 /// megabyte of base64) is refused as over the context window though the
 /// model would see it as a few hundred tokens.
-const MAX_IMAGE_BYTES: usize = 100 * 1024;
+pub(crate) const MAX_IMAGE_BYTES: usize = 100 * 1024;
 
-/// A PNG small enough to send, shrinking it until it is.
-fn fit_image(png: &[u8]) -> Vec<u8> {
-    if png.len() <= MAX_IMAGE_BYTES {
+/// A PNG of at most `max` bytes, shrinking it until it is.
+fn fit_image(png: &[u8], max: usize) -> Vec<u8> {
+    if png.len() <= max {
         return png.to_vec();
     }
     let Ok(img) = crate::vision::Image::decode(png) else {
@@ -463,7 +463,7 @@ fn fit_image(png: &[u8]) -> Vec<u8> {
         let Ok(small) = img.shrink(side).encode() else {
             return png.to_vec();
         };
-        if small.len() <= MAX_IMAGE_BYTES || side <= 256 {
+        if small.len() <= max || side <= 256 {
             return small;
         }
     }
@@ -471,11 +471,16 @@ fn fit_image(png: &[u8]) -> Vec<u8> {
 
 /// Images as Workers AI takes them: base64 data URIs.
 fn encode_images(images: &[Vec<u8>]) -> Vec<Value> {
+    encode_images_within(images, MAX_IMAGE_BYTES)
+}
+
+/// [`encode_images`], each image at most `max` bytes before encoding.
+pub(crate) fn encode_images_within(images: &[Vec<u8>], max: usize) -> Vec<Value> {
     use base64::Engine as _;
     images
         .iter()
         .map(|png| {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(fit_image(png));
+            let b64 = base64::engine::general_purpose::STANDARD.encode(fit_image(png, max));
             Value::String(format!("data:image/png;base64,{b64}"))
         })
         .collect()

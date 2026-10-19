@@ -43,6 +43,7 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 | `choose_file` | Answer the file picker the app is showing (macOS): the paths to pick or save to, or none to cancel. Actions say when one is waiting |
 | `wait` | Let the app catch up |
 | `run_recipe` | Run a fixed list of steps with a decision model (see below) |
+| `extract` | Read typed values, and the elements they belong to, from a window's tree and screenshot with Cloudflare's Clairic (see below) |
 | `permissions` | What the OS needs granted, and whether it is |
 | `phone_list`, `phone_apps`, `phone_start_session` | Phones and tablets connected to this computer (Android over adb; iPhones and iPads on macOS), when turned on |
 | `ios_simulator_list`, `ios_simulator_apps`, `ios_simulator_start_session` | iOS simulators (macOS only), when turned on |
@@ -100,6 +101,47 @@ around it (Jev 1.14; while `jev-latest` is still 1.13 those questions go to
 narrows a numbered grid instead. Jev's images and box questions are in
 TypeSafe's "danger zone" and are sent with the
 `TypeSafe-Danger-Zone-Images: true` header.
+
+## Extraction
+
+`extract` asks Cloudflare's [Clairic](https://blog.cloudflare.com/clairic-extraction-model/)
+extraction model (`@cf/cloudflare/clairic` on Workers AI) for typed values
+from a session's window. The window's accessibility tree is the text Clairic
+reads, and its screenshot goes with it as an image (turn that off in the
+settings, or per call with `screenshot: false`). A window with no tree is
+read from the screenshot alone.
+
+```json
+{ "session_id": "…", "fields": {
+  "save": { "type": "text", "instructions": "The Save button" },
+  "unread": { "type": "number", "integer": true, "instructions": "How many unread messages" },
+  "subjects": { "type": "list", "items": "text", "instructions": "Each message's subject" }
+} }
+```
+
+Each field comes back as a value of its type (`text`, `number`, `date`,
+`time`, `datetime`, `duration`, `list`, `estimate` or `forecast`) with a
+`confidence` and `p_null`, or `null` when the window doesn't show it.
+Clairic generates no tokens, so this is one fast pass. A text answer is a
+span of the tree, so it comes back with `element`, the id of the tree line
+it was read from (`elements` for lists). Pass that id straight to `click`,
+`set_value` or `element_action`, which makes `extract` a way to find a
+control by description without reading a large tree yourself.
+
+It uses the Cloudflare account ID and API token from the recipe settings
+(or `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`), and is offered once
+they are set unless it is turned off in the app (`"extract": {"enabled":
+false}`, or `OCU_EXTRACT=0`).
+
+From the command line:
+
+```sh
+# Start an app, read its window, end the session.
+opencomputeruse extract --app TextEdit --field "words=number:How many words the document has" \
+    --field "save=text:The Save button"
+# Or read text and images you give it.
+opencomputeruse extract --state-file invoice.txt --fields @fields.json --image scan.png
+```
 
 ## Platforms
 
