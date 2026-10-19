@@ -476,7 +476,7 @@ fn init_stderr_log() {
 fn run_mcp(args: &[String]) -> Result<()> {
     init_stderr_log();
     if view::ViewFlags::parse(args)?.listen.is_some() {
-        bail!("the live view is for Linux sessions; it is not available on macOS");
+        bail!("on macOS the app owns these sessions; run `serve` with --view-listen to watch sessions live");
     }
     mcp::serve(Box::new(macos::AgentLink::default()))
 }
