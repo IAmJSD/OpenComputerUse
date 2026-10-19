@@ -13,6 +13,7 @@ pub mod paths;
 #[cfg(unix)]
 pub mod portal;
 mod service;
+mod shot_view;
 mod types;
 pub mod xkb;
 

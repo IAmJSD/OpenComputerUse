@@ -30,10 +30,12 @@ use protocol::{changed, encode, ClientMessage, Format, Keys};
 static RUNNING: OnceLock<()> = OnceLock::new();
 
 /// Where a session's live view is, when the view server runs and the
-/// session's backend can be watched.
+/// session is on a desktop: its own display on Linux, its screenshots and
+/// actions on Windows and macOS. A phone's or emulator's has none.
 pub fn path_for(info: &SessionInfo) -> Option<String> {
-    (RUNNING.get().is_some() && info.backend.starts_with("linux"))
-        .then(|| format!("/sessions/{}/view", info.id))
+    let desktop =
+        info.backend.starts_with("linux") || matches!(info.backend.as_str(), "windows" | "macos");
+    (RUNNING.get().is_some() && desktop).then(|| format!("/sessions/{}/view", info.id))
 }
 
 /// Largest request head and body read.

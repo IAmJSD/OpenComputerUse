@@ -344,9 +344,13 @@ The skill is the same from every host, phones included.
 
 ## Live view
 
-On Linux, a person can watch a session's window and drive it alongside the
-agent, from a browser. Start the server with a view address and a token (at
-least 16 letters, digits or `-._~`):
+A person can watch a session's window and drive it alongside the agent,
+from a browser. On Linux the view is the session's own display. On Windows
+and macOS it's the window's screenshots, polled, with the watcher's clicks
+and keys sent as the session's actions, so it's slower; on macOS, run it
+with `serve`, since the app's MCP server can't share its sessions. Start the
+server with a view address and a token (at least 16 letters, digits or
+`-._~`):
 
 ```sh
 opencomputeruse mcp --view-listen 0.0.0.0:7900 --view-token "$TOKEN"

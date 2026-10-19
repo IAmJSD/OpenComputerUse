@@ -13,6 +13,7 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{pick_window, Observer, Platform, Session, Viewer};
+use crate::shot_view::ScreenshotViewer;
 use crate::types::*;
 
 type SharedSession = Arc<Mutex<Box<dyn Session>>>;
@@ -305,6 +306,11 @@ impl Service {
                 }
                 let windows = session.windows().unwrap_or_default();
                 let viewer = session.viewer();
+                let session = Arc::new(Mutex::new(session));
+                // A backend with no display to watch is watched through its
+                // own screenshots and actions (Windows, macOS).
+                let viewer =
+                    viewer.or_else(|| desktop.then(|| ScreenshotViewer::watching(&session)));
                 let info = SessionInfo {
                     id: self.new_id(),
                     app: d.app,
@@ -323,7 +329,7 @@ impl Service {
                     Entry {
                         info: info.clone(),
                         owner: client.id,
-                        session: Arc::new(Mutex::new(session)),
+                        session,
                         desktop,
                         viewer,
                     },
