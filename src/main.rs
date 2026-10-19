@@ -55,13 +55,15 @@ USAGE:
                                           Instead connect to an opencomputeruse already running there
                                           (Linux or macOS; its HTTP server on port P, default 8642)
     opencomputeruse extract FIELDS (--app APP [--wait MS] | --active-window | --state TEXT | --state-file F)
-                            [--image PNG]... [--context TEXT] [--reference-date DATE] [--no-screenshot]
+                            [--image PNG]... [--context TEXT] [--reference-date DATE] [--no-screenshot | --no-tree]
                                           Read typed values with Cloudflare's Clairic extraction model.
                                           FIELDS is --fields JSON (or @file) and/or --field NAME=TYPE[:INSTRUCTIONS],
                                           repeated; TYPE is text, number, date, time, datetime, duration or
                                           list (of text). --app starts the app, waits MS (default 3000), and reads
                                           its window's accessibility tree with a screenshot, naming the element
-                                          of each text answer; --state reads text instead (--state-file - for stdin)
+                                          of each text answer (--no-tree reads the screenshot alone; on macOS,
+                                          OCU_IN_PROCESS=1 drives the app here rather than through the app's agent);
+                                          --state reads text instead (--state-file - for stdin)
     opencomputeruse update [--check]      Check for a new release, and on macOS install it
     opencomputeruse skill                 Print the skill other devices use to drive a host
     opencomputeruse [agent]               Open the app's window (on macOS, --background starts it hidden)
@@ -421,6 +423,7 @@ struct ExtractFlags {
     context: Option<String>,
     reference_date: Option<String>,
     screenshot: bool,
+    tree: bool,
 }
 
 impl ExtractFlags {
@@ -429,6 +432,7 @@ impl ExtractFlags {
         let mut flags = Self {
             wait_ms: 3000,
             screenshot: true,
+            tree: true,
             ..Default::default()
         };
         let mut it = args.iter();
@@ -494,6 +498,7 @@ impl ExtractFlags {
                 "--context" => flags.context = Some(value(&mut it, a)?),
                 "--reference-date" => flags.reference_date = Some(value(&mut it, a)?),
                 "--no-screenshot" => flags.screenshot = false,
+                "--no-tree" => flags.tree = false,
                 other => bail!("unknown option \"{other}\" for extract"),
             }
         }
@@ -506,6 +511,9 @@ impl ExtractFlags {
         }
         if window && !flags.images.is_empty() {
             bail!("--image is for --state; a window's screenshot is sent by itself");
+        }
+        if !flags.tree && !flags.screenshot {
+            bail!("--no-tree and --no-screenshot leave nothing to read");
         }
         if !window && flags.state.is_none() && flags.images.is_empty() {
             bail!("say what to read: --app APP, --active-window, --state TEXT, --state-file FILE or --image FILE");
@@ -560,6 +568,7 @@ fn run_extract(args: &[String]) -> Result<()> {
         "session_id": session,
         "fields": flags.fields,
         "screenshot": flags.screenshot,
+        "ui_tree": flags.tree,
     });
     if let Some(c) = &flags.context {
         call["context"] = json!(c);
@@ -579,13 +588,13 @@ fn run_extract(args: &[String]) -> Result<()> {
 
 /// Sessions for a command run here: through the app on macOS, in this
 /// process elsewhere (they end with it).
-#[cfg(target_os = "macos")]
+/// `OCU_IN_PROCESS=1` drives apps in this process on macOS too, as `serve`
+/// does on a headless Mac, with this process's own permissions (CI).
 fn cli_handler() -> Box<dyn ocu_core::Handler> {
-    Box::new(macos::AgentLink::default())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn cli_handler() -> Box<dyn ocu_core::Handler> {
+    #[cfg(target_os = "macos")]
+    if std::env::var("OCU_IN_PROCESS").as_deref() != Ok("1") {
+        return Box::new(macos::AgentLink::default());
+    }
     let service = ocu_core::Service::with_devices(platform(), None, None);
     Box::new(service.client())
 }

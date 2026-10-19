@@ -114,3 +114,78 @@ jobs:
         run: python3 scripts/linux/wayland_smoke.py target/debug/opencomputeruse
       - name: X11
         run: python3 scripts/linux/smoke.py target/debug/opencomputeruse
+
+  # A real app shows an invoice, and `opencomputeruse extract` reads its
+  # values with Cloudflare's Clairic from the window's accessibility tree and
+  # screenshot (tests/extract.rs). Needs the CLOUDFLARE_ACCOUNT_ID and
+  # CLOUDFLARE_API_TOKEN secrets (a token with Workers AI access); without
+  # them it says so and passes.
+  extract:
+    name: extract (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Check for Cloudflare credentials
+        id: creds
+        shell: bash
+        run: |
+          if [ -n "$CLOUDFLARE_ACCOUNT_ID" ] && [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::extract tests skipped: add the CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN secrets to run them"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.creds.outputs.present
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.creds.outputs.present
+      - uses: Swatinem/rust-cache@v2
+        if: steps.creds.outputs.present
+
+      - name: Set up (macOS)
+        if: steps.creds.outputs.present && runner.os == 'macOS'
+        run: |
+          echo "OCU_E2E_INVOICE_APP=$(tests/e2e/macos/build.sh "$RUNNER_TEMP" Invoice)" >> "$GITHUB_ENV"
+          # Screenshots need Screen Recording, which the runner image may
+          # not grant: give it to whatever has Accessibility there, as the
+          # file dialog job does for App Management.
+          db="/Library/Application Support/com.apple.TCC/TCC.db"
+          sudo sqlite3 "$db" "
+            CREATE TEMP TABLE t AS
+              SELECT * FROM access WHERE service = 'kTCCServiceAccessibility';
+            UPDATE t SET service = 'kTCCServiceScreenCapture';
+            INSERT OR REPLACE INTO main.access SELECT * FROM t;"
+          sudo killall tccd || true
+          killall tccd || true
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: steps.creds.outputs.present && runner.os == 'Windows'
+      - name: Set up (Windows)
+        if: steps.creds.outputs.present && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $app = "$env:RUNNER_TEMP\invoice.exe"
+          cl /nologo /W4 /WX tests\e2e\windows\invoice.c "/Fe:$app" "/Fo:$env:RUNNER_TEMP\" `
+            /link user32.lib gdi32.lib /SUBSYSTEM:WINDOWS
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "OCU_E2E_INVOICE_APP=$app" >> $env:GITHUB_ENV
+
+      - name: Set up (Linux)
+        if: steps.creds.outputs.present && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb dbus at-spi2-core python3-gi gir1.2-gtk-3.0 \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
+            libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libpixman-1-dev
+          echo "OCU_E2E_INVOICE_APP=$PWD/tests/e2e/linux/invoice.py" >> "$GITHUB_ENV"
+
+      - name: Run
+        if: steps.creds.outputs.present
+        run: cargo test --test extract -- --nocapture

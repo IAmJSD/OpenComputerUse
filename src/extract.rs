@@ -96,6 +96,7 @@ pub fn run(handler: &mut dyn Handler, args: &Value) -> Result<Output> {
     let fields = fields_arg(args.get("fields"))?;
 
     let mut state = String::new();
+    let mut elements = 0;
     if flag("ui_tree", true) {
         match handler.handle(Request::UiTree {
             session: session.clone(),
@@ -105,6 +106,7 @@ pub fn run(handler: &mut dyn Handler, args: &Value) -> Result<Output> {
             Ok(Response::UiTree(t)) => {
                 let tree = t.render();
                 if !tree.trim().is_empty() {
+                    elements = tree.lines().count();
                     state = tree_state(&tree);
                 }
             }
@@ -114,10 +116,23 @@ pub fn run(handler: &mut dyn Handler, args: &Value) -> Result<Output> {
         }
     }
     let mut images = Vec::new();
+    let mut shot = Value::Bool(false);
+    let mut notes = Vec::new();
     if flag("screenshot", config.extract.screenshots) || state.is_empty() {
-        match handler.handle(Request::Screenshot { session, window })? {
-            Response::Screenshot(s) => images.push(s.png),
-            _ => bail!("unexpected reply"),
+        match handler.handle(Request::Screenshot { session, window }) {
+            Ok(Response::Screenshot(s)) => {
+                shot = json!(format!("{}x{}", s.width, s.height));
+                images.push(s.png);
+            }
+            Ok(_) => bail!("unexpected reply"),
+            // The tree alone still answers most fields.
+            Err(e) if !state.is_empty() => {
+                log::warn!("extract: no screenshot: {e:#}");
+                notes.push(format!("Read from the tree alone: no screenshot ({e:#})."));
+            }
+            Err(e) => {
+                return Err(e.context("the window has no accessibility tree, and no screenshot"))
+            }
         }
     }
     if let Some(c) = args
@@ -140,8 +155,16 @@ pub fn run(handler: &mut dyn Handler, args: &Value) -> Result<Output> {
             .map(str::to_string),
     };
     let reply = call(&config.recipe, &config.extract, &input)?;
+    let mut out = summarize(&input.state, &reply);
+    out["read"] = json!({ "tree_elements": elements, "screenshot": shot });
+    if let Some(n) = out.get("note").and_then(Value::as_str) {
+        notes.push(n.to_string());
+    }
+    if !notes.is_empty() {
+        out["note"] = json!(notes.join(" "));
+    }
     Ok(Output {
-        text: serde_json::to_string_pretty(&summarize(&input.state, &reply))?,
+        text: serde_json::to_string_pretty(&out)?,
         image: None,
     })
 }
