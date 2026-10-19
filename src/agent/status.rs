@@ -1,6 +1,6 @@
 //! The app's one window: whether computer use has the permissions it needs,
 //! how to add it to an MCP client, which sessions are running, and the
-//! settings for recipes and the overlay.
+//! settings for recipes, extraction and the overlay.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +33,7 @@ enum Field {
     CloudflareToken,
     CloudflareModel,
     MinConfidence,
+    ExtractModel,
     HttpPort,
     ListenOn,
     DeviceName,
@@ -45,13 +46,14 @@ enum Field {
 
 impl Field {
     /// Every field, in tab order.
-    const ALL: [Field; 14] = [
+    const ALL: [Field; 15] = [
         Field::TypesafeKey,
         Field::TypesafeModel,
         Field::CloudflareAccount,
         Field::CloudflareToken,
         Field::CloudflareModel,
         Field::MinConfidence,
+        Field::ExtractModel,
         Field::HttpPort,
         Field::ListenOn,
         Field::DeviceName,
@@ -62,14 +64,15 @@ impl Field {
         Field::SshPort,
     ];
 
-    /// The fields Save writes to the recipe settings.
-    const RECIPE: [Field; 6] = [
+    /// The fields Save writes to the recipe and extraction settings.
+    const RECIPE: [Field; 7] = [
         Field::TypesafeKey,
         Field::TypesafeModel,
         Field::CloudflareAccount,
         Field::CloudflareToken,
         Field::CloudflareModel,
         Field::MinConfidence,
+        Field::ExtractModel,
     ];
 
     fn secret(self) -> bool {
@@ -84,6 +87,7 @@ impl Field {
             Field::CloudflareToken => "cf-token",
             Field::CloudflareModel => "cf-model",
             Field::MinConfidence => "min-confidence",
+            Field::ExtractModel => "extract-model",
             Field::HttpPort => "http-port",
             Field::ListenOn => "listen-on",
             Field::DeviceName => "device-name",
@@ -417,6 +421,7 @@ impl Status {
                     Field::CloudflareToken => r.cloudflare_api_token.clone(),
                     Field::CloudflareModel => r.cloudflare_model.clone(),
                     Field::MinConfidence => format!("{}", r.min_confidence),
+                    Field::ExtractModel => config.extract.model.clone(),
                     Field::HttpPort => config.http.port.to_string(),
                     Field::ListenOn
                     | Field::DeviceName
@@ -1698,8 +1703,13 @@ impl Status {
     }
 
     fn save(&mut self) {
-        let [key, model, account, token, cf_model, confidence] =
+        let [key, model, account, token, cf_model, confidence, extract_model] =
             Field::RECIPE.map(|f| self.text(f));
+        self.config.extract.model = if extract_model.is_empty() {
+            crate::config::ExtractConfig::default().model
+        } else {
+            extract_model
+        };
         let r = &mut self.config.recipe;
         r.typesafe_api_key = key;
         r.typesafe_model = model;
@@ -2221,6 +2231,40 @@ impl Render for Status {
                             })),
                     ))
                     .child(Self::row("Minimum confidence", self.input(Field::MinConfidence, "0.6", cx)))
+                    // Extraction.
+                    .child(Self::section("Extraction"))
+                    .child(div().text_color(rgb(p.text_dim)).child(
+                        "extract reads typed values (text, numbers, dates, lists) and the elements they belong to from a window's accessibility tree and screenshot, with Cloudflare's Clairic extraction model.",
+                    ))
+                    .child(Self::row(
+                        "",
+                        Checkbox::new("extract-on", "Offer the extract tool", self.config.extract.enabled)
+                            .on_change(cx.listener(|s, checked: &bool, _, cx| {
+                                s.config.extract.enabled = *checked;
+                                s.saved = false;
+                                cx.notify();
+                            })),
+                    ))
+                    // The account is the recipes' when they use Cloudflare too.
+                    .when(provider != Provider::Cloudflare, |d| {
+                        d.child(Self::row("Account ID", self.input(Field::CloudflareAccount, "Cloudflare account id", cx)))
+                            .child(Self::row("API token", self.input(Field::CloudflareToken, "Token with Workers AI access", cx)))
+                    })
+                    .when(provider == Provider::Cloudflare, |d| {
+                        d.child(div().text_color(rgb(p.text_dim)).text_size(px(11.5)).child(
+                            "Uses the Cloudflare account set for recipes above.",
+                        ))
+                    })
+                    .child(Self::row("Model", self.input(Field::ExtractModel, "@cf/cloudflare/clairic", cx)))
+                    .child(Self::row(
+                        "",
+                        Checkbox::new("extract-shots", "Send a screenshot with the tree", self.config.extract.screenshots)
+                            .on_change(cx.listener(|s, checked: &bool, _, cx| {
+                                s.config.extract.screenshots = *checked;
+                                s.saved = false;
+                                cx.notify();
+                            })),
+                    ))
                     .child(
                         div()
                             .flex()
@@ -2236,7 +2280,7 @@ impl Render for Status {
                                     })),
                             )
                             .when(self.saved && self.error.is_none(), |d| {
-                                d.child(div().text_color(rgb(p.text_dim)).child("Saved. Recipes pick changes up on their next run."))
+                                d.child(div().text_color(rgb(p.text_dim)).child("Saved. Recipes and extract pick changes up on their next run."))
                             })
                             .when_some(self.error.clone(), |d, e| d.child(div().text_color(rgb(p.warning)).child(e))),
                     ),

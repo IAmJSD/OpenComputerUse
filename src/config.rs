@@ -73,6 +73,29 @@ impl RecipeConfig {
     }
 }
 
+/// The `extract` tool: Cloudflare's Clairic extraction model, called with
+/// the Cloudflare account in [`RecipeConfig`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtractConfig {
+    /// Offer the tool once there is a Cloudflare account to call.
+    pub enabled: bool,
+    pub model: String,
+    /// Send the window's screenshot beside its tree (it is always sent when
+    /// a window has no accessibility tree).
+    pub screenshots: bool,
+}
+
+impl Default for ExtractConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "@cf/cloudflare/clairic".into(),
+            screenshots: true,
+        }
+    }
+}
+
 /// The optional HTTP server for other devices. Off unless turned on.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -106,6 +129,7 @@ impl Default for HttpConfig {
 #[serde(default)]
 pub struct Config {
     pub recipe: RecipeConfig,
+    pub extract: ExtractConfig,
     pub http: HttpConfig,
     /// Show the cursor and halo over windows being driven (macOS).
     pub show_overlay: Option<bool>,
@@ -201,6 +225,9 @@ impl Config {
         }
         if let Some(v) = env("CLOUDFLARE_API_TOKEN") {
             r.cloudflare_api_token = v;
+        }
+        if let Some(on) = env_flag("OCU_EXTRACT") {
+            config.extract.enabled = on;
         }
         config
     }

@@ -9,7 +9,7 @@ use ocu_core::{
 };
 
 use crate::config::Config;
-use crate::recipe;
+use crate::{extract, recipe};
 
 /// A tool's answer: text, and optionally a picture.
 pub struct Output {
@@ -73,6 +73,9 @@ pub fn list() -> Vec<Value> {
     if recipe::available() {
         tools.push(recipe::tool_definition());
     }
+    if extract::available() {
+        tools.push(extract::tool_definition());
+    }
     tools
 }
 
@@ -85,6 +88,7 @@ pub fn catalog() -> Vec<Value> {
     mention_devices(&mut tools);
     tools.extend(device_tools(true, true));
     tools.push(recipe::tool_definition());
+    tools.push(extract::tool_definition());
     tools
 }
 
@@ -787,6 +791,7 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
             text(t.render())
         }
         "run_recipe" => recipe::run(handler, args),
+        "extract" => extract::run(handler, args),
         "permissions" => {
             let Response::Permissions(p) = handler.handle(Request::Permissions)? else {
                 bail!("unexpected reply")

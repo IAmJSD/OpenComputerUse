@@ -112,7 +112,7 @@ EOF
 
 ## Tools
 
-Not every host offers every tool. A computer offers what its system has: `unlock_screen` only on a Mac; the phone, iOS simulator and Android emulator tools only when they are turned on in its settings (the simulator ones on a Mac, the emulator ones when the emulator is installed); and `run_recipe` once it is set up. A phone running the OpenComputerUse app offers only the session tools, for apps on that phone. A host answers a tool it doesn't have with an error.
+Not every host offers every tool. A computer offers what its system has: `unlock_screen` only on a Mac; the phone, iOS simulator and Android emulator tools only when they are turned on in its settings (the simulator ones on a Mac, the emulator ones when the emulator is installed); and `run_recipe` and `extract` once they are set up. A phone running the OpenComputerUse app offers only the session tools, for apps on that phone. A host answers a tool it doesn't have with an error.
 
 ### `start_session`
 
@@ -354,4 +354,16 @@ Run a fixed sequence of UI steps in a session without you in the loop. Each step
   - `window_id` (integer)
   - `steps` (array, required)
   - `min_confidence` (number): Override the configured confidence threshold (0-1).
+
+### `extract`
+
+Read typed values from a session's window in one fast call, without reading the tree or screenshot yourself. Cloudflare's Clairic extraction model reads the window's accessibility tree together with its screenshot, and returns one value per field you define: its type (text, number, date, time, datetime, duration, list, estimate, forecast), a confidence, and p_null (the chance the window doesn't show it); null when it doesn't. Use it to pull values out of a busy window (a total, a date, every row's name, how many unread items) or to find an element: a text answer is a span of the tree, so it comes with `element`, the id of the line it came from (lists come with `elements`), ready for click, set_value and element_action. Values are well formed, not necessarily right: check low-confidence ones before acting on them.
+
+  - `session_id` (string, required): The id start_session returned.
+  - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
+  - `fields` (object, required): Field name (letters, digits, _ . -) to its spec: {"type": ..., "instructions": what it should contain}. Numbers take `unit`, `integer` and `decimals`; durations a `unit` (seconds to years); lists `items` (text, number or date); estimates `min`, `max` and optionally `step` and `scale`; forecasts also `horizon` and `interval`; any field `null_threshold`. Example: {"save_button": {"type": "text", "instructions": "The Save button's element id"}, "total": {"type": "number", "decimals": 2, "unit": "USD"}, "rows": {"type": "list", "items": "text", "instructions": "Each message subject"}}.
+  - `context` (string): More for the model to read beside the window, such as "Today: 2026-10-19" for fields that depend on the date.
+  - `reference_date` (string): ISO date that anchors dates shown without a year.
+  - `ui_tree` (boolean): Read the accessibility tree. Default true; without one, values are read from the screenshot alone.
+  - `screenshot` (boolean): Send the window's screenshot with the tree. Defaults to the OpenComputerUse setting (on).
 
