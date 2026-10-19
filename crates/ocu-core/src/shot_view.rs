@@ -77,9 +77,26 @@ impl Latest {
         Arc::default()
     }
 
-    /// A new picture, from the capture's own thread.
+    /// A new picture, from the capture's own thread. One the same as the
+    /// last is dropped: captures may deliver a still window over and over,
+    /// and the view sends whenever the count goes up.
     pub fn push(&self, frame: Frame) {
-        *self.frame.lock().unwrap() = Some(frame);
+        let mut last = self.frame.lock().unwrap();
+        let same = last.as_ref().is_some_and(|l| {
+            (l.window_id, l.width, l.height, l.stride, l.order)
+                == (
+                    frame.window_id,
+                    frame.width,
+                    frame.height,
+                    frame.stride,
+                    frame.order,
+                )
+                && l.data == frame.data
+        });
+        if same {
+            return;
+        }
+        *last = Some(frame);
         self.count.fetch_add(1, Ordering::Release);
         self.arrived.notify_all();
     }
@@ -779,6 +796,9 @@ mod tests {
             let started = rig.viewer.generation().unwrap();
             // Nothing new, nothing to send.
             std::thread::sleep(POLL * 2);
+            assert_eq!(rig.viewer.generation(), Some(started));
+            // The same picture again is nothing new either.
+            rig.streams.latest().push(picture(1, 7));
             assert_eq!(rig.viewer.generation(), Some(started));
             rig.streams.latest().push(picture(1, 8));
             assert_eq!(rig.viewer.generation(), Some(started + 1));

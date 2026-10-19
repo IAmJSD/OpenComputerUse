@@ -18,10 +18,10 @@ use objc2_core_video::{
     CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
     CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
-use objc2_foundation::{NSError, NSObject, NSObjectProtocol};
+use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCFrameStatus, SCStream, SCStreamConfiguration, SCStreamDelegate,
-    SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType,
+    SCStreamFrameInfoDirtyRects, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType,
 };
 
 use ocu_core::image::Order;
@@ -176,8 +176,9 @@ impl Output {
     }
 }
 
-/// Whether a sample holds a new picture; the stream also sends ones that
-/// only say nothing changed.
+/// Whether a sample holds a new picture. The stream also sends ones that
+/// only say nothing changed, and for a single window, complete ones at its
+/// full rate whose dirty rects say nothing changed either.
 fn complete(buffer: &CMSampleBuffer) -> bool {
     let Some(attachments) = (unsafe { buffer.sample_attachments_array(false) }) else {
         return false;
@@ -186,13 +187,23 @@ fn complete(buffer: &CMSampleBuffer) -> bool {
     let Some(info) = attachments.iter().next() else {
         return false;
     };
-    let key: *const c_void = (unsafe { SCStreamFrameInfoStatus } as *const _ as *const c_void);
-    let status = unsafe { info.value(key) };
-    if status.is_null() {
+    let value = |key: &NSString| {
+        let v = unsafe { info.value((key as *const NSString).cast::<c_void>()) };
+        (!v.is_null()).then_some(v)
+    };
+    let Some(status) = value(unsafe { SCStreamFrameInfoStatus }) else {
+        return false;
+    };
+    let status = unsafe { &*(status as *const CFNumber) };
+    if status.as_i64() != Some(SCFrameStatus::Complete.0 as i64) {
         return false;
     }
-    let status = unsafe { &*(status as *const CFNumber) };
-    status.as_i64() == Some(SCFrameStatus::Complete.0 as i64)
+    // No dirty rects listed at all is a picture to take; an empty list is
+    // the same picture again.
+    match value(unsafe { SCStreamFrameInfoDirtyRects }) {
+        Some(rects) => unsafe { &*(rects as *const CFArray) }.count() > 0,
+        None => true,
+    }
 }
 
 /// A sample's pixels, copied out of its buffer.
