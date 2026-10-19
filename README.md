@@ -154,7 +154,7 @@ cleanup, the MCP tools and recipes.
 - **Launch:** apps open without activating. Your app's windows are put back
   on top, so the session window sits behind them.
 - **Screenshots:** ScreenCaptureKit captures the window itself, so covered
-  windows capture as they look.
+  windows capture as they look. The live view streams it with `SCStream`.
 - **Tree and element actions:** the Accessibility API, which works on
   background windows.
 - **Pointer and keys:** posted to the app's process through SkyLight. The
@@ -281,7 +281,8 @@ docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm --ini
 - **Launch:** apps start suspended inside a kill-on-close Job Object, so
   their whole process tree dies with the server. They are shown without
   activating and sent to the back.
-- **Screenshots:** `PrintWindow` with full-content rendering.
+- **Screenshots:** `PrintWindow` with full-content rendering. The live
+  view streams windows through Windows.Graphics.Capture instead.
 - **Input:** window messages posted to the control under the point, or to
   the focused control.
 - **Tree and element actions:** UI Automation.
@@ -388,9 +389,12 @@ The skill is the same from every host, phones included.
 
 A person can watch a session's window and drive it alongside the agent,
 from a browser. On Linux the view is the session's own display. On Windows
-and macOS it's the window's screenshots, polled, with the watcher's clicks
-and keys sent as the session's actions, so it's slower; on macOS, run it
-with `serve`, since the app's MCP server can't share its sessions. Start the
+and macOS it's the window's own capture stream (Windows.Graphics.Capture,
+ScreenCaptureKit's `SCStream`), sending a picture whenever the window
+changes, with the watcher's clicks and keys sent as the session's actions;
+where a window can't be streamed, its screenshots are polled instead. On
+macOS, run it with `serve`, since the app's MCP server can't share its
+sessions. Start the
 server with a view address and a token (at least 16 letters, digits or
 `-._~`):
 

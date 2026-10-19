@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
+use crate::shot_view::Capturer;
 use crate::types::*;
 
 pub trait Platform: Send + Sync {
@@ -96,6 +97,13 @@ pub trait Session: Send {
 
     /// A handle for watching and driving the session live, beside the agent.
     fn viewer(&mut self) -> Option<Arc<dyn Viewer>> {
+        None
+    }
+
+    /// For a session with no [`Session::viewer`] of its own: what streams
+    /// its windows' pictures to the view built from its screenshots and
+    /// actions, which otherwise polls its screenshots.
+    fn capturer(&mut self) -> Option<Arc<dyn Capturer>> {
         None
     }
 }

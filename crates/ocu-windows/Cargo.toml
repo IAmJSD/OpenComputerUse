@@ -1,6 +1,6 @@
 [package]
 name = "ocu-windows"
-description = "The Windows backend: window messages, PrintWindow and UI Automation, with sessions in a kill-on-close job"
+description = "The Windows backend: window messages, PrintWindow, Windows.Graphics.Capture and UI Automation, with sessions in a kill-on-close job"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,17 @@ anyhow.workspace = true
 log.workspace = true
 serde_json.workspace = true
 windows = { version = "0.61", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",

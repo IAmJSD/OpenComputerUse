@@ -89,6 +89,54 @@ jobs:
       - name: Run
         run: cargo test --test file_dialogs
 
+  # A person watching a Windows or macOS session live (tests/live_view.rs):
+  # the window's capture stream says when the picture changed, a still
+  # window sends nothing, and neither the view nor the agent waits on the
+  # other. Linux's view is its own display, tested in linux-wayland.
+  live-view:
+    name: live view (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set up (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "OCU_E2E_SWATCH_APP=$(tests/e2e/macos/build.sh "$RUNNER_TEMP" Swatch)" >> "$GITHUB_ENV"
+          # Streaming a window needs Screen Recording, which the runner image
+          # may not grant: give it to whatever has Accessibility there, as
+          # the extract job does.
+          db="/Library/Application Support/com.apple.TCC/TCC.db"
+          sudo sqlite3 "$db" "
+            CREATE TEMP TABLE t AS
+              SELECT * FROM access WHERE service = 'kTCCServiceAccessibility';
+            UPDATE t SET service = 'kTCCServiceScreenCapture';
+            INSERT OR REPLACE INTO main.access SELECT * FROM t;"
+          sudo killall tccd || true
+          killall tccd || true
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Set up (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $app = "$env:RUNNER_TEMP\swatch.exe"
+          cl /nologo /W4 /WX tests\e2e\windows\swatch.c "/Fe:$app" "/Fo:$env:RUNNER_TEMP\" `
+            /link user32.lib gdi32.lib /SUBSYSTEM:WINDOWS
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "OCU_E2E_SWATCH_APP=$app" >> $env:GITHUB_ENV
+
+      - name: Run
+        run: cargo test --test live_view
+
   # Chrome on a headless Wayland session: the agent's tools, the live view
   # and the sessions API (scripts/linux/wayland_smoke.py), then the X11
   # smoke test beside it. Both then read Chrome's and GTK's accessibility

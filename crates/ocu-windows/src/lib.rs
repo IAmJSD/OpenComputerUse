@@ -11,9 +11,11 @@ mod hook;
 mod inject;
 mod input;
 mod launch;
+mod stream;
 mod uia;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -31,8 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use ocu_core::keys::{parse_chord, parse_chords};
 use ocu_core::{
-    pick_window, Action, Description, LaunchSpec, Platform, Screenshot, Session, TreeOptions,
-    UiNode, WindowInfo,
+    pick_window, Action, Capturer, Description, LaunchSpec, Platform, Screenshot, Session,
+    TreeOptions, UiNode, WindowInfo,
 };
 
 pub struct WindowsPlatform {
@@ -486,6 +488,10 @@ impl Session for WindowsSession {
             ));
         }
         self.dialog().map(|d| d.notice())
+    }
+
+    fn capturer(&mut self) -> Option<Arc<dyn Capturer>> {
+        Some(Arc::new(stream::Streamer))
     }
 
     fn is_alive(&mut self) -> bool {
