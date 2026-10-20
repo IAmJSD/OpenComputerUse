@@ -15,6 +15,8 @@ mod launch;
 #[cfg(target_os = "linux")]
 mod keys;
 #[cfg(target_os = "linux")]
+mod portal_desktop;
+#[cfg(target_os = "linux")]
 mod screen;
 #[cfg(target_os = "linux")]
 mod wayland;

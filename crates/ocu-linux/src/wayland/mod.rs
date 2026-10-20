@@ -27,8 +27,7 @@ use smithay::reexports::wayland_server::ListeningSocket;
 
 use ocu_core::image::encode_png;
 use ocu_core::keys::{
-    dom_code, modifier_evdev, named_evdev, parse_chord, parse_chords, parse_held, us_key, Chord,
-    Key, Modifiers,
+    chord_evdev, dom_code, modifier_evdev, parse_chord, parse_chords, parse_held, Key, Modifiers,
 };
 use ocu_core::{
     pick_window, Action, CursorPosition, Description, Frame, LaunchSpec, MouseButton, Screenshot,
@@ -344,26 +343,6 @@ impl WaylandSession {
         }
         Ok(())
     }
-}
-
-/// The evdev codes a chord presses, in order: its modifiers, then its key
-/// (with shift added when the key's character needs it).
-fn chord_evdev(chord: &Chord) -> Result<Vec<u16>> {
-    let mut mods = chord.modifiers;
-    let key = match chord.key {
-        None => None,
-        Some(Key::Named(k)) => Some(named_evdev(k)),
-        Some(Key::Char(c)) => match us_key(c) {
-            Some((code, shift)) => {
-                mods.shift |= shift;
-                Some(code)
-            }
-            None => bail!("a US keyboard has no key for \"{c}\" to press; type_text types it"),
-        },
-    };
-    let mut codes = modifier_evdev(mods);
-    codes.extend(key);
-    Ok(codes)
 }
 
 impl Session for WaylandSession {

@@ -259,7 +259,7 @@ impl LinuxSession {
     }
 }
 
-fn title(conn: &RustConnection, w: Window) -> String {
+pub(crate) fn title(conn: &RustConnection, w: Window) -> String {
     let atom = |name: &[u8]| {
         conn.intern_atom(false, name)
             .ok()?

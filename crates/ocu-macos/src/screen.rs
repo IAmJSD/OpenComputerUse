@@ -1,19 +1,23 @@
 //! A session on the whole screen: each display is a window, pictures are
 //! the display as it shows, and input is real, posted where the mouse and
-//! keyboard post theirs.
+//! keyboard post theirs. The tree is the frontmost app's focused window's,
+//! in the display's coordinates.
 
 use std::collections::BTreeMap;
 use std::thread::sleep;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
-use objc2_core_foundation::CGPoint;
+use anyhow::{anyhow, bail, Result};
+use objc2_core_foundation::{CFBoolean, CGPoint};
 
 use ocu_core::keys::{parse_chord, parse_chords, parse_held, Modifiers};
 use ocu_core::{
-    pick_window, Action, CursorPosition, Description, MouseButton, Screenshot, Session, WindowInfo,
+    pick_window, Action, CursorPosition, Description, MouseButton, Screenshot, Session,
+    TreeOptions, UiNode, WindowInfo,
 };
 
+use crate::ax::{self, Element, ElementTable};
+use crate::session::{choose_native, frontmost_pid};
 use crate::{capture, real};
 
 #[derive(Default)]
@@ -23,6 +27,11 @@ pub struct ScreenSession {
     held: Modifiers,
     /// The button `mouse_down` pressed, which makes moves drags.
     pressed: Option<MouseButton>,
+    /// The elements of the last tree read.
+    elements: ElementTable,
+    /// Apps already asked to build their whole tree (Chromium and Electron
+    /// build their web content's only once asked).
+    asked: Vec<i32>,
 }
 
 impl ScreenSession {
@@ -56,19 +65,73 @@ impl Session for ScreenSession {
         capture::capture_display(&self.window(window)?)
     }
 
+    /// The frontmost app's focused window's tree, in `window`'s (a
+    /// display's) coordinates.
+    fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
+        let w = self.window(window)?;
+        let pid = frontmost_pid().ok_or_else(|| anyhow!("no app is in front"))?;
+        let app = Element::application(pid);
+        if !self.asked.contains(&pid) {
+            self.asked.push(pid);
+            // Errors even when it works, and apps that don't know it ignore it.
+            let _ = app.set("AXManualAccessibility", CFBoolean::new(true));
+        }
+        let root = match app.element("AXFocusedWindow") {
+            Some(focused) => focused,
+            None => ax::window_element(pid, None)?,
+        };
+        let origin = CGPoint {
+            x: w.frame.x,
+            y: w.frame.y,
+        };
+        Ok(ax::read_tree(&root, origin, opts, &mut self.elements))
+    }
+
+    fn element_point(
+        &mut self,
+        window: Option<u64>,
+        element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        let w = self.window(window)?;
+        let f = self
+            .elements
+            .get(element)?
+            .frame()
+            .ok_or_else(|| anyhow!("element {element} has no position"))?;
+        Ok((
+            Some(w.id),
+            f.origin.x + f.size.width / 2.0 - w.frame.x,
+            f.origin.y + f.size.height / 2.0 - w.frame.y,
+        ))
+    }
+
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
         match action {
             Action::Wait { ms } => {
                 sleep(Duration::from_millis(*ms));
                 return Ok(());
             }
-            Action::ElementAction { .. }
-            | Action::ClickElement { .. }
-            | Action::SetValue { .. }
-            | Action::Focus { .. } => bail!(
-                "a screen session has no accessibility tree; use coordinates, or start a session \
-                 on the app"
-            ),
+            Action::ElementAction { element, name } => {
+                let el = self.elements.get(element)?;
+                return el.perform(&ax::action_name(name.as_deref().unwrap_or("press")));
+            }
+            Action::SetValue { element, value } => {
+                let el = self.elements.get(element)?;
+                if el.string("AXRole").as_deref() == Some("AXPopUpButton") {
+                    return choose_native(el, value);
+                }
+                if el.settable("AXFocused") {
+                    let _ = el.set("AXFocused", CFBoolean::new(true));
+                }
+                return el.set("AXValue", &ax::cf_string(value));
+            }
+            Action::Focus { element } => {
+                return self
+                    .elements
+                    .get(element)?
+                    .set("AXFocused", CFBoolean::new(true));
+            }
+            Action::ClickElement { .. } => bail!("click elements by their point"),
             Action::ChooseFile { .. } => {
                 bail!("a screen session can't answer file panels; click through them")
             }

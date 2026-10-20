@@ -7,6 +7,9 @@
 //! sessions never see each other's apps, and no desktop session or
 //! `at-spi2-registryd` is needed.
 //!
+//! A screen session instead reads the desktop's own accessibility bus,
+//! where `at-spi2-registryd` is the registry, and asks it for the apps.
+//!
 //! The registry and the calls run on a small shared async runtime, so an
 //! app registering mid-walk is still answered. Calls are made a level of
 //! the tree at a time, many at once, each with a timeout, and the walk
@@ -36,6 +39,11 @@ const ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
 const COMPONENT: &str = "org.a11y.atspi.Component";
 const ACTION: &str = "org.a11y.atspi.Action";
 const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
+/// Where the session bus says where the accessibility bus is, and whether
+/// accessibility is on.
+const A11Y_BUS: &str = "org.a11y.Bus";
+const A11Y_BUS_PATH: &str = "/org/a11y/bus";
+const A11Y_STATUS: &str = "org.a11y.Status";
 
 /// How long one call may take, and a whole read.
 const CALL: Duration = Duration::from_secs(2);
@@ -49,7 +57,7 @@ const MAX_TEXT: usize = 2000;
 /// An object on the bus: its connection's name and its path.
 type ObjRef = (String, OwnedObjectPath);
 
-fn runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -111,7 +119,12 @@ impl Events {
 /// A session's accessibility: its bus, the registry on it, and the
 /// elements of the last tree read.
 pub struct A11y {
-    bus: Arc<ocu_core::portal::Bus>,
+    /// The session's private bus; `None` on the desktop's own.
+    bus: Option<Arc<ocu_core::portal::Bus>>,
+    /// On the desktop's bus, where accessibility was off until this turned
+    /// it on: the session bus, to turn it off again at the end.
+    turned_on: Option<Connection>,
+    address: String,
     conn: Connection,
     apps: Apps,
     last: Option<Read>,
@@ -122,6 +135,9 @@ struct Read {
     window: u64,
     /// Subtracted from frames to put them in the window's coordinates.
     origin: (f64, f64),
+    /// Whether frames could be put there: on a Wayland desktop nobody
+    /// knows where a window is, so its elements have no position.
+    placed: bool,
     refs: Vec<ObjRef>,
     raws: Vec<Raw>,
     elements: Vec<Mapped>,
@@ -153,20 +169,67 @@ impl A11y {
         });
         let conn = conn.map_err(|e| anyhow!("becoming the accessibility registry: {e}"))?;
         Ok(Self {
-            bus,
+            address: bus.address().to_string(),
+            bus: Some(bus),
+            turned_on: None,
             conn,
             apps,
             last: None,
         })
     }
 
+    /// Joins the desktop's own accessibility bus, which the session bus
+    /// names, to read the apps the user runs. Turns accessibility on there
+    /// if it is off, as a screen reader does: Chromium, Firefox and Qt only
+    /// export their trees while it is on.
+    pub fn desktop() -> Result<Self> {
+        let (address, conn, turned_on) = runtime()
+            .block_on(async {
+                let session = Connection::session().await?;
+                let reply = tokio::time::timeout(
+                    CALL,
+                    session.call_method(
+                        Some(A11Y_BUS),
+                        A11Y_BUS_PATH,
+                        Some(A11Y_BUS),
+                        "GetAddress",
+                        &(),
+                    ),
+                )
+                .await
+                .map_err(|_| zbus::Error::Failure("GetAddress timed out".into()))??;
+                let address: String = reply.body().deserialize()?;
+                let conn = zbus::connection::Builder::address(address.as_str())?
+                    .build()
+                    .await?;
+                let on = status(&session).await.unwrap_or(false);
+                let turned_on = if on {
+                    None
+                } else {
+                    set_status(&session, true).await?;
+                    log::info!("turned the desktop's accessibility on");
+                    Some(session)
+                };
+                zbus::Result::Ok((address, conn, turned_on))
+            })
+            .map_err(|e| anyhow!("the desktop's accessibility bus: {e}"))?;
+        Ok(Self {
+            bus: None,
+            turned_on,
+            address,
+            conn,
+            apps: Arc::default(),
+            last: None,
+        })
+    }
+
     /// What the app needs in its environment to export its tree here.
     pub fn env(&self) -> Vec<EnvChange> {
-        crate::launch::a11y_env(self.bus.address())
+        crate::launch::a11y_env(&self.address)
     }
 
     pub fn address(&self) -> &str {
-        self.bus.address()
+        &self.address
     }
 
     fn block_on<F: Future>(&self, f: F) -> F::Output {
@@ -175,16 +238,55 @@ impl A11y {
 
     /// Reads `window`'s tree. Ids stay good until the next read.
     pub fn tree(&mut self, window: &WindowInfo, opts: &TreeOptions) -> Result<UiNode> {
-        // A freshly started app may not have registered yet.
+        self.tree_at(window.id, &window.title, opts, Some((0.0, 0.0)))
+    }
+
+    /// Reads the tree of the toplevel titled `title` (else the active one)
+    /// as part of window `window`, with the toplevel's top-left at `at` in
+    /// it; `None` when that is unknown, which leaves elements without
+    /// frames. Ids stay good until the next read.
+    pub fn tree_at(
+        &mut self,
+        window: u64,
+        title: &str,
+        opts: &TreeOptions,
+        at: Option<(f64, f64)>,
+    ) -> Result<UiNode> {
+        let desktop = self.bus.is_none();
+        // A freshly started app may not have registered yet, nor apps that
+        // only now see accessibility turned on.
         let deadline = Instant::now() + Duration::from_secs(5);
         let apps = loop {
-            let apps = self.apps.lock().unwrap().clone();
+            let apps = if desktop {
+                let conn = self.conn.clone();
+                let registry = (
+                    REGISTRY.to_string(),
+                    OwnedObjectPath::try_from(ROOT).unwrap(),
+                );
+                self.block_on(async move { children(&conn, &registry).await })
+            } else {
+                self.apps.lock().unwrap().clone()
+            };
             if !apps.is_empty() || Instant::now() > deadline {
                 break apps;
             }
             std::thread::sleep(Duration::from_millis(100));
         };
         if apps.is_empty() {
+            if desktop && self.turned_on.is_some() {
+                bail!(
+                    "no app has registered with the desktop's accessibility bus. Accessibility \
+                     was off on this desktop, and is on for this session, but apps started \
+                     before then (Chromium, Firefox, Electron apps) only export their trees once \
+                     restarted; use screenshots and coordinates, or restart the app"
+                );
+            }
+            if desktop {
+                bail!(
+                    "no app has registered with the desktop's accessibility bus: their toolkits \
+                     may not support AT-SPI; use screenshots and coordinates"
+                );
+            }
             bail!(
                 "the app has not registered an accessibility tree: its toolkit may not support \
                  AT-SPI, or ignored AT_SPI_BUS_ADDRESS; use screenshots and coordinates"
@@ -192,18 +294,25 @@ impl A11y {
         }
         let conn = self.conn.clone();
         let (refs, raws) = self.block_on(async {
-            let root = find_window(&conn, &apps, window).await?;
+            let root = find_window(&conn, &apps, title).await?;
             anyhow::Ok(walk(&conn, root, opts).await)
         })?;
         // Less the toplevel's own position in them: a client-side shadow.
-        let origin = raws[0]
+        let own = raws[0]
             .extents
             .map_or((0.0, 0.0), |(x, y, _, _)| (x as f64, y as f64));
+        let (dx, dy) = at.unwrap_or_default();
+        let origin = (own.0 - dx, own.1 - dy);
         let mut elements = Vec::new();
-        let tree = map::build(&raws, 0, origin, &mut elements);
+        let mut tree = map::build(&raws, 0, origin, &mut elements);
+        if at.is_none() {
+            unplace(&mut tree);
+            elements.iter_mut().for_each(|e| e.frame = None);
+        }
         self.last = Some(Read {
-            window: window.id,
+            window,
             origin,
+            placed: at.is_some(),
             refs,
             raws,
             elements,
@@ -237,6 +346,13 @@ impl A11y {
     /// scrolled element is found where it is now.
     pub fn center(&self, id: &str) -> Result<(u64, f64, f64)> {
         let (read, r, _, mapped) = self.element(id)?;
+        if !read.placed {
+            bail!(
+                "where {id} is on screen is unknown: Wayland doesn't tell apps where their \
+                 windows are. Use its own actions (element_action, set_value), or click it where \
+                 the screenshot shows it"
+            );
+        }
         let fresh = self
             .block_on(extents(&self.conn, r))
             .filter(|&(_, _, w, h)| w > 0 && h > 0)
@@ -367,10 +483,22 @@ impl A11y {
     }
 }
 
+/// Drops every frame from a tree whose window's place is unknown.
+fn unplace(node: &mut UiNode) {
+    node.frame = None;
+    node.children.iter_mut().for_each(unplace);
+}
+
 impl Drop for A11y {
     /// Leaves the bus before ending its daemon, which zbus would otherwise
     /// log as an error.
     fn drop(&mut self) {
+        // Accessibility goes back off when this turned it on.
+        if let Some(session) = self.turned_on.take() {
+            runtime().block_on(async move {
+                let _ = tokio::time::timeout(CALL, set_status(&session, false)).await;
+            });
+        }
         let conn = self.conn.clone();
         let bus = self.bus.clone();
         runtime().spawn(async move {
@@ -378,6 +506,40 @@ impl Drop for A11y {
             drop(bus);
         });
     }
+}
+
+/// Whether the desktop's accessibility is on: `org.a11y.Status.IsEnabled`.
+async fn status(session: &Connection) -> zbus::Result<bool> {
+    let reply = tokio::time::timeout(
+        CALL,
+        session.call_method(
+            Some(A11Y_BUS),
+            A11Y_BUS_PATH,
+            Some(PROPERTIES),
+            "Get",
+            &(A11Y_STATUS, "IsEnabled"),
+        ),
+    )
+    .await
+    .map_err(|_| zbus::Error::Failure("IsEnabled timed out".into()))??;
+    let v: OwnedValue = reply.body().deserialize()?;
+    Ok(bool::try_from(&*v).unwrap_or(false))
+}
+
+async fn set_status(session: &Connection, on: bool) -> zbus::Result<()> {
+    tokio::time::timeout(
+        CALL,
+        session.call_method(
+            Some(A11Y_BUS),
+            A11Y_BUS_PATH,
+            Some(PROPERTIES),
+            "Set",
+            &(A11Y_STATUS, "IsEnabled", Value::Bool(on)),
+        ),
+    )
+    .await
+    .map_err(|_| zbus::Error::Failure("setting IsEnabled timed out".into()))??;
+    Ok(())
 }
 
 /// Calls `member` on `r` and reads its reply, within [`CALL`].
@@ -465,9 +627,8 @@ async fn children(conn: &Connection, r: &ObjRef) -> Vec<ObjRef> {
         .collect()
 }
 
-/// The toplevel that is `window`: by its title, else the active one, else
-/// the first shown.
-async fn find_window(conn: &Connection, apps: &[ObjRef], window: &WindowInfo) -> Result<ObjRef> {
+/// The toplevel titled `title`, else the active one, else the first shown.
+async fn find_window(conn: &Connection, apps: &[ObjRef], title: &str) -> Result<ObjRef> {
     let mut best: Option<(u32, ObjRef)> = None;
     for app in apps.iter().rev() {
         for top in children(conn, app).await {
@@ -480,7 +641,7 @@ async fn find_window(conn: &Connection, apps: &[ObjRef], window: &WindowInfo) ->
             if states.hidden() {
                 continue;
             }
-            let title = window.title.trim();
+            let title = title.trim();
             let score = if !title.is_empty() && name.trim() == title {
                 4
             } else if !title.is_empty() && !name.is_empty() && title.contains(name.trim()) {

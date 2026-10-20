@@ -315,6 +315,26 @@ pub fn named_evdev(k: NamedKey) -> u16 {
     }
 }
 
+/// The evdev codes a chord presses, in order: its modifiers, then its key
+/// (with shift added when the key's character needs it).
+pub fn chord_evdev(chord: &Chord) -> Result<Vec<u16>> {
+    let mut mods = chord.modifiers;
+    let key = match chord.key {
+        None => None,
+        Some(Key::Named(k)) => Some(named_evdev(k)),
+        Some(Key::Char(c)) => match us_key(c) {
+            Some((code, shift)) => {
+                mods.shift |= shift;
+                Some(code)
+            }
+            None => bail!("a US keyboard has no key for \"{c}\" to press; type_text types it"),
+        },
+    };
+    let mut codes = modifier_evdev(mods);
+    codes.extend(key);
+    Ok(codes)
+}
+
 /// The evdev codes of held modifiers, in pressing order.
 pub fn modifier_evdev(m: Modifiers) -> Vec<u16> {
     let mut v = Vec::new();

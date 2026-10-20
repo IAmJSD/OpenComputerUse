@@ -93,7 +93,7 @@ impl Platform for WindowsPlatform {
 
     fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>> {
         if spec.screen {
-            return Ok(Box::new(screen::ScreenSession));
+            return Ok(Box::new(screen::ScreenSession::new()?));
         }
         if spec.active_window {
             return attach_active(spec);

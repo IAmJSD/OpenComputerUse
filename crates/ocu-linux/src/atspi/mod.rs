@@ -7,4 +7,6 @@ pub mod map;
 mod bus;
 
 #[cfg(target_os = "linux")]
+pub(crate) use bus::runtime;
+#[cfg(target_os = "linux")]
 pub use bus::A11y;

@@ -129,7 +129,7 @@ fn spawn_with_devtools(bundle: &Path, spec: &LaunchSpec, running: bool) -> Optio
     }
 }
 
-fn frontmost_pid() -> Option<i32> {
+pub(crate) fn frontmost_pid() -> Option<i32> {
     NSWorkspace::sharedWorkspace()
         .frontmostApplication()
         .map(|a| a.processIdentifier())
@@ -762,7 +762,7 @@ impl MacSession {
 /// says it was set and changes nothing, and it lists its items only while
 /// its menu is open: so the menu is opened, the item pressed, and the menu
 /// is gone again a moment later.
-fn choose_native(el: &Element, value: &str) -> Result<()> {
+pub(crate) fn choose_native(el: &Element, value: &str) -> Result<()> {
     let is = |s: &str| s.trim().eq_ignore_ascii_case(value.trim());
     if el.string("AXValue").is_some_and(|v| is(&v)) {
         return Ok(());

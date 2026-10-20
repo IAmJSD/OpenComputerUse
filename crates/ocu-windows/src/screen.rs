@@ -1,6 +1,7 @@
 //! A session on the whole desktop: each display is a window, pictures are
 //! the screen as it shows, and input is real (`SendInput`), as from the
-//! user's own mouse and keyboard.
+//! user's own mouse and keyboard. The tree is the foreground window's, in
+//! the display's coordinates.
 
 use std::collections::BTreeMap;
 use std::thread::sleep;
@@ -12,13 +13,15 @@ use windows::Win32::Foundation::{LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
 };
+use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use ocu_core::keys::{parse_chord, parse_chords, parse_held, Modifiers};
 use ocu_core::{
-    pick_window, Action, CursorPosition, Description, Rect, Screenshot, Session, WindowInfo,
+    pick_window, Action, CursorPosition, Description, MouseButton, Rect, Screenshot, Session,
+    TreeOptions, UiNode, WindowInfo,
 };
 
-use crate::{capture, real};
+use crate::{capture, real, uia};
 
 /// `MONITORINFOF_PRIMARY`.
 const PRIMARY: u32 = 1;
@@ -66,9 +69,17 @@ fn displays() -> Vec<WindowInfo> {
     out.into_iter().map(|(w, _)| w).collect()
 }
 
-pub struct ScreenSession;
+pub struct ScreenSession {
+    uia: uia::Uia,
+}
 
 impl ScreenSession {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            uia: uia::Uia::new()?,
+        })
+    }
+
     fn window(&self, window: Option<u64>) -> Result<WindowInfo> {
         pick_window(&displays(), window).cloned()
     }
@@ -97,6 +108,28 @@ impl Session for ScreenSession {
 
     fn screenshot(&mut self, window: Option<u64>) -> Result<Screenshot> {
         capture::capture_screen(&self.window(window)?)
+    }
+
+    /// The foreground window's tree, in `window`'s (a display's)
+    /// coordinates.
+    fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
+        let w = self.window(window)?;
+        let front = unsafe { GetForegroundWindow() };
+        if front.is_invalid() {
+            bail!("no window has focus");
+        }
+        self.uia
+            .tree(front.0 as usize as u64, (w.frame.x, w.frame.y), opts)
+    }
+
+    fn element_point(
+        &mut self,
+        window: Option<u64>,
+        element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        let w = self.window(window)?;
+        let (x, y) = self.uia.center(element, (w.frame.x, w.frame.y))?;
+        Ok((Some(w.id), x, y))
     }
 
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
@@ -150,13 +183,15 @@ impl Session for ScreenSession {
                 sleep(Duration::from_millis(*ms));
                 Ok(())
             }
-            Action::ElementAction { .. }
-            | Action::ClickElement { .. }
-            | Action::SetValue { .. }
-            | Action::Focus { .. } => bail!(
-                "a screen session has no accessibility tree; use coordinates, or start a session \
-                 on the app"
-            ),
+            Action::ElementAction { element, name } => self
+                .uia
+                .perform(element, name.as_deref().unwrap_or("press")),
+            Action::SetValue { element, value } => self.uia.set_value(element, value),
+            Action::Focus { element } => {
+                let (x, y) = self.uia.center(element, (w.frame.x, w.frame.y))?;
+                real::click(at(x, y), MouseButton::Left, 1, Modifiers::default())
+            }
+            Action::ClickElement { .. } => bail!("click elements by their point"),
             Action::ChooseFile { .. } => {
                 bail!("a screen session can't answer file dialogs; click through them")
             }

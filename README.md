@@ -33,7 +33,7 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 
 | Tool | What it does |
 | --- | --- |
-| `start_session` | Start an app (a `.app` path, bundle id or name on macOS; an executable elsewhere) and return a session id and its windows; `foreground: true` (macOS, Windows) brings it to the front for every action instead of keeping it in the background, and `active_window: true` (macOS, Windows) attaches to the window in front instead of starting an app; `display: "wayland"` (Linux) runs it on a headless Wayland compositor instead of Xvfb; `screen: true` drives the whole screen instead (see [The whole screen](#the-whole-screen)) |
+| `start_session` | Start an app (a `.app` path, bundle id or name on macOS; an executable elsewhere) and return a session id and its windows; `foreground: true` (macOS, Windows) brings it to the front for every action instead of keeping it in the background, and `active_window: true` (macOS, Windows) attaches to the window in front instead of starting an app; `display: "wayland"` (Linux) runs it on a headless Wayland compositor instead of Xvfb; `screen: true` drives the whole screen instead, with the focused window's tree (see [The whole screen](#the-whole-screen)) |
 | `end_session`, `list_sessions`, `list_windows` | Manage sessions |
 | `screenshot` | Capture a session window, even a covered one; `ui_tree: true` adds the accessibility tree |
 | `get_ui_tree` | One line per element: `[e12] Button "Save" @(x,y wxh) actions=press` |
@@ -66,18 +66,40 @@ last pointer action left theirs.
 `start_session` with `screen: true` drives the computer's whole screen
 instead of one app, for apps that ignore background input, such as games
 that read raw input. Each display is a window, coordinates are the
-display's, screenshots show the screen as it is, and there is no
-accessibility tree. Input is real: it moves your pointer and goes to
-whatever is under it or has focus, as yours does.
+display's, and screenshots show the screen as it is. Input is real: it moves
+your pointer and goes to whatever is under it or has focus, as yours does.
+The accessibility tree is the focused window's, with frames in the
+display's coordinates, so element ids work with `click`, `set_value` and
+`element_action` as in any session.
 
-- **macOS:** displays through ScreenCaptureKit, and events posted at the HID
-  event tap. Needs the same Accessibility and Screen Recording permissions.
-- **Windows:** monitors captured with `BitBlt`, and input through
-  `SendInput`, with keys as scan codes, which DirectInput games read. An app
-  running as administrator only takes input from another that is.
-- **Linux:** the X11 desktop in `DISPLAY`, through XTEST. A Wayland desktop
-  lets no program read the screen or send input to the others, so screen
-  sessions are refused there.
+- **macOS:** displays through ScreenCaptureKit, events posted at the HID
+  event tap, and the frontmost app's focused window through Accessibility.
+  Needs the same Accessibility and Screen Recording permissions.
+- **Windows:** monitors captured with `BitBlt`, input through `SendInput`
+  with keys as scan codes, which DirectInput games read, and the foreground
+  window through UI Automation. An app running as administrator only takes
+  input from another that is.
+- **Linux on X11:** the desktop in `DISPLAY`, through XTEST, and the focused
+  window from the desktop's own AT-SPI bus, placed by `_NET_ACTIVE_WINDOW`.
+  Where the desktop has accessibility off (GNOME's and KDE's default), the
+  session turns it on (`org.a11y.Status.IsEnabled`, as a screen reader does)
+  and back off when it ends. GTK apps export their trees either way;
+  Chromium, Firefox and Electron apps only once started while it is on, so
+  ones already running need a restart to show theirs.
+- **Linux on Wayland:** Wayland lets no program read the screen or send
+  input to others by itself, so screen sessions go through the desktop
+  portal, which GNOME and KDE Plasma provide. The desktop asks once to let
+  OpenComputerUse control the screen; its restore token is kept in
+  `$XDG_STATE_HOME/opencomputeruse` so later sessions don't ask again where
+  the desktop allows that. Input goes through the RemoteDesktop portal
+  (pointer moves through each monitor's ScreenCast stream, characters by
+  keysym so the user's layout is respected) and pictures through the
+  Screenshot portal, cut to the monitor and scaled to its logical size.
+  Wayland never tells anyone where a window is, so the tree has no frames
+  there: element actions and `set_value` work, clicks go by the screenshot,
+  and `cursor_position` only knows where the session last put the pointer.
+  Compositors without a RemoteDesktop portal (Sway, Hyprland) are not
+  supported yet.
 
 The `*_start_session` tools for devices return an ordinary session id, and
 every other tool works on it (see [Phones, tablets, simulators and
