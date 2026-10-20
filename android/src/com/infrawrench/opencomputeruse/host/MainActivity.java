@@ -141,8 +141,6 @@ public final class MainActivity extends Activity {
             where.append(a.ip).append("  ").append(a.network).append('\n');
         }
         root.addView(text("This phone's addresses:\n" + where.toString().trim(), 14, false));
-        root.addView(text("There's no TLS, so serve over Tailscale or another network you trust.",
-                12, false));
 
         heading("Devices");
         root.addView(button("Generate key…", v -> askForDevice()));

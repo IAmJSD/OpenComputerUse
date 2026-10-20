@@ -599,13 +599,12 @@ The API:
   `claude mcp add --transport http <name> <url>/mcp --header "Authorization: Bearer <key>"`.
 - Every request needs `Authorization: Bearer <key>`, except `GET /health`.
 
-There is no TLS, so use it over Tailscale or another trusted network. On
-Linux and Windows the window serves while it is open, `opencomputeruse
+On Linux and Windows the window serves while it is open, `opencomputeruse
 serve` runs the server without it, and `serve --install` starts that at
 login.
 
 It listens on every network adapter unless you limit it, for example so it
-is reachable over Tailscale but not on a coffee shop's Wi-Fi. Untick
+is reachable only over Tailscale. Untick
 **Every network adapter to every host** in the app, pass
 `serve --listen-on`, or set `http.listen_on` in the settings file to a list
 of:
