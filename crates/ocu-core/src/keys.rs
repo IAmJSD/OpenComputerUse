@@ -16,6 +16,26 @@ impl Modifiers {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+
+    /// Both sets held at once.
+    pub fn with(self, other: Self) -> Self {
+        Self {
+            shift: self.shift || other.shift,
+            ctrl: self.ctrl || other.ctrl,
+            alt: self.alt || other.alt,
+            meta: self.meta || other.meta,
+        }
+    }
+
+    /// These without `other`'s.
+    pub fn without(self, other: Self) -> Self {
+        Self {
+            shift: self.shift && !other.shift,
+            ctrl: self.ctrl && !other.ctrl,
+            alt: self.alt && !other.alt,
+            meta: self.meta && !other.meta,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +83,18 @@ pub fn parse_chords(s: &str) -> Result<Vec<Chord>> {
         bail!("no keys given");
     }
     Ok(chords)
+}
+
+/// One chord to hold down, as `key_down` takes it: "shift", "w", "ctrl+c".
+pub fn parse_held(s: &str) -> Result<Chord> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("no key given");
+    }
+    if s.split_whitespace().nth(1).is_some() {
+        bail!("\"{s}\" is several chords; hold one at a time (\"ctrl+shift\", not \"ctrl shift\")");
+    }
+    parse_chord(s)
 }
 
 pub fn parse_chord(s: &str) -> Result<Chord> {
@@ -304,6 +336,27 @@ pub fn modifier_evdev(m: Modifiers) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_chords_are_one_at_a_time() {
+        let c = parse_held(" ctrl+c ").unwrap();
+        assert!(c.modifiers.ctrl && c.key == Some(Key::Char('c')));
+        assert_eq!(parse_held("shift").unwrap().key, None);
+        assert!(parse_held("ctrl shift").is_err());
+        assert!(parse_held("").is_err());
+    }
+
+    #[test]
+    fn modifiers_combine_and_release() {
+        let shift = parse_chord("shift").unwrap().modifiers;
+        let ctrl_shift = parse_chord("ctrl+shift").unwrap().modifiers;
+        assert_eq!(shift.with(ctrl_shift), ctrl_shift);
+        assert_eq!(
+            ctrl_shift.without(shift),
+            parse_chord("ctrl").unwrap().modifiers
+        );
+        assert!(shift.without(ctrl_shift).is_empty());
+    }
 
     #[test]
     fn chords() {

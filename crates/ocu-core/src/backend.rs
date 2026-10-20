@@ -84,6 +84,13 @@ pub trait Session: Send {
 
     fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()>;
 
+    /// Where the pointer is, when the backend can read it: a display of the
+    /// session's own, or the real cursor. `None` leaves it to the service,
+    /// which knows where the session's last action put it.
+    fn cursor(&mut self, _window: Option<u64>) -> Result<Option<CursorPosition>> {
+        Ok(None)
+    }
+
     /// Something about the app's state worth telling the caller after an
     /// action, such as a file panel waiting for [`Action::ChooseFile`].
     fn notice(&mut self) -> Option<String> {

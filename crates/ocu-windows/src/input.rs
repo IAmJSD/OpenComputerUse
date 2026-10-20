@@ -97,6 +97,62 @@ pub fn click(top: HWND, p: POINT, button: MouseButton, count: u32, m: Modifiers)
     });
 }
 
+fn button_messages(button: MouseButton) -> (u32, u32, usize) {
+    match button {
+        MouseButton::Left => (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON),
+        MouseButton::Right => (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON),
+        MouseButton::Middle => (WM_MBUTTONDOWN, WM_MBUTTONUP, MK_MBUTTON),
+    }
+}
+
+/// Presses `button` at `p` in the control under it, and returns that
+/// control: a real press captures the mouse to it, so the moves and the
+/// release that follow go there too.
+pub fn button_down(top: HWND, p: POINT, button: MouseButton, m: Modifiers) -> HWND {
+    let (h, local) = target(top, p);
+    let at = lparam_xy(local.x, local.y);
+    let (down, _, flag) = button_messages(button);
+    with_modifiers(top, m, || {
+        post(h, WM_MOUSEMOVE, mk(m), at);
+        post(h, down, flag | mk(m), at);
+    });
+    h
+}
+
+/// A move with `button` held, to `pressed`, the control it went down in.
+pub fn move_held(top: HWND, pressed: HWND, p: POINT, button: MouseButton, m: Modifiers) {
+    let mut local = p;
+    let _ = unsafe { ScreenToClient(pressed, &mut local) };
+    let (_, _, flag) = button_messages(button);
+    with_modifiers(top, m, || {
+        post(
+            pressed,
+            WM_MOUSEMOVE,
+            flag | mk(m),
+            lparam_xy(local.x, local.y),
+        )
+    });
+}
+
+/// Releases `button` at `p`, in `pressed` when the press is known, else in
+/// the control under the point.
+pub fn button_up(top: HWND, pressed: Option<HWND>, p: POINT, button: MouseButton, m: Modifiers) {
+    let (h, local) = match pressed {
+        Some(h) => {
+            let mut local = p;
+            let _ = unsafe { ScreenToClient(h, &mut local) };
+            (h, local)
+        }
+        None => target(top, p),
+    };
+    let at = lparam_xy(local.x, local.y);
+    let (_, up, flag) = button_messages(button);
+    with_modifiers(top, m, || {
+        post(h, WM_MOUSEMOVE, flag | mk(m), at);
+        post(h, up, mk(m), at);
+    });
+}
+
 pub fn drag(top: HWND, from: POINT, to: POINT, button: MouseButton, m: Modifiers) {
     let (h, a) = target(top, from);
     let (down, up, flag) = match button {
@@ -193,7 +249,7 @@ fn key_lparam(vk: VIRTUAL_KEY, up: bool) -> LPARAM {
     LPARAM(l)
 }
 
-fn named_vk(k: NamedKey) -> VIRTUAL_KEY {
+pub(crate) fn named_vk(k: NamedKey) -> VIRTUAL_KEY {
     match k {
         NamedKey::Enter => VK_RETURN,
         NamedKey::Tab => VK_TAB,
@@ -215,8 +271,9 @@ fn named_vk(k: NamedKey) -> VIRTUAL_KEY {
     }
 }
 
-pub fn press(top: HWND, chord: &Chord) {
-    let h = focus_target(top);
+/// What a chord presses: its key (if the layout has one), the character
+/// it types, and its modifiers with shift added where the key needs it.
+fn chord_key(chord: &Chord) -> (Option<VIRTUAL_KEY>, Option<char>, Modifiers) {
     let mut m = chord.modifiers;
     let (vk, text) = match chord.key {
         None => (None, None),
@@ -233,50 +290,99 @@ pub fn press(top: HWND, chord: &Chord) {
             }
         }
     };
-    // Alt combinations are system keys.
-    let (down, up) = if m.alt {
+    (vk, text, m)
+}
+
+fn modifier_vks(m: Modifiers) -> Vec<VIRTUAL_KEY> {
+    [
+        (m.ctrl, VK_CONTROL),
+        (m.alt, VK_MENU),
+        (m.shift, VK_SHIFT),
+        (m.meta, VK_LWIN),
+    ]
+    .into_iter()
+    .filter_map(|(on, vk)| on.then_some(vk))
+    .collect()
+}
+
+/// The WM_CHAR a key press would make, which a posted key does not:
+/// TranslateMessage makes it from a real key only.
+fn post_char(h: HWND, vk: VIRTUAL_KEY, text: Option<char>, m: Modifiers) {
+    if let Some(c) = text.filter(|_| !m.ctrl && !m.alt && !m.meta) {
+        let shown = if m.shift {
+            c.to_uppercase().next().unwrap_or(c)
+        } else {
+            c
+        };
+        post(h, WM_CHAR, shown as usize, key_lparam(vk, false));
+    }
+    if vk == VK_RETURN && !m.ctrl && !m.alt {
+        post(h, WM_CHAR, '\r' as usize, key_lparam(vk, false));
+    }
+}
+
+fn post_text(h: HWND, c: char) {
+    let mut buf = [0u16; 2];
+    for unit in c.encode_utf16(&mut buf) {
+        post(h, WM_CHAR, *unit as usize, LPARAM(1));
+    }
+}
+
+/// Alt combinations are system keys.
+fn key_messages(m: Modifiers) -> (u32, u32) {
+    if m.alt {
         (WM_SYSKEYDOWN, WM_SYSKEYUP)
     } else {
         (WM_KEYDOWN, WM_KEYUP)
-    };
+    }
+}
+
+pub fn press(top: HWND, chord: &Chord, held: Modifiers) {
+    let h = focus_target(top);
+    let (vk, text, mut m) = chord_key(chord);
+    let mods = modifier_vks(m);
+    m = m.with(held);
+    let (down, up) = key_messages(m);
     with_modifiers(top, m, || {
-        let mods: Vec<VIRTUAL_KEY> = [
-            (m.ctrl, VK_CONTROL),
-            (m.alt, VK_MENU),
-            (m.shift, VK_SHIFT),
-            (m.meta, VK_LWIN),
-        ]
-        .into_iter()
-        .filter_map(|(on, vk)| on.then_some(vk))
-        .collect();
         for &mk in &mods {
             post(h, down, mk.0 as usize, key_lparam(mk, false));
         }
         if let Some(vk) = vk {
             post(h, down, vk.0 as usize, key_lparam(vk, false));
-            // TranslateMessage would make the WM_CHAR from a real key; a
-            // posted key bypasses it, so send the character too when the
-            // chord types one.
-            if let Some(c) = text.filter(|_| !m.ctrl && !m.alt && !m.meta) {
-                let shown = if m.shift {
-                    c.to_uppercase().next().unwrap_or(c)
-                } else {
-                    c
-                };
-                post(h, WM_CHAR, shown as usize, key_lparam(vk, false));
-            }
-            if vk == VK_RETURN && !m.ctrl && !m.alt {
-                post(h, WM_CHAR, '\r' as usize, key_lparam(vk, false));
-            }
+            post_char(h, vk, text, m);
             post(h, up, vk.0 as usize, key_lparam(vk, true));
         } else if let Some(c) = text {
-            let mut buf = [0u16; 2];
-            for unit in c.encode_utf16(&mut buf) {
-                post(h, WM_CHAR, *unit as usize, LPARAM(1));
-            }
+            post_text(h, c);
         }
         for &mk in mods.iter().rev() {
             post(h, up, mk.0 as usize, key_lparam(mk, true));
+        }
+    });
+}
+
+/// Presses (`down`) or releases a chord's keys in the focused control:
+/// modifiers first on the way down, last on the way up. `held` are the
+/// modifiers already down, which the app's key state shows meanwhile.
+pub fn hold(top: HWND, chord: &Chord, down: bool, held: Modifiers) {
+    let h = focus_target(top);
+    let (vk, text, m) = chord_key(chord);
+    let mut vks = modifier_vks(m);
+    vks.extend(vk);
+    let all = m.with(held);
+    let (key_down, key_up) = key_messages(all);
+    with_modifiers(top, all, || {
+        if down {
+            for &k in &vks {
+                post(h, key_down, k.0 as usize, key_lparam(k, false));
+            }
+            match vk {
+                Some(vk) => post_char(h, vk, text, all),
+                None => text.into_iter().for_each(|c| post_text(h, c)),
+            }
+        } else {
+            for &k in vks.iter().rev() {
+                post(h, key_up, k.0 as usize, key_lparam(k, true));
+            }
         }
     });
 }
@@ -292,13 +398,9 @@ pub fn type_text(top: HWND, text: &str) {
                     modifiers: Modifiers::default(),
                     key: Some(Key::Named(NamedKey::Enter)),
                 },
+                Modifiers::default(),
             ),
-            c => {
-                let mut buf = [0u16; 2];
-                for unit in c.encode_utf16(&mut buf) {
-                    post(h, WM_CHAR, *unit as usize, LPARAM(1));
-                }
-            }
+            c => post_text(h, c),
         }
         sleep(Duration::from_millis(2));
     }

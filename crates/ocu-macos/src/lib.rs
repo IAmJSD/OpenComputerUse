@@ -14,6 +14,8 @@ mod hook;
 mod input;
 pub mod lock;
 mod panel;
+mod real;
+mod screen;
 mod session;
 mod sky;
 mod stream;
@@ -63,6 +65,9 @@ impl Platform for MacPlatform {
             anyhow::bail!(
                 "OpenComputerUse needs the Accessibility permission. Open the OpenComputerUse app to grant it, then try again."
             );
+        }
+        if spec.screen {
+            return Ok(Box::new(screen::ScreenSession::default()));
         }
         if spec.active_window {
             return Ok(Box::new(session::attach_active(spec)?));

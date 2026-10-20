@@ -62,7 +62,7 @@ fn gesture_id() -> i64 {
         .unwrap_or(1)
 }
 
-fn flags(m: Modifiers) -> CGEventFlags {
+pub(crate) fn flags(m: Modifiers) -> CGEventFlags {
     let mut f = 0;
     if m.shift {
         f |= CGEventFlags::MaskShift.0;
@@ -79,7 +79,7 @@ fn flags(m: Modifiers) -> CGEventFlags {
     CGEventFlags(f)
 }
 
-fn source() -> Option<CFRetained<CGEventSource>> {
+pub(crate) fn source() -> Option<CFRetained<CGEventSource>> {
     CGEventSource::new(CGEventSourceStateID::HIDSystemState)
 }
 
@@ -130,7 +130,9 @@ fn mouse_event_in(
     Ok(e)
 }
 
-fn button_types(button: MouseButton) -> (CGEventType, CGEventType, CGEventType, CGMouseButton) {
+pub(crate) fn button_types(
+    button: MouseButton,
+) -> (CGEventType, CGEventType, CGEventType, CGMouseButton) {
     match button {
         MouseButton::Left => (
             CGEventType::LeftMouseDown,
@@ -288,6 +290,107 @@ pub fn drag(
     Ok(())
 }
 
+/// Presses (`down`) or releases `button` at `at`, holding `modifiers`.
+pub fn button(
+    target: &Target,
+    at: CGPoint,
+    button: MouseButton,
+    down: bool,
+    modifiers: Modifiers,
+) -> Result<()> {
+    let (press, release, _, b) = button_types(button);
+    let gesture = gesture_id();
+    if down {
+        // A move first, as for a click: AppKit hit-tests the press against
+        // where it last saw the pointer.
+        post(
+            target,
+            &*mouse_event_in(
+                target,
+                CGEventType::MouseMoved,
+                at,
+                CGMouseButton::Left,
+                0,
+                gesture,
+            )?,
+        );
+        sleep(Duration::from_millis(12));
+    }
+    let ty = if down { press } else { release };
+    let e = mouse_event_in(target, ty, at, b, 1, gesture)?;
+    CGEvent::set_flags(Some(&e), flags(modifiers));
+    post(target, &e);
+    Ok(())
+}
+
+/// A move with `button` held: a drag to `at`.
+pub fn move_held(
+    target: &Target,
+    at: CGPoint,
+    button: MouseButton,
+    modifiers: Modifiers,
+) -> Result<()> {
+    let (_, _, dragged, b) = button_types(button);
+    let e = mouse_event(target, dragged, at, b)?;
+    CGEvent::set_flags(Some(&e), flags(modifiers));
+    post(target, &e);
+    Ok(())
+}
+
+/// The key codes a chord presses, modifiers first, with the flags its
+/// events carry and the text its key types.
+pub(crate) fn chord_codes(chord: &Chord) -> (Vec<u16>, Modifiers, Option<char>) {
+    let (code, shifted, text) = match chord.key {
+        None => (None, false, None),
+        Some(Key::Named(k)) => (Some(named_code(k)), false, None),
+        Some(Key::Char(c)) => match char_code(c) {
+            Some((code, shift)) => (Some(code), shift, None),
+            // Not on a US keyboard: send it as text on a neutral key.
+            None => (Some(0), false, Some(c)),
+        },
+    };
+    let mut m = chord.modifiers;
+    m.shift |= shifted;
+    let mut codes = modifier_codes(m);
+    codes.extend(code);
+    (codes, m, text)
+}
+
+/// Presses (`down`) or releases a chord's keys: modifiers first on the way
+/// down, last on the way up. `held` are modifiers already down, which every
+/// event's flags carry.
+pub fn hold(target: &Target, chord: &Chord, down: bool, held: Modifiers) -> Result<()> {
+    let (codes, m, text) = chord_codes(chord);
+    let (mods, key) = match codes.split_last() {
+        Some((k, mods)) if chord.key.is_some() => (mods, Some(*k)),
+        _ => (&codes[..], None),
+    };
+    let all = m.with(held);
+    let send = |code: u16, flags: Modifiers, text: Option<char>| -> Result<()> {
+        post(target, &*key_event(code, down, flags, text)?);
+        if target.paced {
+            sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    };
+    if down {
+        for &c in mods {
+            send(c, all, None)?;
+        }
+        if let Some(k) = key {
+            send(k, all, text)?;
+        }
+    } else {
+        if let Some(k) = key {
+            send(k, all, text)?;
+        }
+        for &c in mods.iter().rev() {
+            send(c, held, None)?;
+        }
+    }
+    Ok(())
+}
+
 /// Scrolls as a run of wheel notches (line units), the way a real wheel
 /// arrives: a single large pixel delta is ignored by some background windows.
 pub fn scroll(target: &Target, at: CGPoint, dx: f64, dy: f64) -> Result<()> {
@@ -354,7 +457,7 @@ pub fn scroll(target: &Target, at: CGPoint, dx: f64, dy: f64) -> Result<()> {
     Ok(())
 }
 
-fn key_event(
+pub(crate) fn key_event(
     code: u16,
     down: bool,
     m: Modifiers,
@@ -371,7 +474,9 @@ fn key_event(
     Ok(e)
 }
 
-pub fn press(target: &Target, chord: &Chord) -> Result<()> {
+/// Presses and releases a chord. `held` are modifiers already down, which
+/// its events' flags carry without pressing them again.
+pub fn press(target: &Target, chord: &Chord, held: Modifiers) -> Result<()> {
     let (code, shifted, text) = match chord.key {
         None => (None, false, None),
         Some(Key::Named(k)) => (Some(named_code(k)), false, None),
@@ -383,7 +488,8 @@ pub fn press(target: &Target, chord: &Chord) -> Result<()> {
     };
     let mut m = chord.modifiers;
     m.shift |= shifted;
-    let mods = modifier_codes(m);
+    let mods = modifier_codes(m.without(held));
+    let m = m.with(held);
     for &mc in &mods {
         post(target, &*key_event(mc, true, m, None)?);
     }
@@ -393,7 +499,7 @@ pub fn press(target: &Target, chord: &Chord) -> Result<()> {
         post(target, &*key_event(code, false, m, text)?);
     }
     for &mc in mods.iter().rev() {
-        post(target, &*key_event(mc, false, Modifiers::default(), None)?);
+        post(target, &*key_event(mc, false, held, None)?);
     }
     Ok(())
 }
@@ -407,6 +513,7 @@ pub fn type_text(target: &Target, text: &str) -> Result<()> {
                     modifiers: Modifiers::default(),
                     key: Some(Key::Named(NamedKey::Enter)),
                 },
+                Modifiers::default(),
             )?,
             '\t' => press(
                 target,
@@ -414,6 +521,7 @@ pub fn type_text(target: &Target, text: &str) -> Result<()> {
                     modifiers: Modifiers::default(),
                     key: Some(Key::Named(NamedKey::Tab)),
                 },
+                Modifiers::default(),
             )?,
             _ => {
                 // The real key code where there is one (apps that read key
@@ -439,7 +547,7 @@ pub fn type_text(target: &Target, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn modifier_codes(m: Modifiers) -> Vec<u16> {
+pub(crate) fn modifier_codes(m: Modifiers) -> Vec<u16> {
     let mut v = Vec::new();
     if m.meta {
         v.push(55);
@@ -456,7 +564,7 @@ fn modifier_codes(m: Modifiers) -> Vec<u16> {
     v
 }
 
-fn named_code(k: NamedKey) -> u16 {
+pub(crate) fn named_code(k: NamedKey) -> u16 {
     match k {
         NamedKey::Enter => 36,
         NamedKey::Tab => 48,
@@ -485,7 +593,7 @@ fn named_code(k: NamedKey) -> u16 {
 }
 
 /// The US-layout key code for a character, and whether it needs shift.
-fn char_code(c: char) -> Option<(u16, bool)> {
+pub(crate) fn char_code(c: char) -> Option<(u16, bool)> {
     const PLAIN: &[(char, u16)] = &[
         ('a', 0),
         ('s', 1),

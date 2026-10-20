@@ -17,7 +17,7 @@ use objc2_app_kit::{
 use objc2_core_foundation::{CFBoolean, CGPoint};
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSString, NSURL};
 
-use ocu_core::keys::{parse_chord, parse_chords};
+use ocu_core::keys::{parse_chord, parse_chords, parse_held, Modifiers};
 use ocu_core::{
     pick_window, Action, Capturer, Description, LaunchSpec, MouseButton, Screenshot, Session,
     TreeOptions, UiNode, WindowInfo,
@@ -354,6 +354,8 @@ pub fn launch(spec: &LaunchSpec) -> Result<MacSession> {
         foreground: spec.foreground,
         pinned: None,
         pages,
+        held: Modifiers::default(),
+        pressed: None,
     };
     session.chromium = is_chromium(session.pid);
     // Wait for a window, putting the user's app back in front if this one
@@ -417,6 +419,8 @@ pub fn attach_active(spec: &LaunchSpec) -> Result<MacSession> {
         foreground: spec.foreground,
         pinned: Some(window.id),
         pages: None,
+        held: Modifiers::default(),
+        pressed: None,
     };
     if session.foreground {
         session.bring_forward(Some(&window));
@@ -501,6 +505,11 @@ pub struct MacSession {
     /// A browser's link that takes its pages' file choosers: the DevTools
     /// pipe of a Chromium browser, or Firefox's WebDriver BiDi.
     pages: Option<Box<dyn PageFiles>>,
+    /// Modifiers held by `key_down`. Events carry their own flags, so they
+    /// go on every event until released.
+    held: Modifiers,
+    /// The button `mouse_down` pressed, which makes moves drags.
+    pressed: Option<MouseButton>,
 }
 
 impl MacSession {
@@ -989,6 +998,13 @@ impl Session for MacSession {
         } else {
             t.prepare(user_focus())
         };
+        let held = self.held;
+        let mods = |modifiers: &Option<String>| -> Result<Modifiers> {
+            Ok(match modifiers.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => parse_chord(s)?.modifiers.with(held),
+                None => held,
+            })
+        };
         match action {
             Action::Click {
                 x,
@@ -997,10 +1013,7 @@ impl Session for MacSession {
                 count,
                 modifiers,
             } => {
-                let m = match modifiers.as_deref().filter(|s| !s.is_empty()) {
-                    Some(s) => parse_chord(s)?.modifiers,
-                    None => Default::default(),
-                };
+                let m = mods(modifiers)?;
                 // A panel is AppKit's own, whatever the app is built on.
                 let in_app = t.pid == self.pid;
                 if (self.chromium || self.gecko) && in_app && *button == MouseButton::Left {
@@ -1012,7 +1025,10 @@ impl Session for MacSession {
                     input::click(&t, Self::point(&w, *x, *y), *button, *count, m)
                 }
             }
-            Action::MoveMouse { x, y } => input::move_to(&t, Self::point(&w, *x, *y)),
+            Action::MoveMouse { x, y } => match self.pressed {
+                Some(b) => input::move_held(&t, Self::point(&w, *x, *y), b, held),
+                None => input::move_to(&t, Self::point(&w, *x, *y)),
+            },
             Action::Drag {
                 from_x,
                 from_y,
@@ -1020,27 +1036,44 @@ impl Session for MacSession {
                 to_y,
                 button,
                 modifiers,
-            } => {
-                let m = match modifiers.as_deref().filter(|s| !s.is_empty()) {
-                    Some(s) => parse_chord(s)?.modifiers,
-                    None => Default::default(),
-                };
-                input::drag(
-                    &t,
-                    Self::point(&w, *from_x, *from_y),
-                    Self::point(&w, *to_x, *to_y),
-                    *button,
-                    m,
-                )
-            }
+            } => input::drag(
+                &t,
+                Self::point(&w, *from_x, *from_y),
+                Self::point(&w, *to_x, *to_y),
+                *button,
+                mods(modifiers)?,
+            ),
             Action::Scroll { x, y, dx, dy } => input::scroll(&t, Self::point(&w, *x, *y), *dx, *dy),
             Action::TypeText { text } => input::type_text(&t, text),
             Action::PressKey { keys } => {
                 for chord in parse_chords(keys)? {
-                    input::press(&t, &chord)?;
+                    input::press(&t, &chord, held)?;
                     sleep(Duration::from_millis(30));
                 }
                 Ok(())
+            }
+            Action::MouseDown { x, y, button } => {
+                input::button(&t, Self::point(&w, *x, *y), *button, true, held)?;
+                self.pressed = Some(*button);
+                Ok(())
+            }
+            Action::MouseUp { x, y, button } => {
+                input::button(&t, Self::point(&w, *x, *y), *button, false, held)?;
+                if self.pressed == Some(*button) {
+                    self.pressed = None;
+                }
+                Ok(())
+            }
+            Action::KeyDown { key } => {
+                let chord = parse_held(key)?;
+                input::hold(&t, &chord, true, held)?;
+                self.held = held.with(chord.modifiers);
+                Ok(())
+            }
+            Action::KeyUp { key } => {
+                let chord = parse_held(key)?;
+                self.held = held.without(chord.modifiers);
+                input::hold(&t, &chord, false, self.held)
             }
             Action::ElementAction { .. }
             | Action::ClickElement { .. }

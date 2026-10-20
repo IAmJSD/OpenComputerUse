@@ -252,7 +252,7 @@ fn go_to_field(app_pid: i32) -> Option<Element> {
 
 fn key(target: &Target, chord: &str) -> Result<()> {
     for c in parse_chords(chord)? {
-        input::press(target, &c)?;
+        input::press(target, &c, Modifiers::default())?;
         sleep(Duration::from_millis(30));
     }
     Ok(())

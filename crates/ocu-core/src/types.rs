@@ -35,6 +35,12 @@ pub struct LaunchSpec {
     /// asking, and the apps it runs inside (a terminal, an editor).
     #[serde(default)]
     pub skip_pids: Vec<u32>,
+    /// Drive this computer's whole screen instead of one app: each display
+    /// is a window, coordinates are the display's, and input is real, so it
+    /// moves the user's pointer and reaches apps that read raw input (macOS,
+    /// Windows, and Linux on an X11 desktop). `app` is ignored.
+    #[serde(default)]
+    pub screen: bool,
     /// The virtual display's size, where the backend makes one (Linux).
     #[serde(default)]
     pub display_size: Option<Size>,
@@ -145,6 +151,18 @@ pub struct SessionInfo {
     /// Backend-specific facts worth showing, such as the X display.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub details: BTreeMap<String, String>,
+}
+
+/// Where a session's pointer is, in a window's coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CursorPosition {
+    pub window_id: u64,
+    pub x: f64,
+    pub y: f64,
+    /// Read from the pointer itself (a display of its own, or the real
+    /// cursor of a screen session), rather than where the session's last
+    /// action left it.
+    pub live: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -401,6 +419,30 @@ pub enum Action {
         #[serde(default)]
         paths: Vec<String>,
     },
+    /// Moves the pointer to a point and presses a button, holding it until
+    /// [`Action::MouseUp`]. Moves in between are drags.
+    MouseDown {
+        x: f64,
+        y: f64,
+        #[serde(default)]
+        button: MouseButton,
+    },
+    /// Moves the pointer to a point and releases a held button.
+    MouseUp {
+        x: f64,
+        y: f64,
+        #[serde(default)]
+        button: MouseButton,
+    },
+    /// Presses a key and holds it until [`Action::KeyUp`]: one chord as in
+    /// `PressKey` ("shift", "w", "ctrl+c"), its modifiers first.
+    KeyDown {
+        key: String,
+    },
+    /// Releases what [`Action::KeyDown`] pressed, its key first.
+    KeyUp {
+        key: String,
+    },
 }
 
 fn one() -> u32 {
@@ -413,7 +455,9 @@ impl Action {
         match *self {
             Action::Click { x, y, .. }
             | Action::MoveMouse { x, y }
-            | Action::Scroll { x, y, .. } => Some((x, y)),
+            | Action::Scroll { x, y, .. }
+            | Action::MouseDown { x, y, .. }
+            | Action::MouseUp { x, y, .. } => Some((x, y)),
             Action::Drag { to_x, to_y, .. } => Some((to_x, to_y)),
             _ => None,
         }

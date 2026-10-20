@@ -207,6 +207,52 @@ pub fn capture_composed(window: &WindowInfo, with: &[u64]) -> Result<Screenshot>
     shoot(window, &filter, &config)
 }
 
+/// The displays, the main one first, as windows in screen points.
+pub fn displays() -> Result<Vec<WindowInfo>> {
+    let content = shareable_content()?;
+    let main = objc2_core_graphics::CGMainDisplayID();
+    let mut out: Vec<WindowInfo> = unsafe { content.displays() }
+        .iter()
+        .map(|d| {
+            let (id, r) = unsafe { (d.displayID(), d.frame()) };
+            WindowInfo {
+                id: id as u64,
+                title: if id == main {
+                    format!("Display {id} (main)")
+                } else {
+                    format!("Display {id}")
+                },
+                frame: Rect {
+                    x: r.origin.x,
+                    y: r.origin.y,
+                    width: r.size.width,
+                    height: r.size.height,
+                },
+                on_screen: true,
+            }
+        })
+        .collect();
+    out.sort_by_key(|w| w.id != main as u64);
+    Ok(out)
+}
+
+/// A display as it shows, every window on it composed, at its size in
+/// points.
+pub fn capture_display(display: &WindowInfo) -> Result<Screenshot> {
+    let content = shareable_content()?;
+    let displays = unsafe { content.displays() };
+    let d = displays
+        .iter()
+        .find(|d| unsafe { d.displayID() } as u64 == display.id)
+        .ok_or_else(|| anyhow!("ScreenCaptureKit cannot see display {}", display.id))?;
+    let none = NSArray::<SCWindow>::new();
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &d, &none)
+    };
+    let config = unsafe { SCStreamConfiguration::new() };
+    shoot(display, &filter, &config)
+}
+
 pub(crate) fn find_window(content: &SCShareableContent, id: u64) -> Result<Retained<SCWindow>> {
     let windows = unsafe { content.windows() };
     windows

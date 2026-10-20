@@ -2,7 +2,9 @@
 //! (so they die with the MCP server), shown without activating and sent to
 //! the back (or, for a foreground session, brought to the front before
 //! every action); they are captured with `PrintWindow`, read and pressed
-//! through UI Automation, and sent input as window messages.
+//! through UI Automation, and sent input as window messages (or, in front,
+//! as real input through `SendInput`). A screen session drives the whole
+//! desktop with real input.
 #![cfg(windows)]
 
 mod capture;
@@ -11,6 +13,8 @@ mod hook;
 mod inject;
 mod input;
 mod launch;
+mod real;
+mod screen;
 mod stream;
 mod uia;
 
@@ -31,10 +35,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, ShowWindow, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE,
 };
 
-use ocu_core::keys::{parse_chord, parse_chords};
+use ocu_core::keys::{parse_chord, parse_chords, parse_held, Modifiers};
 use ocu_core::{
-    pick_window, Action, Capturer, Description, LaunchSpec, Platform, Screenshot, Session,
-    TreeOptions, UiNode, WindowInfo,
+    pick_window, Action, Capturer, CursorPosition, Description, LaunchSpec, MouseButton, Platform,
+    Screenshot, Session, TreeOptions, UiNode, WindowInfo,
 };
 
 pub struct WindowsPlatform {
@@ -88,6 +92,9 @@ impl Platform for WindowsPlatform {
     }
 
     fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>> {
+        if spec.screen {
+            return Ok(Box::new(screen::ScreenSession));
+        }
         if spec.active_window {
             return attach_active(spec);
         }
@@ -104,6 +111,8 @@ impl Platform for WindowsPlatform {
             closed: false,
             foreground: spec.foreground,
             pinned: None,
+            held: Modifiers::default(),
+            pressed: None,
         };
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut sent_back = Vec::new();
@@ -169,6 +178,8 @@ fn attach_active(spec: &LaunchSpec) -> Result<Box<dyn Session>> {
         closed: false,
         foreground: spec.foreground,
         pinned: Some(hwnd.0 as usize as u64),
+        held: Modifiers::default(),
+        pressed: None,
     };
     if session.foreground {
         bring_forward(hwnd);
@@ -251,11 +262,17 @@ pub struct WindowsSession {
     uia: uia::Uia,
     closed: bool,
     /// Started with [`LaunchSpec::foreground`]: the window is brought to the
-    /// front before every action.
+    /// front before every action, and input is real (`SendInput`).
     foreground: bool,
     /// The window the session was attached to, which comes first in its
     /// window list while it exists.
     pinned: Option<u64>,
+    /// Modifiers held down by `key_down`. Posted input leaves the app's key
+    /// state alone, so they are added to every posted action until released.
+    held: Modifiers,
+    /// The control a posted `mouse_down` pressed in (its handle, as window
+    /// ids are), and the button, until `mouse_up`.
+    pressed: Option<(u64, MouseButton)>,
 }
 
 impl WindowsSession {
@@ -350,6 +367,11 @@ impl Session for WindowsSession {
                 "foreground".into(),
                 "brought to the front before every action".into(),
             );
+            details.insert(
+                "input".into(),
+                "real (SendInput): it moves your pointer and reaches apps that read raw input"
+                    .into(),
+            );
         }
         Description {
             app: self.name.clone(),
@@ -403,22 +425,31 @@ impl Session for WindowsSession {
             bring_forward(top);
         }
         let origin = (w.frame.x, w.frame.y);
+        let real = self.foreground;
+        let held = self.held;
+        // Held keys are the OS's own with real input; posted input carries them.
+        let mods = |modifiers: &Option<String>| -> Result<Modifiers> {
+            let m = match modifiers.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => parse_chord(s)?.modifiers,
+                None => Modifiers::default(),
+            };
+            Ok(if real { m } else { m.with(held) })
+        };
+        let at = |x: f64, y: f64| Self::point(&w, x, y);
         match action {
             Action::ElementAction { element, name } => self
                 .uia
                 .perform(element, name.as_deref().unwrap_or("press"))?,
             Action::SetValue { element, value } => self.uia.set_value(element, value)?,
             Action::Focus { element } => {
-                // UIA's SetFocus would bring the window forward; a posted
-                // click focuses the control and leaves the window be.
+                // UIA's SetFocus would bring the window forward; a click
+                // focuses the control and leaves the window be.
                 let (x, y) = self.uia.center(element, origin)?;
-                input::click(
-                    top,
-                    Self::point(&w, x, y),
-                    ocu_core::MouseButton::Left,
-                    1,
-                    Default::default(),
-                );
+                if real {
+                    real::click(at(x, y), MouseButton::Left, 1, Modifiers::default())?;
+                } else {
+                    input::click(top, at(x, y), MouseButton::Left, 1, held);
+                }
             }
             Action::Click {
                 x,
@@ -427,13 +458,18 @@ impl Session for WindowsSession {
                 count,
                 modifiers,
             } => {
-                let m = match modifiers.as_deref().filter(|s| !s.is_empty()) {
-                    Some(s) => parse_chord(s)?.modifiers,
-                    None => Default::default(),
-                };
-                input::click(top, Self::point(&w, *x, *y), *button, *count, m);
+                let m = mods(modifiers)?;
+                if real {
+                    real::click(at(*x, *y), *button, *count, m)?;
+                } else {
+                    input::click(top, at(*x, *y), *button, *count, m);
+                }
             }
-            Action::MoveMouse { x, y } => input::move_to(top, Self::point(&w, *x, *y)),
+            Action::MoveMouse { x, y } => match self.pressed {
+                _ if real => real::move_to(at(*x, *y))?,
+                Some((h, b)) => input::move_held(top, capture::hwnd(h), at(*x, *y), b, held),
+                None => input::move_to(top, at(*x, *y)),
+            },
             Action::Drag {
                 from_x,
                 from_y,
@@ -442,33 +478,98 @@ impl Session for WindowsSession {
                 button,
                 modifiers,
             } => {
-                let m = match modifiers.as_deref().filter(|s| !s.is_empty()) {
-                    Some(s) => parse_chord(s)?.modifiers,
-                    None => Default::default(),
-                };
-                input::drag(
-                    top,
-                    Self::point(&w, *from_x, *from_y),
-                    Self::point(&w, *to_x, *to_y),
-                    *button,
-                    m,
-                )
+                let m = mods(modifiers)?;
+                let (from, to) = (at(*from_x, *from_y), at(*to_x, *to_y));
+                if real {
+                    real::drag(from, to, *button, m)?;
+                } else {
+                    input::drag(top, from, to, *button, m);
+                }
             }
             Action::Scroll { x, y, dx, dy } => {
-                input::scroll(top, Self::point(&w, *x, *y), *dx, *dy)
+                if real {
+                    real::scroll(at(*x, *y), *dx, *dy)?;
+                } else {
+                    input::scroll(top, at(*x, *y), *dx, *dy);
+                }
             }
-            Action::TypeText { text } => input::type_text(top, text),
+            Action::TypeText { text } => {
+                if real {
+                    real::type_text(text)?;
+                } else {
+                    input::type_text(top, text);
+                }
+            }
             Action::PressKey { keys } => {
                 for chord in parse_chords(keys)? {
-                    input::press(top, &chord);
+                    if real {
+                        real::press(&chord)?;
+                    } else {
+                        input::press(top, &chord, held);
+                    }
                     sleep(Duration::from_millis(30));
                 }
+            }
+            Action::MouseDown { x, y, button } => {
+                if real {
+                    real::button(at(*x, *y), *button, true)?;
+                } else {
+                    let h = input::button_down(top, at(*x, *y), *button, held);
+                    self.pressed = Some((h.0 as usize as u64, *button));
+                }
+            }
+            Action::MouseUp { x, y, button } => {
+                if real {
+                    real::button(at(*x, *y), *button, false)?;
+                } else {
+                    let pressed = match self.pressed {
+                        Some((h, b)) if b == *button => {
+                            self.pressed = None;
+                            Some(capture::hwnd(h))
+                        }
+                        _ => None,
+                    };
+                    input::button_up(top, pressed, at(*x, *y), *button, held);
+                }
+            }
+            Action::KeyDown { key } => {
+                let chord = parse_held(key)?;
+                if real {
+                    real::hold(&chord, true)?;
+                } else {
+                    input::hold(top, &chord, true, held);
+                }
+                self.held = held.with(chord.modifiers);
+            }
+            Action::KeyUp { key } => {
+                let chord = parse_held(key)?;
+                let still = held.without(chord.modifiers);
+                if real {
+                    real::hold(&chord, false)?;
+                } else {
+                    input::hold(top, &chord, false, still);
+                }
+                self.held = still;
             }
             Action::ClickElement { .. } | Action::Wait { .. } | Action::ChooseFile { .. } => {
                 unreachable!()
             }
         }
         Ok(())
+    }
+
+    fn cursor(&mut self, window: Option<u64>) -> Result<Option<CursorPosition>> {
+        if !self.foreground {
+            return Ok(None);
+        }
+        let w = self.window(window)?;
+        let p = real::cursor()?;
+        Ok(Some(CursorPosition {
+            window_id: w.id,
+            x: p.x as f64 - w.frame.x,
+            y: p.y as f64 - w.frame.y,
+            live: true,
+        }))
     }
 
     fn notice(&mut self) -> Option<String> {

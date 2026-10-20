@@ -33,12 +33,15 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 
 | Tool | What it does |
 | --- | --- |
-| `start_session` | Start an app (a `.app` path, bundle id or name on macOS; an executable elsewhere) and return a session id and its windows; `foreground: true` (macOS, Windows) brings it to the front for every action instead of keeping it in the background, and `active_window: true` (macOS, Windows) attaches to the window in front instead of starting an app; `display: "wayland"` (Linux) runs it on a headless Wayland compositor instead of Xvfb |
+| `start_session` | Start an app (a `.app` path, bundle id or name on macOS; an executable elsewhere) and return a session id and its windows; `foreground: true` (macOS, Windows) brings it to the front for every action instead of keeping it in the background, and `active_window: true` (macOS, Windows) attaches to the window in front instead of starting an app; `display: "wayland"` (Linux) runs it on a headless Wayland compositor instead of Xvfb; `screen: true` drives the whole screen instead (see [The whole screen](#the-whole-screen)) |
 | `end_session`, `list_sessions`, `list_windows` | Manage sessions |
 | `screenshot` | Capture a session window, even a covered one; `ui_tree: true` adds the accessibility tree |
 | `get_ui_tree` | One line per element: `[e12] Button "Save" @(x,y wxh) actions=press` |
 | `click`, `move_mouse`, `drag`, `scroll` | Pointer actions at window coordinates, or `click` with `element: "e12"`; `count: 2` or `3` double- or triple-clicks, and `click` and `drag` take held `modifiers` |
+| `mouse_down`, `mouse_up` | Press a button and hold it until it is released; `move_mouse` in between drags |
 | `type_text`, `press_key` | Text, and chords such as `cmd+s` or `ctrl+shift+tab enter` |
+| `key_down`, `key_up` | Hold a key or chord (`shift`, `w`, `ctrl+alt`) until it is released; held modifiers apply to the clicks and keys in between |
+| `cursor_position` | Where the session's pointer is, in window coordinates |
 | `set_value`, `element_action` | Set an element's value (including a dropdown's option), or run press, focus, showmenu, increment and similar actions |
 | `choose_file` | Answer the file picker the app is showing (macOS): the paths to pick or save to, or none to cancel. Actions say when one is waiting |
 | `wait` | Let the app catch up |
@@ -52,6 +55,29 @@ Then add it to your client (see [Install into a client](#install-into-a-client))
 Every action returns a fresh screenshot unless you pass `screenshot: false`.
 Pass `ui_tree: true` to also get the tree. Coordinates are points from the
 window's top-left, the same grid as its screenshot.
+
+`cursor_position` reads the pointer itself where a session has one of its own
+or uses the real one: Linux's displays, screen sessions and Windows foreground
+sessions. Other sessions never move your pointer, so they report where their
+last pointer action left theirs.
+
+### The whole screen
+
+`start_session` with `screen: true` drives the computer's whole screen
+instead of one app, for apps that ignore background input, such as games
+that read raw input. Each display is a window, coordinates are the
+display's, screenshots show the screen as it is, and there is no
+accessibility tree. Input is real: it moves your pointer and goes to
+whatever is under it or has focus, as yours does.
+
+- **macOS:** displays through ScreenCaptureKit, and events posted at the HID
+  event tap. Needs the same Accessibility and Screen Recording permissions.
+- **Windows:** monitors captured with `BitBlt`, and input through
+  `SendInput`, with keys as scan codes, which DirectInput games read. An app
+  running as administrator only takes input from another that is.
+- **Linux:** the X11 desktop in `DISPLAY`, through XTEST. A Wayland desktop
+  lets no program read the screen or send input to the others, so screen
+  sessions are refused there.
 
 The `*_start_session` tools for devices return an ordinary session id, and
 every other tool works on it (see [Phones, tablets, simulators and
@@ -284,7 +310,9 @@ docker build -f scripts/linux/Dockerfile -t ocu-linux . && docker run --rm --ini
 - **Screenshots:** `PrintWindow` with full-content rendering. The live
   view streams windows through Windows.Graphics.Capture instead.
 - **Input:** window messages posted to the control under the point, or to
-  the focused control.
+  the focused control. Some apps, games most of all, read raw input and
+  ignore posted messages; a `foreground` session sends real input through
+  `SendInput` instead, which moves your pointer while it acts.
 - **Tree and element actions:** UI Automation.
 - **File dialogs:** `choose_file` fills in the dialog's file name and
   presses its button over UI Automation. With **Hand open and save dialogs
@@ -302,7 +330,10 @@ changes, and sessions already running carry on when it is turned off.
 Sessions on devices take the same tools as desktop ones. Coordinates are
 points (iOS) or density-independent pixels (Android), and screenshots are
 scaled to match. A click is a tap, a right click a long press, `drag` a
-swipe, and `scroll` swipes the content by `dx`/`dy`. `press_key` also takes
+swipe, and `scroll` swipes the content by `dx`/`dy`. On Android,
+`mouse_down` puts a finger down until `mouse_up`, and `move_mouse` slides
+it; `key_down` and `key_up` need the helper. WebDriverAgent can't hold a
+finger or a key between actions, so iOS refuses them. `press_key` also takes
 the device's buttons: `home`, `back` and `recents` (Android), `power`,
 `volume_up`, `volume_down`. There is no hovering, so `move_mouse` fails.
 

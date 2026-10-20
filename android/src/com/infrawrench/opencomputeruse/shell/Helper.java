@@ -167,6 +167,14 @@ public final class Helper {
                 input().key(display, req.getInt("keycode"), req.optInt("meta", 0),
                         req.optBoolean("longpress", false));
                 return r;
+            case "touch":
+                input().touchAt(display, req.getString("action"), (float) req.getDouble("x"),
+                        (float) req.getDouble("y"));
+                return r;
+            case "key_state":
+                input().keyState(display, req.getInt("keycode"), req.optInt("meta", 0),
+                        req.getBoolean("down"));
+                return r;
             case "text": {
                 String text = req.getString("text");
                 if (automation.insertText(display, text)) {

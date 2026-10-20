@@ -276,6 +276,16 @@ final class Tools {
         switch (name) {
             case "start_session":
                 return start(ctx, c, args);
+            case "mouse_down":
+            case "mouse_up":
+            case "key_down":
+            case "key_up":
+                session(c, args);
+                throw new ToolError("the phone's accessibility service can't keep a finger or a key"
+                        + " down between calls; drag swipes, and press_key presses keys");
+            case "cursor_position":
+                session(c, args);
+                throw new ToolError("touch screens have no pointer");
             case "end_session": {
                 Session s = session(c, args);
                 c.sessions.remove(s.id);
