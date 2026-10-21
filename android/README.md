@@ -71,4 +71,3 @@ Limits:
   accessibility services that aren't assistive tools, such as permission
   prompts. Those windows appear in screenshots and take taps at coordinates,
   but their elements aren't in the tree.
-- **No TLS.** Serve over Tailscale or another network you trust.
