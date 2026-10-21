@@ -17,6 +17,9 @@ import java.lang.reflect.Method;
 final class Input {
     private static final int INJECT_WAIT_FOR_RESULT = 1;
 
+    /** When the finger held by touchAt went down, or -1 while none is. */
+    private long touchDown = -1;
+
     private final Object manager;
     private final Method inject;
     private final Method setDisplayId;
@@ -81,6 +84,41 @@ final class Input {
         }
         touch(display, down, MotionEvent.ACTION_MOVE, x2, y2);
         touch(display, down, MotionEvent.ACTION_UP, x2, y2);
+    }
+
+    /** One step of a touch held across calls: "down", "move" or "up". */
+    void touchAt(int display, String action, float x, float y) throws Exception {
+        switch (action) {
+            case "down":
+                if (touchDown >= 0) {
+                    touch(display, touchDown, MotionEvent.ACTION_UP, x, y);
+                }
+                touchDown = SystemClock.uptimeMillis();
+                touch(display, touchDown, MotionEvent.ACTION_DOWN, x, y);
+                return;
+            case "move":
+            case "up":
+                if (touchDown < 0) {
+                    throw new IllegalStateException("no finger is down");
+                }
+                boolean up = "up".equals(action);
+                touch(display, touchDown, up ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE,
+                        x, y);
+                if (up) {
+                    touchDown = -1;
+                }
+                return;
+            default:
+                throw new IllegalArgumentException("unknown touch action \"" + action + "\"");
+        }
+    }
+
+    /** Presses or releases one key, held across calls. */
+    void keyState(int display, int code, int meta, boolean down) throws Exception {
+        long now = SystemClock.uptimeMillis();
+        sendKey(display, new KeyEvent(now, now, down ? KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP,
+                code, 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+                InputDevice.SOURCE_KEYBOARD));
     }
 
     void key(int display, int code, int meta, boolean longPress) throws Exception {

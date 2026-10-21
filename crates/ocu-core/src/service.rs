@@ -47,6 +47,11 @@ pub enum Request {
         #[serde(default)]
         observe: Observe,
     },
+    /// Where the session's pointer is.
+    CursorPosition {
+        session: String,
+        window: Option<u64>,
+    },
     /// Unlock the Mac if it is locked, so sessions can be driven.
     Unlock,
     /// Simulators, emulators and phones, and the apps on them.
@@ -113,6 +118,8 @@ pub enum Response {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notice: Option<String>,
     },
+    /// The answer to a [`Request::CursorPosition`].
+    Cursor(CursorPosition),
     /// Whether the screen ended up unlocked.
     Unlocked(bool),
     /// The answer to a [`Request::Devices`].
@@ -130,7 +137,8 @@ struct Entry {
     owner: u64,
     session: SharedSession,
     /// On this computer's screen, where the observer can draw over it; not
-    /// for a phone or simulator.
+    /// for a phone or simulator, nor a session on the whole screen, whose
+    /// pointer is the real one.
     desktop: bool,
     /// For watching it live, when the backend offers that.
     viewer: Option<Arc<dyn Viewer>>,
@@ -144,6 +152,8 @@ pub struct Service {
     /// The last picture of each (session, window), to notice an action that
     /// changed nothing on screen.
     last_shots: Mutex<HashMap<(String, u64), Vec<u8>>>,
+    /// Where each session's last action left its pointer: (window, x, y).
+    pointers: Mutex<HashMap<String, (u64, f64, f64)>>,
     observer: Option<Arc<dyn Observer>>,
     sessions: Mutex<BTreeMap<String, Entry>>,
     next_client: AtomicU64,
@@ -169,6 +179,7 @@ impl Service {
             platform,
             devices,
             last_shots: Mutex::new(HashMap::new()),
+            pointers: Mutex::new(HashMap::new()),
             observer,
             sessions: Mutex::new(BTreeMap::new()),
             next_client: AtomicU64::new(1),
@@ -253,6 +264,7 @@ impl Service {
     fn close(&self, id: &str, entry: Entry) {
         log::info!("ending session {id} ({})", entry.info.app);
         self.last_shots.lock().unwrap().retain(|(s, _), _| s != id);
+        self.pointers.lock().unwrap().remove(id);
         entry.session.lock().unwrap().close();
         if let Some(o) = &self.observer {
             o.session_ended(id);
@@ -297,6 +309,7 @@ impl Service {
                     (Some(_), None) => bail!("this server cannot drive mobile devices"),
                 };
                 let desktop = spec.device.is_none();
+                let overlay = desktop && !spec.screen;
                 let mut session = platform.launch(&spec)?;
                 let d = session.describe();
                 // Driving itself, it answers its own accessibility requests
@@ -331,7 +344,7 @@ impl Service {
                         info: info.clone(),
                         owner: client.id,
                         session,
-                        desktop,
+                        desktop: overlay,
                         viewer,
                     },
                 );
@@ -365,6 +378,32 @@ impl Service {
                 let shot = s.lock().unwrap().screenshot(window)?;
                 self.remember(&session, &shot);
                 Ok(Response::Screenshot(shot))
+            }
+            Request::CursorPosition { session, window } => {
+                let (s, _) = self.session(client, &session)?;
+                let mut s = s.lock().unwrap();
+                if let Some(at) = s.cursor(window)? {
+                    return Ok(Response::Cursor(at));
+                }
+                let Some((id, x, y)) = self.pointers.lock().unwrap().get(&session).copied() else {
+                    bail!("the session has not moved its pointer yet");
+                };
+                // Asked about another window: the same point in its coordinates.
+                let (window_id, x, y) = match window.filter(|w| *w != id) {
+                    Some(other) => {
+                        let windows = s.windows()?;
+                        let from = pick_window(&windows, Some(id))?.frame;
+                        let to = pick_window(&windows, Some(other))?.frame;
+                        (other, x + from.x - to.x, y + from.y - to.y)
+                    }
+                    None => (id, x, y),
+                };
+                Ok(Response::Cursor(CursorPosition {
+                    window_id,
+                    x,
+                    y,
+                    live: false,
+                }))
             }
             Request::UiTree {
                 session,
@@ -429,13 +468,23 @@ impl Service {
                     let observer = self.observer.as_ref().filter(|_| desktop);
                     if let (Some(o), Some(w)) = (observer, &target) {
                         match action.pointer() {
-                            Some((x, y)) => {
-                                o.pointer(&session, w, x, y, matches!(action, Action::Click { .. }))
-                            }
+                            Some((x, y)) => o.pointer(
+                                &session,
+                                w,
+                                x,
+                                y,
+                                matches!(action, Action::Click { .. } | Action::MouseDown { .. }),
+                            ),
                             None => o.acted(&session, w),
                         }
                     }
                     s.perform(window, &action)?;
+                    if let (Some((x, y)), Some(w)) = (action.pointer(), &target) {
+                        self.pointers
+                            .lock()
+                            .unwrap()
+                            .insert(session.clone(), (w.id, x, y));
+                    }
                 }
                 if !s.is_alive() {
                     return Ok(Response::Performed {

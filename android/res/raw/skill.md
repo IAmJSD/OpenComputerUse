@@ -116,15 +116,16 @@ Not every host offers every tool. A computer offers what its system has: `unlock
 
 ### `start_session`
 
-Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name ("TextEdit"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual display: a private X server (Xvfb), or a headless Wayland compositor with `display: "wayland"`. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows. For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.
+Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name ("TextEdit"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual display: a private X server (Xvfb), or a headless Wayland compositor with `display: "wayland"`. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. With `screen: true` it drives the whole screen with real input instead of one app. Returns the session id and the app's windows. For phones, simulators and emulators use phone_start_session, ios_simulator_start_session or android_emulator_start_session.
 
-  - `app` (string): The app to start. Required unless `active_window` is set.
+  - `app` (string): The app to start. Required unless `active_window` or `screen` is set.
   - `args` (array)
   - `env` (object)
   - `cwd` (string)
   - `new_instance` (boolean): macOS: start a separate instance even when the app is already running. Otherwise a running app is attached to, and left running when the session ends.
   - `active_window` (boolean): macOS and Windows: attach to the window in front (the topmost one not belonging to the app this client runs in) instead of starting `app`. It becomes the session's default window, and its app is left running when the session ends.
-  - `foreground` (boolean): macOS and Windows: bring the app and its window to the front before every action. Rarely needed, since everything works in the background; use it when the user wants to watch, or an app ignores input while behind other windows. Default false. Linux sessions are always on their own virtual display.
+  - `foreground` (boolean): macOS and Windows: bring the app and its window to the front before every action. Rarely needed, since everything works in the background; use it when the user wants to watch, or an app ignores input while behind other windows. On Windows its input is then real (SendInput), as from the user's mouse and keyboard, which games that read raw input need; it moves the user's pointer. Default false. Linux sessions are always on their own virtual display.
+  - `screen` (boolean): Drive this computer's whole screen instead of one app (macOS, Windows, Linux on X11, and Linux on Wayland through the desktop portal, which asks the user once). Each display is a window (list_windows) and coordinates are the display's. get_ui_tree reads the focused window, in the display's coordinates (on Wayland without positions, so click by the screenshot there). Input is real: it moves the user's pointer and types into whatever has focus. Use it only when the user asks, or for apps such as games that ignore background input. `app` is not needed.
   - `display_width` (integer): Linux: the virtual display's width. Default 1440.
   - `display_height` (integer): Linux: the virtual display's height. Default 900.
   - `display` (string): Linux: the kind of virtual display. "x11" is a private Xvfb; "wayland" a headless Wayland compositor (Chromium-based browsers get the switches they need for it). Defaults to the server's setting (OCU_LINUX_DISPLAY), else x11. One of `x11`, `wayland`.
@@ -203,6 +204,30 @@ Press, drag and release: to select text, move or resize something, or drag an it
   - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
   - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
 
+### `mouse_down`
+
+Press a mouse button at a point and hold it until mouse_up; move_mouse in between drags with it held (on a phone the finger slides). For drags that need pauses or several steps, and apps such as games that read a held button. Coordinates are points from the window's top-left: the pixel grid of its screenshot.
+
+  - `session_id` (string, required): The id start_session returned.
+  - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
+  - `x` (number, required): Where to press x, in window coordinates.
+  - `y` (number, required): Where to press y, in window coordinates.
+  - `button` (string): Default left. One of `left`, `right`, `middle`.
+  - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
+  - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
+
+### `mouse_up`
+
+Release the button mouse_down is holding, at a point: where a drag ends. Coordinates are points from the window's top-left: the pixel grid of its screenshot.
+
+  - `session_id` (string, required): The id start_session returned.
+  - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
+  - `x` (number, required): Where to release x, in window coordinates.
+  - `y` (number, required): Where to release y, in window coordinates.
+  - `button` (string): Default left. One of `left`, `right`, `middle`.
+  - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
+  - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
+
 ### `scroll`
 
 Scroll at a point. Coordinates are points from the window's top-left: the pixel grid of its screenshot.
@@ -235,6 +260,33 @@ Press keys: chords joined with +, several separated by spaces. Modifiers: cmd (m
   - `keys` (string, required)
   - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
   - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
+
+### `key_down`
+
+Press a key and hold it until key_up: one chord as press_key takes it, such as "shift", "w" or "ctrl+alt". Held modifiers apply to the clicks and keys that follow (key_down shift, then click, extends a selection), and apps that read the keyboard, such as games, see the key held. Release every held key with key_up.
+
+  - `session_id` (string, required): The id start_session returned.
+  - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
+  - `key` (string, required): One chord: a key, modifiers, or modifiers and a key ("ctrl+c").
+  - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
+  - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
+
+### `key_up`
+
+Release keys key_down is holding: the same chord, or part of it ("ctrl+c", or "c" to keep ctrl held).
+
+  - `session_id` (string, required): The id start_session returned.
+  - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
+  - `key` (string, required)
+  - `screenshot` (boolean): Return a screenshot of the window after the action. Default true.
+  - `ui_tree` (boolean): Return the accessibility tree after the action. Default false.
+
+### `cursor_position`
+
+Where the session's pointer is, in window coordinates. Screen sessions, foreground sessions on Windows and Linux's displays read the pointer itself; other sessions never move the real pointer, so they report where their last pointer action left theirs.
+
+  - `session_id` (string, required): The id start_session returned.
+  - `window_id` (integer): A window id from list_windows. Defaults to the app's main window.
 
 ### `set_value`
 

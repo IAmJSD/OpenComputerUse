@@ -27,11 +27,11 @@ use smithay::reexports::wayland_server::ListeningSocket;
 
 use ocu_core::image::encode_png;
 use ocu_core::keys::{
-    dom_code, modifier_evdev, named_evdev, parse_chord, parse_chords, us_key, Key, Modifiers,
+    chord_evdev, dom_code, modifier_evdev, parse_chord, parse_chords, parse_held, Key, Modifiers,
 };
 use ocu_core::{
-    pick_window, Action, Description, Frame, LaunchSpec, MouseButton, Screenshot, Session, Size,
-    TreeOptions, UiNode, ViewInput, Viewer, WindowInfo,
+    pick_window, Action, CursorPosition, Description, Frame, LaunchSpec, MouseButton, Screenshot,
+    Session, Size, TreeOptions, UiNode, ViewInput, Viewer, WindowInfo,
 };
 
 use crate::atspi::A11y;
@@ -313,26 +313,22 @@ impl WaylandSession {
 
     fn press_keys(&self, window: Option<u64>, keys: &str) -> Result<()> {
         for chord in parse_chords(keys)? {
-            let mut mods = chord.modifiers;
-            let key = match chord.key {
-                None => None,
-                Some(Key::Named(k)) => Some(named_evdev(k)),
-                Some(Key::Char(c)) => match us_key(c) {
-                    Some((code, shift)) => {
-                        mods.shift |= shift;
-                        Some(code)
-                    }
-                    // A character the keyboard lacks, on its own, is typed.
-                    None if mods == Modifiers::default() => {
-                        self.link.type_text(window, c.to_string())?;
-                        continue;
-                    }
-                    None => bail!("a US keyboard has no key for \"{c}\" to press with modifiers"),
-                },
+            let codes = match (chord_evdev(&chord), chord.key) {
+                (Ok(codes), _) => codes,
+                // A character the keyboard lacks, on its own, is typed.
+                (Err(_), Some(Key::Char(c))) if chord.modifiers == Modifiers::default() => {
+                    self.link.type_text(window, c.to_string())?;
+                    continue;
+                }
+                (Err(e), _) => return Err(e),
             };
-            let mods = modifier_evdev(mods);
+            let tap = chord.key.is_some();
             self.link.with_focus(window, move |c| {
-                for &m in &mods {
+                let (mods, key) = match codes.split_last() {
+                    Some((k, mods)) if tap => (mods, Some(*k)),
+                    _ => (&codes[..], None),
+                };
+                for &m in mods {
                     c.state.key(m, true);
                 }
                 if let Some(k) = key {
@@ -455,8 +451,30 @@ impl Session for WaylandSession {
             }
             Action::TypeText { text } => link.type_text(window, text.clone())?,
             Action::PressKey { keys } => self.press_keys(window, keys)?,
+            Action::MouseDown { x, y, button } | Action::MouseUp { x, y, button } => {
+                link.pointer(window, *x, *y)?;
+                link.button(*button, matches!(action, Action::MouseDown { .. }))?;
+            }
+            Action::KeyDown { key } => {
+                let codes = chord_evdev(&parse_held(key)?)?;
+                link.with_focus(window, move |c| {
+                    for code in codes {
+                        c.state.key(code, true);
+                    }
+                    Ok(())
+                })?;
+            }
+            Action::KeyUp { key } => {
+                let mut codes = chord_evdev(&parse_held(key)?)?;
+                codes.reverse();
+                link.keys(codes, false)?;
+            }
         }
         Ok(())
+    }
+
+    fn cursor(&mut self, window: Option<u64>) -> Result<Option<CursorPosition>> {
+        Ok(Some(self.link.call(move |c| c.cursor(window))??))
     }
 
     fn notice(&mut self) -> Option<String> {

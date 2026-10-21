@@ -16,6 +16,26 @@ impl Modifiers {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+
+    /// Both sets held at once.
+    pub fn with(self, other: Self) -> Self {
+        Self {
+            shift: self.shift || other.shift,
+            ctrl: self.ctrl || other.ctrl,
+            alt: self.alt || other.alt,
+            meta: self.meta || other.meta,
+        }
+    }
+
+    /// These without `other`'s.
+    pub fn without(self, other: Self) -> Self {
+        Self {
+            shift: self.shift && !other.shift,
+            ctrl: self.ctrl && !other.ctrl,
+            alt: self.alt && !other.alt,
+            meta: self.meta && !other.meta,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +83,76 @@ pub fn parse_chords(s: &str) -> Result<Vec<Chord>> {
         bail!("no keys given");
     }
     Ok(chords)
+}
+
+/// What a session's real input is holding down: modifiers, other keys and
+/// mouse buttons from `key_down` and `mouse_down`, so they can be let go
+/// when the session ends rather than left pressed on the user's machine.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Held {
+    pub modifiers: Modifiers,
+    pub keys: Vec<Key>,
+    pub buttons: Vec<crate::MouseButton>,
+}
+
+impl Held {
+    pub fn key_down(&mut self, chord: &Chord) {
+        self.modifiers = self.modifiers.with(chord.modifiers);
+        if let Some(k) = chord.key.filter(|k| !self.keys.contains(k)) {
+            self.keys.push(k);
+        }
+    }
+
+    pub fn key_up(&mut self, chord: &Chord) {
+        self.modifiers = self.modifiers.without(chord.modifiers);
+        if let Some(k) = chord.key {
+            self.keys.retain(|h| *h != k);
+        }
+    }
+
+    pub fn button(&mut self, b: crate::MouseButton, down: bool) {
+        self.buttons.retain(|h| *h != b);
+        if down {
+            self.buttons.push(b);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.modifiers.is_empty() && self.keys.is_empty() && self.buttons.is_empty()
+    }
+
+    /// The chords that let go of every held key, in order: the keys, newest
+    /// first, then the modifiers. Empties the keys and modifiers.
+    pub fn take_keys(&mut self) -> Vec<Chord> {
+        let mut chords: Vec<Chord> = std::mem::take(&mut self.keys)
+            .into_iter()
+            .rev()
+            .map(|k| Chord {
+                modifiers: Modifiers::default(),
+                key: Some(k),
+            })
+            .collect();
+        let modifiers = std::mem::take(&mut self.modifiers);
+        if !modifiers.is_empty() {
+            chords.push(Chord {
+                modifiers,
+                key: None,
+            });
+        }
+        chords
+    }
+}
+
+/// One chord to hold down, as `key_down` takes it: "shift", "w", "ctrl+c".
+pub fn parse_held(s: &str) -> Result<Chord> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("no key given");
+    }
+    if s.split_whitespace().nth(1).is_some() {
+        bail!("\"{s}\" is several chords; hold one at a time (\"ctrl+shift\", not \"ctrl shift\")");
+    }
+    parse_chord(s)
 }
 
 pub fn parse_chord(s: &str) -> Result<Chord> {
@@ -283,6 +373,26 @@ pub fn named_evdev(k: NamedKey) -> u16 {
     }
 }
 
+/// The evdev codes a chord presses, in order: its modifiers, then its key
+/// (with shift added when the key's character needs it).
+pub fn chord_evdev(chord: &Chord) -> Result<Vec<u16>> {
+    let mut mods = chord.modifiers;
+    let key = match chord.key {
+        None => None,
+        Some(Key::Named(k)) => Some(named_evdev(k)),
+        Some(Key::Char(c)) => match us_key(c) {
+            Some((code, shift)) => {
+                mods.shift |= shift;
+                Some(code)
+            }
+            None => bail!("a US keyboard has no key for \"{c}\" to press; type_text types it"),
+        },
+    };
+    let mut codes = modifier_evdev(mods);
+    codes.extend(key);
+    Ok(codes)
+}
+
 /// The evdev codes of held modifiers, in pressing order.
 pub fn modifier_evdev(m: Modifiers) -> Vec<u16> {
     let mut v = Vec::new();
@@ -304,6 +414,54 @@ pub fn modifier_evdev(m: Modifiers) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_keys_are_let_go_keys_first() {
+        let mut held = Held::default();
+        held.key_down(&parse_held("ctrl+c").unwrap());
+        held.key_down(&parse_held("w").unwrap());
+        held.key_down(&parse_held("w").unwrap());
+        held.button(crate::MouseButton::Left, true);
+        assert_eq!(held.keys, vec![Key::Char('c'), Key::Char('w')]);
+        // Letting go of part of a chord keeps the rest held.
+        held.key_up(&parse_held("c").unwrap());
+        assert!(held.modifiers.ctrl);
+        let releases = held.take_keys();
+        assert_eq!(
+            releases,
+            vec![
+                Chord {
+                    modifiers: Modifiers::default(),
+                    key: Some(Key::Char('w'))
+                },
+                parse_held("ctrl").unwrap(),
+            ]
+        );
+        assert!(!held.is_empty(), "the button is still held");
+        held.button(crate::MouseButton::Left, false);
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn held_chords_are_one_at_a_time() {
+        let c = parse_held(" ctrl+c ").unwrap();
+        assert!(c.modifiers.ctrl && c.key == Some(Key::Char('c')));
+        assert_eq!(parse_held("shift").unwrap().key, None);
+        assert!(parse_held("ctrl shift").is_err());
+        assert!(parse_held("").is_err());
+    }
+
+    #[test]
+    fn modifiers_combine_and_release() {
+        let shift = parse_chord("shift").unwrap().modifiers;
+        let ctrl_shift = parse_chord("ctrl+shift").unwrap().modifiers;
+        assert_eq!(shift.with(ctrl_shift), ctrl_shift);
+        assert_eq!(
+            ctrl_shift.without(shift),
+            parse_chord("ctrl").unwrap().modifiers
+        );
+        assert!(shift.without(ctrl_shift).is_empty());
+    }
 
     #[test]
     fn chords() {

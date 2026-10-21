@@ -55,7 +55,7 @@ use smithay::{
 
 use ocu_core::image::Order;
 use ocu_core::keys::us_key;
-use ocu_core::{Frame, MouseButton, Rect, WindowInfo};
+use ocu_core::{CursorPosition, Frame, MouseButton, Rect, WindowInfo};
 
 use super::Shared;
 
@@ -825,6 +825,24 @@ impl Compositor {
             .element_geometry(&w)
             .ok_or_else(|| anyhow!("the window is not on screen"))?;
         capture(&mut self.renderer, &self.state.space, region, meta(&w).id)
+    }
+
+    /// Where the seat's pointer is, in `window`'s coordinates.
+    pub fn cursor(&self, window: Option<u64>) -> Result<CursorPosition> {
+        let w = self.state.window(window)?;
+        let g = self.state.space.element_geometry(&w).unwrap_or_default();
+        let at = self
+            .state
+            .seat
+            .get_pointer()
+            .map(|p| p.current_location())
+            .unwrap_or_default();
+        Ok(CursorPosition {
+            window_id: meta(&w).id,
+            x: at.x - g.loc.x as f64,
+            y: at.y - g.loc.y as f64,
+            live: true,
+        })
     }
 
     /// `x`, `y` in `window` as a point on the output.

@@ -24,3 +24,8 @@ zbus.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde.workspace = true
+
+# Screen sessions on an X display of their own; skips itself without Xvfb.
+[[test]]
+name = "screen"
+harness = false

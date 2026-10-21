@@ -9,8 +9,8 @@ use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, SRCCOPY,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -217,6 +217,50 @@ pub fn capture(window: &WindowInfo) -> Result<Screenshot> {
             window_id: Some(window.id),
             width: cw as u32,
             height: ch as u32,
+            png,
+        })
+    }
+}
+
+/// Part of the screen as it shows, every window composed: `window`'s frame
+/// is in screen pixels.
+pub fn capture_screen(window: &WindowInfo) -> Result<Screenshot> {
+    let f = window.frame;
+    let (x, y, w, ht) = (f.x as i32, f.y as i32, f.width as i32, f.height as i32);
+    if w <= 0 || ht <= 0 {
+        bail!("the display has no size");
+    }
+    unsafe {
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(Some(screen));
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -ht, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let bmp = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        let old = SelectObject(dc, bmp.into());
+        // CAPTUREBLT: layered windows (tooltips, menus) too.
+        let copied = BitBlt(dc, 0, 0, w, ht, Some(screen), x, y, SRCCOPY | CAPTUREBLT);
+        let data = std::slice::from_raw_parts(bits as *const u8, (w * ht * 4) as usize).to_vec();
+        SelectObject(dc, old);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(dc);
+        ReleaseDC(None, screen);
+        copied?;
+        let png = encode_png(w as u32, ht as u32, w as usize * 4, &data, Order::Bgra)?;
+        Ok(Screenshot {
+            window_id: Some(window.id),
+            width: w as u32,
+            height: ht as u32,
             png,
         })
     }

@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{bail, Context as _, Result};
 use serde_json::json;
 
-use ocu_core::keys::{Chord, Key, NamedKey};
+use ocu_core::keys::{parse_held, Chord, Key, NamedKey};
 use ocu_core::{
     Action, Description, LaunchSpec, MouseButton, Rect, Screenshot, Session, TreeOptions, UiNode,
     WindowInfo,
@@ -45,6 +45,8 @@ pub struct AndroidSession {
     backend: &'static str,
     notes: BTreeMap<String, String>,
     closed: bool,
+    /// A finger is down from `mouse_down`, until `mouse_up`.
+    touching: bool,
     _lease: Lease<()>,
 }
 
@@ -186,6 +188,7 @@ impl AndroidSession {
             backend,
             notes,
             closed: false,
+            touching: false,
             _lease: lease,
         };
         // Let the first frame arrive before anyone looks.
@@ -245,6 +248,48 @@ impl AndroidSession {
                 self.adb
                     .shell(&format!("input swipe {x1} {y1} {x2} {y2} {ms}"))?;
             }
+        }
+        Ok(())
+    }
+
+    /// One step of a touch held across actions: "down", "move" or "up".
+    fn touch(&mut self, step: &str, x: f64, y: f64) -> Result<()> {
+        let (x, y) = (self.px(x), self.px(y));
+        match &mut self.helper {
+            Some(h) => {
+                h.call(
+                    "touch",
+                    json!({ "display": self.display, "action": step, "x": x, "y": y }),
+                )?;
+            }
+            None => {
+                self.adb.shell(&format!(
+                    "input motionevent {} {x} {y}",
+                    step.to_ascii_uppercase()
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Presses (`down`) or releases a chord's keys, held across actions:
+    /// modifiers first on the way down, last on the way up.
+    fn hold(&mut self, key: &str, down: bool) -> Result<()> {
+        let mut codes = chord_codes(&parse_held(key)?)?;
+        let Some(h) = &mut self.helper else {
+            bail!(
+                "holding keys needs OpenComputerUse's helper on the device; press_key presses them"
+            );
+        };
+        let meta = codes.iter().fold(0u32, |m, c| m | meta_state(*c));
+        if !down {
+            codes.reverse();
+        }
+        for code in codes {
+            h.call(
+                "key_state",
+                json!({ "display": self.display, "keycode": code, "meta": meta, "down": down }),
+            )?;
         }
         Ok(())
     }
@@ -638,6 +683,8 @@ impl Session for AndroidSession {
                 MouseButton::Right => self.long_press(*x, *y),
                 MouseButton::Middle => bail!("touch screens have no middle button"),
             },
+            // With a finger down, it slides.
+            Action::MoveMouse { x, y } if self.touching => self.touch("move", *x, *y),
             Action::MoveMouse { .. } => {
                 bail!("touch screens have no pointer to hover with; click or drag instead")
             }
@@ -648,6 +695,23 @@ impl Session for AndroidSession {
                 to_y,
                 ..
             } => self.swipe((*from_x, *from_y), (*to_x, *to_y), 600),
+            Action::MouseDown { x, y, button } => {
+                if *button != MouseButton::Left {
+                    bail!("a touch screen is touched with one finger; hold the left button");
+                }
+                self.touch("down", *x, *y)?;
+                self.touching = true;
+                Ok(())
+            }
+            Action::MouseUp { x, y, .. } => {
+                if !self.touching {
+                    bail!("no finger is down; mouse_down first");
+                }
+                self.touching = false;
+                self.touch("up", *x, *y)
+            }
+            Action::KeyDown { key } => self.hold(key, true),
+            Action::KeyUp { key } => self.hold(key, false),
             Action::Scroll { x, y, dx, dy } => self.scroll(*x, *y, *dx, *dy),
             Action::TypeText { text } => self.type_text(text),
             Action::PressKey { keys } => self.press(keys),

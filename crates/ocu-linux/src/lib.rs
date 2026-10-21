@@ -15,6 +15,10 @@ mod launch;
 #[cfg(target_os = "linux")]
 mod keys;
 #[cfg(target_os = "linux")]
+mod portal_desktop;
+#[cfg(target_os = "linux")]
+mod screen;
+#[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(target_os = "linux")]
 mod xvfb;
@@ -130,6 +134,9 @@ mod platform {
         }
 
         fn launch(&self, spec: &LaunchSpec) -> Result<Box<dyn Session>> {
+            if spec.screen {
+                return Ok(Box::new(crate::screen::ScreenSession::start()?));
+            }
             if spec.active_window {
                 bail!("each Linux session has its own virtual display, with no window in front to attach to; start the app instead");
             }

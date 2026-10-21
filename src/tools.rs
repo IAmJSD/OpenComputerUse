@@ -249,15 +249,16 @@ fn base_tools() -> Vec<Value> {
     vec![
         tool(
             "start_session",
-            "Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual display: a private X server (Xvfb), or a headless Wayland compositor with `display: \"wayland\"`. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows.",
+            "Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual display: a private X server (Xvfb), or a headless Wayland compositor with `display: \"wayland\"`. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. With `screen: true` it drives the whole screen with real input instead of one app. Returns the session id and the app's windows.",
             json!({
-                "app": { "type": "string", "description": "The app to start. Required unless `active_window` is set." },
+                "app": { "type": "string", "description": "The app to start. Required unless `active_window` or `screen` is set." },
                 "args": { "type": "array", "items": { "type": "string" } },
                 "env": { "type": "object", "additionalProperties": { "type": "string" } },
                 "cwd": { "type": "string" },
                 "new_instance": { "type": "boolean", "description": "macOS: start a separate instance even when the app is already running. Otherwise a running app is attached to, and left running when the session ends." },
                 "active_window": { "type": "boolean", "description": "macOS and Windows: attach to the window in front (the topmost one not belonging to the app this client runs in) instead of starting `app`. It becomes the session's default window, and its app is left running when the session ends." },
-                "foreground": { "type": "boolean", "description": "macOS and Windows: bring the app and its window to the front before every action. Rarely needed, since everything works in the background; use it when the user wants to watch, or an app ignores input while behind other windows. Default false. Linux sessions are always on their own virtual display." },
+                "foreground": { "type": "boolean", "description": "macOS and Windows: bring the app and its window to the front before every action. Rarely needed, since everything works in the background; use it when the user wants to watch, or an app ignores input while behind other windows. On Windows its input is then real (SendInput), as from the user's mouse and keyboard, which games that read raw input need; it moves the user's pointer. Default false. Linux sessions are always on their own virtual display." },
+                "screen": { "type": "boolean", "description": "Drive this computer's whole screen instead of one app (macOS, Windows, Linux on X11, and Linux on Wayland through the desktop portal, which asks the user once). Each display is a window (list_windows) and coordinates are the display's. get_ui_tree reads the focused window, in the display's coordinates (on Wayland without positions, so click by the screenshot there). Input is real: it moves the user's pointer and types into whatever has focus. Use it only when the user asks, or for apps such as games that ignore background input. `app` is not needed." },
                 "display_width": { "type": "integer", "description": "Linux: the virtual display's width. Default 1440." },
                 "display_height": { "type": "integer", "description": "Linux: the virtual display's height. Default 900." },
                 "display": { "type": "string", "enum": ["x11", "wayland"], "description": "Linux: the kind of virtual display. \"x11\" is a private Xvfb; \"wayland\" a headless Wayland compositor (Chromium-based browsers get the switches they need for it). Defaults to the server's setting (OCU_LINUX_DISPLAY), else x11." },
@@ -322,6 +323,18 @@ fn base_tools() -> Vec<Value> {
             &["session_id", "from_x", "from_y", "to_x", "to_y"],
         ),
         tool(
+            "mouse_down",
+            &format!("Press a mouse button at a point and hold it until mouse_up; move_mouse in between drags with it held (on a phone the finger slides). For drags that need pauses or several steps, and apps such as games that read a held button. {COORDS}"),
+            action_props(held_button_props(point("Where to press"))),
+            &["session_id", "x", "y"],
+        ),
+        tool(
+            "mouse_up",
+            &format!("Release the button mouse_down is holding, at a point: where a drag ends. {COORDS}"),
+            action_props(held_button_props(point("Where to release"))),
+            &["session_id", "x", "y"],
+        ),
+        tool(
             "scroll",
             &format!("Scroll at a point. {COORDS}"),
             action_props(scroll_props),
@@ -338,6 +351,24 @@ fn base_tools() -> Vec<Value> {
             "Press keys: chords joined with +, several separated by spaces. Modifiers: cmd (meta/win/super), ctrl, alt (option), shift. Named keys: enter, tab, escape, backspace, delete, space, up, down, left, right, home, end, pageup, pagedown, f1-f24. Examples: \"cmd+s\", \"ctrl+shift+tab\", \"down down enter\".",
             action_props(json!({ "keys": { "type": "string" } })),
             &["session_id", "keys"],
+        ),
+        tool(
+            "key_down",
+            "Press a key and hold it until key_up: one chord as press_key takes it, such as \"shift\", \"w\" or \"ctrl+alt\". Held modifiers apply to the clicks and keys that follow (key_down shift, then click, extends a selection), and apps that read the keyboard, such as games, see the key held. Release every held key with key_up.",
+            action_props(json!({ "key": { "type": "string", "description": "One chord: a key, modifiers, or modifiers and a key (\"ctrl+c\")." } })),
+            &["session_id", "key"],
+        ),
+        tool(
+            "key_up",
+            "Release keys key_down is holding: the same chord, or part of it (\"ctrl+c\", or \"c\" to keep ctrl held).",
+            action_props(json!({ "key": { "type": "string" } })),
+            &["session_id", "key"],
+        ),
+        tool(
+            "cursor_position",
+            "Where the session's pointer is, in window coordinates. Screen sessions, foreground sessions on Windows and Linux's displays read the pointer itself; other sessions never move the real pointer, so they report where their last pointer action left theirs.",
+            json!({ "session_id": session_prop(), "window_id": window_prop() }),
+            &["session_id"],
         ),
         tool(
             "set_value",
@@ -452,6 +483,15 @@ fn button(args: &Value) -> Result<MouseButton> {
     })
 }
 
+/// A held button's properties: `point`'s and which button.
+fn held_button_props(mut point: Value) -> Value {
+    point.as_object_mut().unwrap().insert(
+        "button".into(),
+        json!({ "type": "string", "enum": ["left", "right", "middle"], "description": "Default left." }),
+    );
+    point
+}
+
 /// 1, 2 or 3: single, double or triple.
 fn click_count(args: &Value) -> u32 {
     opt_u64(args, "count").unwrap_or(1).clamp(1, 3) as u32
@@ -503,6 +543,22 @@ pub fn action_for(name: &str, args: &Value) -> Result<Option<Action>> {
             to_y: num(args, "to_y")?,
             button: button(args)?,
             modifiers: opt_str(args, "modifiers"),
+        },
+        "mouse_down" => Action::MouseDown {
+            x: num(args, "x")?,
+            y: num(args, "y")?,
+            button: button(args)?,
+        },
+        "mouse_up" => Action::MouseUp {
+            x: num(args, "x")?,
+            y: num(args, "y")?,
+            button: button(args)?,
+        },
+        "key_down" => Action::KeyDown {
+            key: str_arg(args, "key")?.to_string(),
+        },
+        "key_up" => Action::KeyUp {
+            key: str_arg(args, "key")?.to_string(),
         },
         "scroll" => Action::Scroll {
             x: num(args, "x")?,
@@ -573,10 +629,11 @@ pub fn launch_spec(args: &Value) -> Result<LaunchSpec> {
         _ => None,
     };
     let active_window = flag(args, "active_window", false);
+    let screen = flag(args, "screen", false);
     let app = match opt_str(args, "app") {
         Some(app) => app,
-        None if active_window => String::new(),
-        None => bail!("missing \"app\" (or set \"active_window\": true)"),
+        None if active_window || screen => String::new(),
+        None => bail!("missing \"app\" (or set \"active_window\" or \"screen\": true)"),
     };
     Ok(LaunchSpec {
         app,
@@ -591,6 +648,7 @@ pub fn launch_spec(args: &Value) -> Result<LaunchSpec> {
         } else {
             Vec::new()
         },
+        screen,
         display_size,
         linux_display: match opt_str(args, "display") {
             Some(d) => Some(
@@ -772,6 +830,16 @@ pub fn call(handler: &mut dyn Handler, name: &str, args: &Value) -> Result<Outpu
                 image: Some(shot),
             })
         }
+        "cursor_position" => {
+            let Response::Cursor(at) = handler.handle(Request::CursorPosition {
+                session: str_arg(args, "session_id")?.to_string(),
+                window: opt_u64(args, "window_id"),
+            })?
+            else {
+                bail!("unexpected reply")
+            };
+            text(serde_json::to_string_pretty(&at)?)
+        }
         "get_ui_tree" => {
             let mut options = TreeOptions::default();
             if let Some(d) = opt_u64(args, "max_depth") {
@@ -864,6 +932,35 @@ mod tests {
             click(json!({ "x": 1, "y": 2, "count": 9 })),
             Action::Click { count: 3, .. }
         ));
+    }
+
+    #[test]
+    fn held_input_and_screen_sessions_build_their_requests() {
+        let act = |name: &str, args: Value| action_for(name, &args).unwrap().unwrap();
+        assert!(matches!(
+            act("mouse_down", json!({ "x": 1, "y": 2, "button": "right" })),
+            Action::MouseDown {
+                button: MouseButton::Right,
+                ..
+            }
+        ));
+        assert!(matches!(
+            act("mouse_up", json!({ "x": 1, "y": 2 })),
+            Action::MouseUp {
+                button: MouseButton::Left,
+                ..
+            }
+        ));
+        assert!(matches!(
+            act("key_down", json!({ "key": "shift" })),
+            Action::KeyDown { key } if key == "shift"
+        ));
+        assert!(matches!(
+            act("key_up", json!({ "key": "w" })),
+            Action::KeyUp { .. }
+        ));
+        assert!(launch_spec(&json!({ "screen": true })).unwrap().screen);
+        assert!(launch_spec(&json!({})).is_err());
     }
 
     // One test, so nothing else reads OCU_MOBILE while it changes.

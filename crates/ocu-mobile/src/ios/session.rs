@@ -391,6 +391,13 @@ impl Session for IosSession {
                 Ok(())
             }
             Action::ChooseFile { .. } => bail!("a phone has no file panels to answer"),
+            Action::MouseDown { .. } | Action::MouseUp { .. } => bail!(
+                "WebDriverAgent can't keep a finger down between actions; drag swipes, and a \
+                 right click is a long press"
+            ),
+            Action::KeyDown { .. } | Action::KeyUp { .. } => {
+                bail!("WebDriverAgent can't hold keys down between actions; press_key presses them")
+            }
             Action::ClickElement { .. } => unreachable!(),
         }
     }

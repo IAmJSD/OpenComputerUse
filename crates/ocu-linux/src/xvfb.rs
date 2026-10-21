@@ -25,10 +25,10 @@ use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::{DefaultStream, RustConnection};
 
 use ocu_core::image::{encode_png, Order};
-use ocu_core::keys::{parse_chord, parse_chords, Chord, Key, Modifiers, NamedKey};
+use ocu_core::keys::{parse_chord, parse_chords, parse_held, Chord, Key, Modifiers, NamedKey};
 use ocu_core::{
-    pick_window, Action, Description, Frame, LaunchSpec, MouseButton, Rect, Screenshot, Session,
-    Size, TreeOptions, UiNode, ViewInput, Viewer, WindowInfo,
+    pick_window, Action, CursorPosition, Description, Frame, LaunchSpec, MouseButton, Rect,
+    Screenshot, Session, Size, TreeOptions, UiNode, ViewInput, Viewer, WindowInfo,
 };
 
 use crate::atspi::A11y;
@@ -167,7 +167,7 @@ fn connect(number: u32, cookie: &[u8]) -> Result<(RustConnection, Window)> {
 
 /// The keymap, shared by the session and its viewer: both lend spare
 /// keycodes to characters the layout lacks.
-type SharedKeymap = Arc<Mutex<keys::Keymap>>;
+pub(crate) type SharedKeymap = Arc<Mutex<keys::Keymap>>;
 
 pub struct LinuxSession {
     app: Child,
@@ -257,29 +257,9 @@ impl LinuxSession {
         let windows = self.windows()?;
         pick_window(&windows, window).cloned()
     }
-
-    fn move_to(&self, w: &WindowInfo, x: f64, y: f64) -> Result<()> {
-        move_to(&self.conn, self.root, w, x, y)
-    }
-
-    fn button(&self, b: u8, down: bool) -> Result<()> {
-        button(&self.conn, self.root, b, down)
-    }
-
-    fn key(&self, code: u8, down: bool) -> Result<()> {
-        key(&self.conn, self.root, code, down)
-    }
-
-    fn modifier_codes(&self, mods: Modifiers) -> Result<Vec<u8>> {
-        let mut keymap = self.keymap.lock().unwrap();
-        keys::modifier_keysyms(mods)
-            .into_iter()
-            .map(|ks| keymap.code_for(&self.conn, ks).map(|(c, _)| c))
-            .collect()
-    }
 }
 
-fn title(conn: &RustConnection, w: Window) -> String {
+pub(crate) fn title(conn: &RustConnection, w: Window) -> String {
     let atom = |name: &[u8]| {
         conn.intern_atom(false, name)
             .ok()?
@@ -342,7 +322,11 @@ fn list(conn: &RustConnection, root: Window) -> Result<Vec<WindowInfo>> {
 /// A window's part of the framebuffer, as (width, height, stride, BGRA).
 /// Read from the root, not the window, so popups and menus over it are in
 /// the picture. Clipped to the screen.
-fn grab(conn: &RustConnection, root: Window, w: &WindowInfo) -> Result<(u32, u32, Vec<u8>)> {
+pub(crate) fn grab(
+    conn: &RustConnection,
+    root: Window,
+    w: &WindowInfo,
+) -> Result<(u32, u32, Vec<u8>)> {
     let screen = &conn.setup().roots[0];
     let x = w.frame.x.max(0.0) as i16;
     let y = w.frame.y.max(0.0) as i16;
@@ -373,7 +357,7 @@ fn move_to(conn: &RustConnection, root: Window, w: &WindowInfo, x: f64, y: f64) 
     Ok(())
 }
 
-fn button(conn: &RustConnection, root: Window, b: u8, down: bool) -> Result<()> {
+pub(crate) fn button(conn: &RustConnection, root: Window, b: u8, down: bool) -> Result<()> {
     let kind = if down {
         xproto::BUTTON_PRESS_EVENT
     } else {
@@ -417,12 +401,9 @@ fn wheel(conn: &RustConnection, root: Window, dx: f64, dy: f64) -> Result<()> {
     Ok(())
 }
 
-fn press_chord(
-    conn: &RustConnection,
-    root: Window,
-    keymap: &SharedKeymap,
-    chord: &Chord,
-) -> Result<()> {
+/// The keycodes a chord presses, in order: its modifiers, then its key
+/// (with shift added when the key's character needs it).
+fn chord_codes(conn: &RustConnection, keymap: &SharedKeymap, chord: &Chord) -> Result<Vec<u8>> {
     let mut keymap = keymap.lock().unwrap();
     let mut mods = chord.modifiers;
     let code = match chord.key {
@@ -433,23 +414,54 @@ fn press_chord(
             Some(code)
         }
     };
-    let mod_codes: Vec<u8> = keys::modifier_keysyms(mods)
+    let mut codes: Vec<u8> = keys::modifier_keysyms(mods)
         .into_iter()
         .map(|ks| keymap.code_for(conn, ks).map(|(c, _)| c))
         .collect::<Result<_>>()?;
-    drop(keymap);
-    for &m in &mod_codes {
-        key(conn, root, m, true)?;
+    codes.extend(code);
+    Ok(codes)
+}
+
+/// Presses (`down`) or releases a chord's keys: modifiers first on the way
+/// down, last on the way up.
+pub(crate) fn hold_chord(
+    conn: &RustConnection,
+    root: Window,
+    keymap: &SharedKeymap,
+    chord: &Chord,
+    down: bool,
+) -> Result<()> {
+    let mut codes = chord_codes(conn, keymap, chord)?;
+    if !down {
+        codes.reverse();
     }
-    if let Some(code) = code {
-        key(conn, root, code, true)?;
-        key(conn, root, code, false)?;
-    }
-    for &m in mod_codes.iter().rev() {
-        key(conn, root, m, false)?;
+    for code in codes {
+        key(conn, root, code, down)?;
     }
     conn.flush()?;
     Ok(())
+}
+
+fn modifier_codes(
+    conn: &RustConnection,
+    keymap: &SharedKeymap,
+    mods: Modifiers,
+) -> Result<Vec<u8>> {
+    let mut keymap = keymap.lock().unwrap();
+    keys::modifier_keysyms(mods)
+        .into_iter()
+        .map(|ks| keymap.code_for(conn, ks).map(|(c, _)| c))
+        .collect()
+}
+
+fn press_chord(
+    conn: &RustConnection,
+    root: Window,
+    keymap: &SharedKeymap,
+    chord: &Chord,
+) -> Result<()> {
+    hold_chord(conn, root, keymap, chord, true)?;
+    hold_chord(conn, root, keymap, chord, false)
 }
 
 fn type_text(conn: &RustConnection, root: Window, keymap: &SharedKeymap, text: &str) -> Result<()> {
@@ -475,7 +487,138 @@ fn type_text(conn: &RustConnection, root: Window, keymap: &SharedKeymap, text: &
     Ok(())
 }
 
-fn x_button(b: MouseButton) -> u8 {
+/// Input actions on an X display through XTEST: everything a session does
+/// with the pointer and keys. `focus_window` gives `w` the keyboard first,
+/// for a display with no window manager to do it.
+pub(crate) fn drive(
+    conn: &RustConnection,
+    root: Window,
+    keymap: &SharedKeymap,
+    w: &WindowInfo,
+    action: &Action,
+    focus_window: bool,
+) -> Result<()> {
+    match action {
+        Action::Click {
+            x,
+            y,
+            button: b,
+            count,
+            modifiers,
+        } => {
+            let mods = match modifiers.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => parse_chord(s)?.modifiers,
+                None => Modifiers::default(),
+            };
+            move_to(conn, root, w, *x, *y)?;
+            let mod_codes = modifier_codes(conn, keymap, mods)?;
+            for &m in &mod_codes {
+                key(conn, root, m, true)?;
+            }
+            for _ in 0..(*count).max(1) {
+                button(conn, root, x_button(*b), true)?;
+                button(conn, root, x_button(*b), false)?;
+                conn.flush()?;
+                sleep(Duration::from_millis(40));
+            }
+            for &m in mod_codes.iter().rev() {
+                key(conn, root, m, false)?;
+            }
+            conn.flush()?;
+        }
+        Action::MoveMouse { x, y } => move_to(conn, root, w, *x, *y)?,
+        Action::Drag {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            button: b,
+            modifiers,
+        } => {
+            let mods = match modifiers.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => parse_chord(s)?.modifiers,
+                None => Modifiers::default(),
+            };
+            let mod_codes = modifier_codes(conn, keymap, mods)?;
+            move_to(conn, root, w, *from_x, *from_y)?;
+            for &m in &mod_codes {
+                key(conn, root, m, true)?;
+            }
+            button(conn, root, x_button(*b), true)?;
+            conn.flush()?;
+            for i in 1..=12 {
+                let t = i as f64 / 12.0;
+                sleep(Duration::from_millis(12));
+                move_to(
+                    conn,
+                    root,
+                    w,
+                    from_x + (to_x - from_x) * t,
+                    from_y + (to_y - from_y) * t,
+                )?;
+            }
+            button(conn, root, x_button(*b), false)?;
+            for &m in mod_codes.iter().rev() {
+                key(conn, root, m, false)?;
+            }
+            conn.flush()?;
+        }
+        Action::Scroll { x, y, dx, dy } => {
+            move_to(conn, root, w, *x, *y)?;
+            wheel(conn, root, *dx, *dy)?;
+        }
+        Action::TypeText { text } => {
+            if focus_window {
+                focus(conn, w)?;
+            }
+            type_text(conn, root, keymap, text)?;
+        }
+        Action::PressKey { keys } => {
+            if focus_window {
+                focus(conn, w)?;
+            }
+            for chord in parse_chords(keys)? {
+                press_chord(conn, root, keymap, &chord)?;
+                sleep(Duration::from_millis(20));
+            }
+        }
+        Action::MouseDown { x, y, button: b } | Action::MouseUp { x, y, button: b } => {
+            let down = matches!(action, Action::MouseDown { .. });
+            move_to(conn, root, w, *x, *y)?;
+            if down && focus_window {
+                focus(conn, w)?;
+            }
+            button(conn, root, x_button(*b), down)?;
+            conn.flush()?;
+        }
+        Action::KeyDown { key: held } | Action::KeyUp { key: held } => {
+            let down = matches!(action, Action::KeyDown { .. });
+            if down && focus_window {
+                focus(conn, w)?;
+            }
+            hold_chord(conn, root, keymap, &parse_held(held)?, down)?;
+        }
+        other => bail!("{other:?} is not pointer or keyboard input"),
+    }
+    Ok(())
+}
+
+/// Where the server's pointer is, in `w`'s coordinates.
+pub(crate) fn pointer(
+    conn: &RustConnection,
+    root: Window,
+    w: &WindowInfo,
+) -> Result<CursorPosition> {
+    let p = conn.query_pointer(root)?.reply()?;
+    Ok(CursorPosition {
+        window_id: w.id,
+        x: p.root_x as f64 - w.frame.x,
+        y: p.root_y as f64 - w.frame.y,
+        live: true,
+    })
+}
+
+pub(crate) fn x_button(b: MouseButton) -> u8 {
     match b {
         MouseButton::Left => 1,
         MouseButton::Middle => 2,
@@ -551,94 +694,12 @@ impl Session for LinuxSession {
             _ => {}
         }
         let w = self.window(window)?;
-        match action {
-            Action::Click {
-                x,
-                y,
-                button,
-                count,
-                modifiers,
-            } => {
-                let mods = match modifiers.as_deref().filter(|s| !s.is_empty()) {
-                    Some(s) => parse_chord(s)?.modifiers,
-                    None => Modifiers::default(),
-                };
-                self.move_to(&w, *x, *y)?;
-                let mod_codes = self.modifier_codes(mods)?;
-                for &m in &mod_codes {
-                    self.key(m, true)?;
-                }
-                for _ in 0..(*count).max(1) {
-                    self.button(x_button(*button), true)?;
-                    self.button(x_button(*button), false)?;
-                    self.conn.flush()?;
-                    sleep(Duration::from_millis(40));
-                }
-                for &m in mod_codes.iter().rev() {
-                    self.key(m, false)?;
-                }
-                self.conn.flush()?;
-            }
-            Action::MoveMouse { x, y } => self.move_to(&w, *x, *y)?,
-            Action::Drag {
-                from_x,
-                from_y,
-                to_x,
-                to_y,
-                button,
-                modifiers,
-            } => {
-                let mods = match modifiers.as_deref().filter(|s| !s.is_empty()) {
-                    Some(s) => parse_chord(s)?.modifiers,
-                    None => Modifiers::default(),
-                };
-                let mod_codes = self.modifier_codes(mods)?;
-                self.move_to(&w, *from_x, *from_y)?;
-                for &m in &mod_codes {
-                    self.key(m, true)?;
-                }
-                self.button(x_button(*button), true)?;
-                self.conn.flush()?;
-                for i in 1..=12 {
-                    let t = i as f64 / 12.0;
-                    sleep(Duration::from_millis(12));
-                    self.move_to(
-                        &w,
-                        from_x + (to_x - from_x) * t,
-                        from_y + (to_y - from_y) * t,
-                    )?;
-                }
-                self.button(x_button(*button), false)?;
-                for &m in mod_codes.iter().rev() {
-                    self.key(m, false)?;
-                }
-                self.conn.flush()?;
-            }
-            Action::Scroll { x, y, dx, dy } => {
-                self.move_to(&w, *x, *y)?;
-                wheel(&self.conn, self.root, *dx, *dy)?;
-            }
-            Action::TypeText { text } => {
-                focus(&self.conn, &w)?;
-                type_text(&self.conn, self.root, &self.keymap, text)?;
-            }
-            Action::PressKey { keys } => {
-                focus(&self.conn, &w)?;
-                for chord in parse_chords(keys)? {
-                    press_chord(&self.conn, self.root, &self.keymap, &chord)?;
-                    sleep(Duration::from_millis(20));
-                }
-            }
-            Action::ElementAction { .. }
-            | Action::ClickElement { .. }
-            | Action::SetValue { .. }
-            | Action::Focus { .. }
-            | Action::Wait { .. }
-            | Action::ChooseFile { .. } => {
-                unreachable!()
-            }
-        }
-        Ok(())
+        drive(&self.conn, self.root, &self.keymap, &w, action, true)
+    }
+
+    fn cursor(&mut self, window: Option<u64>) -> Result<Option<CursorPosition>> {
+        let w = self.window(window)?;
+        pointer(&self.conn, self.root, &w).map(Some)
     }
 
     fn notice(&mut self) -> Option<String> {
