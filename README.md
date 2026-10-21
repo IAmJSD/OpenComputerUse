@@ -70,7 +70,10 @@ display's, and screenshots show the screen as it is. Input is real: it moves
 your pointer and goes to whatever is under it or has focus, as yours does.
 The accessibility tree is the focused window's, with frames in the
 display's coordinates, so element ids work with `click`, `set_value` and
-`element_action` as in any session.
+`element_action` as in any session. When the session ends, keys and
+buttons it still holds from `key_down` and `mouse_down` are let go, so
+nothing stays pressed on your machine; the same goes for a Windows
+`foreground` session, whose input is real too.
 
 - **macOS:** displays through ScreenCaptureKit, events posted at the HID
   event tap, and the frontmost app's focused window through Accessibility.
@@ -83,7 +86,9 @@ display's coordinates, so element ids work with `click`, `set_value` and
   window from the desktop's own AT-SPI bus, placed by `_NET_ACTIVE_WINDOW`.
   Where the desktop has accessibility off (GNOME's and KDE's default), the
   session turns it on (`org.a11y.Status.IsEnabled`, as a screen reader does)
-  and back off when it ends. GTK apps export their trees either way;
+  and back off when the last screen session ends. Characters the layout
+  lacks are typed on a spare key lent for them, as `xdotool` does, and the
+  keys are given back when the session ends. GTK apps export their trees either way;
   Chromium, Firefox and Electron apps only once started while it is on, so
   ones already running need a restart to show theirs.
 - **Linux on Wayland:** Wayland lets no program read the screen or send

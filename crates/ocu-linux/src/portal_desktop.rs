@@ -79,17 +79,16 @@ fn token_file() -> Option<PathBuf> {
     Some(state.join("opencomputeruse/remote-desktop-token"))
 }
 
-fn saved_token() -> Option<String> {
-    let t = std::fs::read_to_string(token_file()?).ok()?;
+fn saved_token(path: &std::path::Path) -> Option<String> {
+    let t = std::fs::read_to_string(path).ok()?;
     Some(t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
-fn save_token(t: &str) {
-    let Some(path) = token_file() else { return };
+fn save_token(path: &std::path::Path, t: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Err(e) = std::fs::write(&path, t) {
+    if let Err(e) = std::fs::write(path, t) {
         log::warn!("saving the remote desktop restore token: {e}");
     }
 }
@@ -199,11 +198,14 @@ impl PortalDesktop {
             let conn = Connection::session()
                 .await
                 .context("the session bus, where the desktop portal is")?;
-            Self::start_on(conn, saved_token()).await
+            Self::start_on(conn, token_file()).await
         })
     }
 
-    async fn start_on(conn: Connection, restore: Option<String>) -> Result<Self> {
+    /// Starts a session on `conn`'s portal, keeping the restore token in
+    /// `tokens`.
+    async fn start_on(conn: Connection, tokens: Option<PathBuf>) -> Result<Self> {
+        let restore = tokens.as_deref().and_then(saved_token);
         let t = token();
         let mut options = request(&t);
         options.insert("session_handle_token", Value::from(token()));
@@ -233,7 +235,9 @@ impl PortalDesktop {
         let t = token();
         let started = ask(&conn, REMOTE, "Start", &t, &(&path, "", request(&t))).await?;
         if let Some(Value::Str(t)) = started.get("restore_token").map(|v| &**v) {
-            save_token(t.as_str());
+            if let Some(path) = &tokens {
+                save_token(path, t.as_str());
+            }
         }
         let devices = match started.get("devices").map(|v| &**v) {
             Some(Value::U32(d)) => *d,
@@ -401,29 +405,18 @@ fn file_path(uri: &str) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
+    //! A desktop portal for tests, on a private bus.
+
     use super::*;
     use std::sync::{Arc, Mutex};
     use zbus::message::Header;
 
-    #[test]
-    fn file_uris_become_paths() {
-        assert_eq!(
-            file_path("file:///home/a/Pictures/Screenshot%20from%202026.png"),
-            Some(PathBuf::from("/home/a/Pictures/Screenshot from 2026.png"))
-        );
-        assert_eq!(
-            file_path("file://localhost/tmp/a.png"),
-            Some("/tmp/a.png".into())
-        );
-        assert_eq!(file_path("https://example.com/a.png"), None);
-    }
-
     /// A desktop portal that grants everything and writes down what it is
     /// asked, for the client's calls and their D-Bus signatures.
     #[derive(Clone, Default)]
-    struct Fake {
-        log: Arc<Mutex<Vec<String>>>,
+    pub(crate) struct Fake {
+        pub log: Arc<Mutex<Vec<String>>>,
         shot: Arc<Mutex<Option<PathBuf>>>,
     }
 
@@ -630,20 +623,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn drives_a_desktop_through_the_portal() {
+    /// A running fake portal: drop it last.
+    pub(crate) struct Running {
+        pub fake: Fake,
+        /// Holds the token file and the screenshots.
+        pub dir: PathBuf,
+        _service: Connection,
+        _bus: Arc<ocu_core::portal::Bus>,
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A remote desktop session on a fake portal, or `None` without a
+    /// dbus-daemon to run one on.
+    pub(crate) fn start() -> Option<(Running, PortalDesktop)> {
+        static N: AtomicU64 = AtomicU64::new(0);
         let Ok(bus) = ocu_core::portal::Bus::start() else {
             eprintln!("no dbus-daemon here; skipping");
-            return;
+            return None;
         };
-        let dir = std::env::temp_dir().join(format!("ocu-portal-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "ocu-portal-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("XDG_STATE_HOME", &dir);
         let fake = Fake::default();
         *fake.shot.lock().unwrap() = Some(dir.join("Screenshot from now.png"));
         let address = bus.address().to_string();
         let served = fake.clone();
-        let (_service, client) = runtime().block_on(async move {
+        let (service, client) = runtime().block_on(async move {
             let service = zbus::connection::Builder::address(address.as_str())
                 .unwrap()
                 .name(DEST)
@@ -665,8 +678,47 @@ mod tests {
             (service, client)
         });
         let desktop = runtime()
-            .block_on(PortalDesktop::start_on(client, None))
+            .block_on(PortalDesktop::start_on(client, Some(dir.join("token"))))
             .expect("a remote desktop session");
+        Some((
+            Running {
+                fake,
+                dir,
+                _service: service,
+                _bus: bus,
+            },
+            desktop,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_uris_become_paths() {
+        assert_eq!(
+            file_path("file:///home/a/Pictures/Screenshot%20from%202026.png"),
+            Some(PathBuf::from("/home/a/Pictures/Screenshot from 2026.png"))
+        );
+        assert_eq!(
+            file_path("file://localhost/tmp/a.png"),
+            Some("/tmp/a.png".into())
+        );
+        assert_eq!(file_path("https://example.com/a.png"), None);
+        // An escape in the last three bytes is decoded too.
+        assert_eq!(file_path("file:///tmp/shot%20"), Some("/tmp/shot ".into()));
+        // A cut-off escape is kept as it is, never read past the end.
+        assert_eq!(file_path("file:///tmp/shot%2"), Some("/tmp/shot%2".into()));
+    }
+
+    #[test]
+    fn drives_a_desktop_through_the_portal() {
+        let Some((running, desktop)) = fake::start() else {
+            return;
+        };
+        let (fake, dir) = (&running.fake, &running.dir);
         assert_eq!(
             desktop.monitors(),
             &[
@@ -686,10 +738,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("opencomputeruse/remote-desktop-token")).unwrap(),
-            "kept"
-        );
+        assert_eq!(std::fs::read_to_string(dir.join("token")).unwrap(), "kept");
         let second = desktop.monitors()[1].clone();
         desktop.motion(&second, 10.5, 20.0).unwrap();
         desktop.button(MouseButton::Right, true).unwrap();
@@ -719,6 +768,5 @@ mod tests {
             ]
         );
         drop(desktop);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -357,7 +357,7 @@ fn move_to(conn: &RustConnection, root: Window, w: &WindowInfo, x: f64, y: f64) 
     Ok(())
 }
 
-fn button(conn: &RustConnection, root: Window, b: u8, down: bool) -> Result<()> {
+pub(crate) fn button(conn: &RustConnection, root: Window, b: u8, down: bool) -> Result<()> {
     let kind = if down {
         xproto::BUTTON_PRESS_EVENT
     } else {
@@ -424,7 +424,7 @@ fn chord_codes(conn: &RustConnection, keymap: &SharedKeymap, chord: &Chord) -> R
 
 /// Presses (`down`) or releases a chord's keys: modifiers first on the way
 /// down, last on the way up.
-fn hold_chord(
+pub(crate) fn hold_chord(
     conn: &RustConnection,
     root: Window,
     keymap: &SharedKeymap,

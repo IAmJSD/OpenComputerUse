@@ -140,7 +140,9 @@ jobs:
   # Chrome on a headless Wayland session: the agent's tools, the live view
   # and the sessions API (scripts/linux/wayland_smoke.py), then the X11
   # smoke test beside it. Both then read Chrome's and GTK's accessibility
-  # trees over AT-SPI (scripts/linux/a11y_checks.py).
+  # trees over AT-SPI (scripts/linux/a11y_checks.py). Last, screen sessions
+  # on an Xvfb standing in for the user's desktop, with its own
+  # accessibility bus (crates/ocu-linux/tests/screen.rs).
   linux-wayland:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -154,7 +156,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb x11-apps foot python3-websocket xkb-data fonts-dejavu-core \
-            dbus python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
+            dbus at-spi2-core python3-gi gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
             libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libpixman-1-dev
       - run: cargo build --bin opencomputeruse
@@ -162,6 +164,8 @@ jobs:
         run: python3 scripts/linux/wayland_smoke.py target/debug/opencomputeruse
       - name: X11
         run: python3 scripts/linux/smoke.py target/debug/opencomputeruse
+      - name: Screen sessions
+        run: cargo test -p ocu-linux --test screen
 
   # A real app shows an invoice, and `opencomputeruse extract` reads its
   # values with Cloudflare's Clairic from the window's accessibility tree and

@@ -18,14 +18,14 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use x11rb::connection::Connection as _;
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, Window};
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, MapState, Window};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 use ocu_core::image::{decode_png, encode_png, resize, Order, Rgba};
 use ocu_core::keys::{
-    modifier_evdev, named_evdev, parse_chord, parse_chords, parse_held, Chord, Key, Modifiers,
-    NamedKey,
+    modifier_evdev, named_evdev, parse_chord, parse_chords, parse_held, Chord, Held, Key,
+    Modifiers, NamedKey,
 };
 use ocu_core::{
     pick_window, Action, CursorPosition, Description, Rect, Screenshot, Session, TreeOptions,
@@ -35,7 +35,7 @@ use ocu_core::{
 use crate::atspi::A11y;
 use crate::keys;
 use crate::portal_desktop::{Monitor, PortalDesktop};
-use crate::xvfb::{drive, grab, pointer, title, SharedKeymap};
+use crate::xvfb::{button, drive, grab, hold_chord, pointer, title, x_button, SharedKeymap};
 
 /// Whether this is a Wayland desktop session.
 pub(crate) fn on_wayland() -> bool {
@@ -60,6 +60,10 @@ pub struct ScreenSession {
     desktop: Desktop,
     /// The desktop's accessibility bus, joined at the first tree read.
     a11y: Option<A11y>,
+    /// What `key_down` and `mouse_down` hold on the user's real keyboard and
+    /// pointer, let go when the session ends.
+    held: Held,
+    closed: bool,
 }
 
 impl ScreenSession {
@@ -88,10 +92,16 @@ impl ScreenSession {
                 display,
             }
         };
-        Ok(Self {
+        Ok(Self::on(desktop))
+    }
+
+    fn on(desktop: Desktop) -> Self {
+        Self {
             desktop,
             a11y: None,
-        })
+            held: Held::default(),
+            closed: false,
+        }
     }
 
     /// The displays, as the session's windows.
@@ -154,28 +164,107 @@ impl ScreenSession {
         Ok(self.a11y.as_mut().unwrap())
     }
 
-    /// The window with focus on an X11 desktop: its title and its top-left
-    /// on the screen.
-    fn active_x11(conn: &RustConnection, root: Window) -> Option<(String, (f64, f64))> {
-        let atom = conn
-            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
+    /// The window with focus on an X11 desktop, as the window manager says.
+    fn active_x11(conn: &RustConnection, root: Window) -> Option<Window> {
         let reply = conn
-            .get_property(false, root, atom, AtomEnum::WINDOW, 0, 1)
+            .get_property(
+                false,
+                root,
+                atom(conn, b"_NET_ACTIVE_WINDOW")?,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
             .ok()?
             .reply()
             .ok()?;
-        let active = reply.value32()?.next().filter(|&w| w != 0)?;
-        let at = conn
-            .translate_coordinates(active, root, 0, 0)
-            .ok()?
-            .reply()
-            .ok()?;
-        Some((title(conn, active), (at.dst_x as f64, at.dst_y as f64)))
+        let active = reply.value32()?.next();
+        active.filter(|&w| w != 0)
     }
+}
+
+fn atom(conn: &RustConnection, name: &[u8]) -> Option<u32> {
+    Some(conn.intern_atom(false, name).ok()?.reply().ok()?.atom)
+}
+
+/// An X11 desktop's app windows: the window manager's list, or with no
+/// window manager the root's shown children.
+fn app_windows_x11(conn: &RustConnection, root: Window) -> Vec<Window> {
+    let listed = atom(conn, b"_NET_CLIENT_LIST")
+        .and_then(|a| {
+            conn.get_property(false, root, a, AtomEnum::WINDOW, 0, 4096)
+                .ok()?
+                .reply()
+                .ok()
+        })
+        .and_then(|r| Some(r.value32()?.collect::<Vec<_>>()))
+        .filter(|l| !l.is_empty());
+    if let Some(list) = listed {
+        return list;
+    }
+    let Ok(Ok(tree)) = conn.query_tree(root).map(|c| c.reply()) else {
+        return Vec::new();
+    };
+    tree.children
+        .into_iter()
+        .filter(|&w| {
+            conn.get_window_attributes(w)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_some_and(|a| a.map_state == MapState::VIEWABLE && !a.override_redirect)
+        })
+        .collect()
+}
+
+/// Where the toplevel named `name`, `size` big, has its top-left on an X11
+/// screen. The tree may come from another toplevel than the active one,
+/// when no title matched, so its own window is looked for: the active
+/// window when its title is that, else an app window titled so, else the
+/// one app window of its size. A title can lag its accessible name (Chrome
+/// changes the name first), which the size covers.
+fn locate_x11(
+    conn: &RustConnection,
+    root: Window,
+    active: Option<Window>,
+    name: &str,
+    size: Option<(f64, f64)>,
+) -> std::result::Result<(f64, f64), String> {
+    let name = name.trim();
+    let titled = |w: Window| !name.is_empty() && title(conn, w).trim() == name;
+    let apps = || app_windows_x11(conn, root);
+    let sized = |w: Window| {
+        let Some((width, height)) = size else {
+            return false;
+        };
+        conn.get_geometry(w)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some_and(|g| {
+                (g.width as f64 - width).abs() <= 2.0 && (g.height as f64 - height).abs() <= 2.0
+            })
+    };
+    let found = active
+        .filter(|&w| titled(w))
+        .or_else(|| apps().into_iter().find(|&w| titled(w)))
+        .or_else(|| {
+            let mut same: Vec<Window> = apps().into_iter().filter(|&w| sized(w)).collect();
+            (same.len() == 1).then(|| same.remove(0))
+        })
+        .ok_or_else(|| {
+            if name.is_empty() {
+                "the focused window has no name, nor a size only it has, to find it on the X \
+                 display by"
+                    .to_string()
+            } else {
+                format!("no window on the X display is titled \"{name}\", nor alone its size")
+            }
+        })?;
+    let at = conn
+        .translate_coordinates(found, root, 0, 0)
+        .map_err(|e| e.to_string())?
+        .reply()
+        .map_err(|e| e.to_string())?;
+    Ok((at.dst_x as f64, at.dst_y as f64))
 }
 
 /// Input on a Wayland desktop, through the portal. Coordinates are the
@@ -313,20 +402,25 @@ fn crop_monitor(desktop: &Rgba, all: &[Monitor], m: &Monitor) -> Rgba {
     let left = all.iter().map(|m| m.x).min().unwrap_or(0);
     let top = all.iter().map(|m| m.y).min().unwrap_or(0);
     let right = all.iter().map(|m| m.x + m.width).max().unwrap_or(1);
-    let scale = desktop.width as f64 / (right - left).max(1) as f64;
-    let px = |v: i32, origin: i32| ((v - origin) as f64 * scale).round().max(0.0) as u32;
-    let (x0, y0) = (
-        px(m.x, left).min(desktop.width),
-        px(m.y, top).min(desktop.height),
+    let bottom = all.iter().map(|m| m.y + m.height).max().unwrap_or(1);
+    // Each axis on its own: the picture need not keep the layout's shape.
+    let (sx, sy) = (
+        desktop.width as f64 / (right - left).max(1) as f64,
+        desktop.height as f64 / (bottom - top).max(1) as f64,
     );
-    let (x1, y1) = (
-        px(m.x + m.width, left).min(desktop.width),
-        px(m.y + m.height, top).min(desktop.height),
-    );
-    let (w, h) = ((x1 - x0).max(1), (y1 - y0).max(1));
+    let px = |v: i32, origin: i32, scale: f64, size: u32| {
+        (((v - origin) as f64 * scale).round().max(0.0) as u32).min(size)
+    };
+    let (dw, dh) = (desktop.width.max(1), desktop.height.max(1));
+    // At least one pixel, inside the picture.
+    let x0 = px(m.x, left, sx, dw - 1);
+    let y0 = px(m.y, top, sy, dh - 1);
+    let x1 = px(m.x + m.width, left, sx, dw).max(x0 + 1);
+    let y1 = px(m.y + m.height, top, sy, dh).max(y0 + 1);
+    let (w, h) = (x1 - x0, y1 - y0);
     let mut data = Vec::with_capacity((w * h * 4) as usize);
-    for row in y0..y0 + h {
-        let start = ((row.min(desktop.height - 1) * desktop.width + x0) * 4) as usize;
+    for row in y0..y1 {
+        let start = ((row * desktop.width + x0) * 4) as usize;
         data.extend_from_slice(&desktop.data[start..start + (w * 4) as usize]);
     }
     let cropped = Rgba {
@@ -419,14 +513,23 @@ impl Session for ScreenSession {
     /// The focused window's tree, in `window`'s (a display's) coordinates.
     fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
         let w = self.window(window)?;
-        let (title, at) = match &self.desktop {
-            Desktop::X11 { conn, root, .. } => match Self::active_x11(conn, *root) {
-                Some((title, (x, y))) => (title, Some((x - w.frame.x, y - w.frame.y))),
-                None => (String::new(), None),
-            },
-            Desktop::Wayland(_) => (String::new(), None),
-        };
-        self.a11y()?.tree_at(w.id, &title, opts, at)
+        self.a11y()?;
+        // The fields apart, to read the display while the bus is in use.
+        let a11y = self.a11y.as_mut().expect("joined above");
+        match &self.desktop {
+            Desktop::X11 { conn, root, .. } => {
+                let active = Self::active_x11(conn, *root);
+                let wanted = active.map(|a| title(conn, a)).unwrap_or_default();
+                let origin = (w.frame.x, w.frame.y);
+                a11y.tree_at(w.id, &wanted, opts, &|name, size| {
+                    let (x, y) = locate_x11(conn, *root, active, name, size)?;
+                    Ok((x - origin.0, y - origin.1))
+                })
+            }
+            Desktop::Wayland(_) => a11y.tree_at(w.id, "", opts, &|_, _| {
+                Err("Wayland doesn't tell anyone where a window is".into())
+            }),
+        }
     }
 
     fn element_point(
@@ -464,7 +567,11 @@ impl Session for ScreenSession {
             // Keys go wherever the desktop has put focus, as a person's do.
             Desktop::X11 {
                 conn, root, keymap, ..
-            } => drive(conn, *root, keymap, &w, action, false),
+            } => {
+                // The user may have switched layouts since the last action.
+                keymap.lock().unwrap().refresh(conn)?;
+                drive(conn, *root, keymap, &w, action, false)?;
+            }
             Desktop::Wayland(p) => {
                 let m = p
                     .monitors()
@@ -472,9 +579,17 @@ impl Session for ScreenSession {
                     .find(|m| m.stream as u64 == w.id)
                     .ok_or_else(|| anyhow!("no monitor {}", w.id))?
                     .clone();
-                drive_portal(p, &m, action)
+                drive_portal(p, &m, action)?;
             }
         }
+        match action {
+            Action::KeyDown { key } => self.held.key_down(&parse_held(key)?),
+            Action::KeyUp { key } => self.held.key_up(&parse_held(key)?),
+            Action::MouseDown { button, .. } => self.held.button(*button, true),
+            Action::MouseUp { button, .. } => self.held.button(*button, false),
+            _ => {}
+        }
+        Ok(())
     }
 
     fn cursor(&mut self, window: Option<u64>) -> Result<Option<CursorPosition>> {
@@ -493,15 +608,55 @@ impl Session for ScreenSession {
         }
     }
 
-    /// Puts the desktop's accessibility back as it was.
+    /// Lets go of whatever is still held, and puts the desktop's keyboard
+    /// map and accessibility back as they were.
     fn close(&mut self) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        let keys = self.held.take_keys();
+        let buttons = std::mem::take(&mut self.held.buttons);
+        let released = match &self.desktop {
+            Desktop::X11 {
+                conn, root, keymap, ..
+            } => (|| -> Result<()> {
+                for chord in &keys {
+                    hold_chord(conn, *root, keymap, chord, false)?;
+                }
+                for b in buttons {
+                    button(conn, *root, x_button(b), false)?;
+                }
+                keymap.lock().unwrap().restore(conn)?;
+                conn.flush()?;
+                Ok(())
+            })(),
+            Desktop::Wayland(p) => (|| -> Result<()> {
+                for chord in &keys {
+                    hold_portal(p, chord, false)?;
+                }
+                for b in buttons {
+                    p.button(b, false)?;
+                }
+                Ok(())
+            })(),
+        };
+        if let Err(e) = released {
+            log::warn!("letting go of the screen session's keys: {e:#}");
+        }
         self.a11y = None;
+    }
+}
+
+impl Drop for ScreenSession {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocu_core::MouseButton;
 
     fn monitor(stream: u32, x: i32, y: i32, width: i32, height: i32) -> Monitor {
         Monitor {
@@ -539,5 +694,60 @@ mod tests {
         assert!(right.data.chunks(4).all(|p| p == [0, 0, 255, 255]));
         let left = crop_monitor(&desktop, &all, &all[0]);
         assert!(left.data.chunks(4).all(|p| p == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn a_wayland_session_lets_go_of_what_it_holds_when_it_ends() {
+        let Some((running, desktop)) = crate::portal_desktop::fake::start() else {
+            return;
+        };
+        let mut session = ScreenSession::on(Desktop::Wayland(desktop));
+        let at = |button| Action::MouseDown {
+            x: 5.0,
+            y: 6.0,
+            button,
+        };
+        session
+            .perform(
+                None,
+                &Action::KeyDown {
+                    key: "ctrl+w".into(),
+                },
+            )
+            .unwrap();
+        session.perform(None, &at(MouseButton::Left)).unwrap();
+        // Let go of one key by hand: only the rest is let go at the end.
+        session
+            .perform(None, &Action::KeyUp { key: "w".into() })
+            .unwrap();
+        running.fake.log.lock().unwrap().clear();
+        drop(session);
+        assert_eq!(
+            *running.fake.log.lock().unwrap(),
+            vec!["keycode 29 0".to_string(), "button 0x110 0".into()],
+            "ctrl and the left button are let go"
+        );
+    }
+
+    #[test]
+    fn a_picture_narrower_than_the_layout_is_cut_without_running_off_it() {
+        // A monitor whose left edge lands on the picture's right edge, and
+        // one beside it: neither may read past the pixels there are.
+        let all = [monitor(1, 0, 0, 100, 50), monitor(2, 100, 0, 1, 50)];
+        let desktop = Rgba {
+            width: 3,
+            height: 1,
+            data: vec![9; 3 * 4],
+        };
+        for m in &all {
+            let pic = crop_monitor(&desktop, &all, m);
+            assert_eq!((pic.width, pic.height), (m.width as u32, m.height as u32));
+        }
+        let empty = Rgba {
+            width: 1,
+            height: 1,
+            data: vec![0; 4],
+        };
+        crop_monitor(&empty, &all, &all[1]);
     }
 }

@@ -23,7 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_YVIRTUALSCREEN,
 };
 
-use ocu_core::keys::{Chord, Key, Modifiers, NamedKey};
+use ocu_core::keys::{Chord, Held, Key, Modifiers, NamedKey};
 use ocu_core::MouseButton;
 
 use crate::input::named_vk;
@@ -226,25 +226,40 @@ enum Keys {
     Text(char),
 }
 
+/// The key `VkKeyScanW` names and the modifiers its high byte says the
+/// character needs: shift, and ctrl with alt for AltGr, which European
+/// layouts put `@`, `€` and brackets on. `None` when no key makes it.
+fn layout_key(scan: i16) -> Option<(VIRTUAL_KEY, Modifiers)> {
+    if scan == -1 {
+        return None;
+    }
+    let state = (scan as u16) >> 8;
+    Some((
+        VIRTUAL_KEY(scan as u16 & 0xff),
+        Modifiers {
+            shift: state & 1 != 0,
+            ctrl: state & 2 != 0,
+            alt: state & 4 != 0,
+            meta: false,
+        },
+    ))
+}
+
 fn chord_keys(chord: &Chord) -> Result<Keys> {
     let mut m = chord.modifiers;
     let key = match chord.key {
         None => None,
         Some(Key::Named(k)) => Some(named_vk(k)),
-        Some(Key::Char(c)) => {
-            let scan = unsafe { VkKeyScanW(c as u16) };
-            if scan == -1 {
-                if m.is_empty() {
-                    return Ok(Keys::Text(c));
-                }
-                bail!("no key on this keyboard layout makes \"{c}\" to press with modifiers");
-            } else {
-                if scan & 0x100 != 0 {
-                    m.shift = true;
-                }
-                Some(VIRTUAL_KEY((scan & 0xff) as u16))
+        Some(Key::Char(c)) => match layout_key(unsafe { VkKeyScanW(c as u16) }) {
+            Some((vk, needs)) => {
+                m = m.with(needs);
+                Some(vk)
             }
-        }
+            None if m.is_empty() => return Ok(Keys::Text(c)),
+            None => {
+                bail!("no key on this keyboard layout makes \"{c}\" to press with modifiers")
+            }
+        },
     };
     let mut vks = modifier_vks(m);
     vks.extend(key);
@@ -280,6 +295,21 @@ pub fn press(chord: &Chord) -> Result<()> {
     hold(chord, false)
 }
 
+/// Lets go of everything `held` says is still down, where the pointer is.
+pub fn release(held: &mut Held) -> Result<()> {
+    for chord in held.take_keys() {
+        hold(&chord, false)?;
+    }
+    let buttons = std::mem::take(&mut held.buttons);
+    if !buttons.is_empty() {
+        let at = cursor()?;
+        for b in buttons {
+            button(at, b, false)?;
+        }
+    }
+    Ok(())
+}
+
 /// Text through the keys that make it where the layout has them (apps that
 /// read keys, such as games, see real presses), as typed text otherwise.
 pub fn type_text(text: &str) -> Result<()> {
@@ -298,4 +328,22 @@ pub fn type_text(text: &str) -> Result<()> {
         sleep(Duration::from_millis(4));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_layout_s_altgr_characters_press_ctrl_and_alt() {
+        // German: '@' is AltGr+Q, 'A' is shift+A, and 'q' plain.
+        let (vk, m) = layout_key(0x0651).unwrap();
+        assert_eq!(vk, VIRTUAL_KEY(0x51));
+        assert!(m.ctrl && m.alt && !m.shift);
+        let (vk, m) = layout_key(0x0141).unwrap();
+        assert_eq!(vk, VIRTUAL_KEY(0x41));
+        assert!(m.shift && !m.ctrl && !m.alt);
+        assert!(layout_key(0x0051).unwrap().1.is_empty());
+        assert!(layout_key(-1).is_none());
+    }
 }

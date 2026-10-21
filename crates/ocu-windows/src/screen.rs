@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
-use ocu_core::keys::{parse_chord, parse_chords, parse_held, Modifiers};
+use ocu_core::keys::{parse_chord, parse_chords, parse_held, Held, Modifiers};
 use ocu_core::{
     pick_window, Action, CursorPosition, Description, MouseButton, Rect, Screenshot, Session,
     TreeOptions, UiNode, WindowInfo,
@@ -71,68 +71,24 @@ fn displays() -> Vec<WindowInfo> {
 
 pub struct ScreenSession {
     uia: uia::Uia,
+    /// What `key_down` and `mouse_down` hold on the user's real keyboard and
+    /// mouse, let go when the session ends.
+    held: Held,
 }
 
 impl ScreenSession {
     pub fn new() -> Result<Self> {
         Ok(Self {
             uia: uia::Uia::new()?,
+            held: Held::default(),
         })
     }
 
     fn window(&self, window: Option<u64>) -> Result<WindowInfo> {
         pick_window(&displays(), window).cloned()
     }
-}
 
-impl Session for ScreenSession {
-    fn describe(&self) -> Description {
-        let mut details = BTreeMap::new();
-        details.insert(
-            "screen".into(),
-            "the whole desktop, one window per display, with real input: it moves your pointer \
-             and types into what has focus"
-                .into(),
-        );
-        Description {
-            backend: Some("windows-screen".into()),
-            app: "Screen".into(),
-            pid: None,
-            details,
-        }
-    }
-
-    fn windows(&mut self) -> Result<Vec<WindowInfo>> {
-        Ok(displays())
-    }
-
-    fn screenshot(&mut self, window: Option<u64>) -> Result<Screenshot> {
-        capture::capture_screen(&self.window(window)?)
-    }
-
-    /// The foreground window's tree, in `window`'s (a display's)
-    /// coordinates.
-    fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
-        let w = self.window(window)?;
-        let front = unsafe { GetForegroundWindow() };
-        if front.is_invalid() {
-            bail!("no window has focus");
-        }
-        self.uia
-            .tree(front.0 as usize as u64, (w.frame.x, w.frame.y), opts)
-    }
-
-    fn element_point(
-        &mut self,
-        window: Option<u64>,
-        element: &str,
-    ) -> Result<(Option<u64>, f64, f64)> {
-        let w = self.window(window)?;
-        let (x, y) = self.uia.center(element, (w.frame.x, w.frame.y))?;
-        Ok((Some(w.id), x, y))
-    }
-
-    fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
+    fn act(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
         let w = self.window(window)?;
         let at = |x: f64, y: f64| POINT {
             x: (w.frame.x + x).round() as i32,
@@ -197,6 +153,66 @@ impl Session for ScreenSession {
             }
         }
     }
+}
+
+impl Session for ScreenSession {
+    fn describe(&self) -> Description {
+        let mut details = BTreeMap::new();
+        details.insert(
+            "screen".into(),
+            "the whole desktop, one window per display, with real input: it moves your pointer \
+             and types into what has focus"
+                .into(),
+        );
+        Description {
+            backend: Some("windows-screen".into()),
+            app: "Screen".into(),
+            pid: None,
+            details,
+        }
+    }
+
+    fn windows(&mut self) -> Result<Vec<WindowInfo>> {
+        Ok(displays())
+    }
+
+    fn screenshot(&mut self, window: Option<u64>) -> Result<Screenshot> {
+        capture::capture_screen(&self.window(window)?)
+    }
+
+    /// The foreground window's tree, in `window`'s (a display's)
+    /// coordinates.
+    fn ui_tree(&mut self, window: Option<u64>, opts: &TreeOptions) -> Result<UiNode> {
+        let w = self.window(window)?;
+        let front = unsafe { GetForegroundWindow() };
+        if front.is_invalid() {
+            bail!("no window has focus");
+        }
+        self.uia
+            .tree(front.0 as usize as u64, (w.frame.x, w.frame.y), opts)
+    }
+
+    fn element_point(
+        &mut self,
+        window: Option<u64>,
+        element: &str,
+    ) -> Result<(Option<u64>, f64, f64)> {
+        let w = self.window(window)?;
+        let (x, y) = self.uia.center(element, (w.frame.x, w.frame.y))?;
+        Ok((Some(w.id), x, y))
+    }
+
+    fn perform(&mut self, window: Option<u64>, action: &Action) -> Result<()> {
+        self.act(window, action)?;
+        match action {
+            Action::KeyDown { key } => self.held.key_down(&parse_held(key)?),
+            Action::KeyUp { key } => self.held.key_up(&parse_held(key)?),
+            Action::MouseDown { button, .. } => self.held.button(*button, true),
+            Action::MouseUp { button, .. } => self.held.button(*button, false),
+            _ => {}
+        }
+        Ok(())
+    }
 
     fn cursor(&mut self, window: Option<u64>) -> Result<Option<CursorPosition>> {
         let w = self.window(window)?;
@@ -213,5 +229,16 @@ impl Session for ScreenSession {
         true
     }
 
-    fn close(&mut self) {}
+    /// Lets go of whatever is still held.
+    fn close(&mut self) {
+        if let Err(e) = real::release(&mut self.held) {
+            log::warn!("letting go of the screen session's keys: {e:#}");
+        }
+    }
+}
+
+impl Drop for ScreenSession {
+    fn drop(&mut self) {
+        self.close();
+    }
 }

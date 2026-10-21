@@ -67,6 +67,9 @@ pub struct Keymap {
     /// Keycodes with nothing on them, lent to missing keysyms in turn.
     spare: Vec<Keycode>,
     next_spare: usize,
+    /// Spare keycodes this has put keysyms on, to empty again on a display
+    /// that is the user's own.
+    borrowed: Vec<Keycode>,
 }
 
 impl Keymap {
@@ -89,7 +92,29 @@ impl Keymap {
             syms: reply.keysyms,
             spare,
             next_spare: 0,
+            borrowed: Vec::new(),
         })
+    }
+
+    /// Reads the map again, for a display whose layout may have changed
+    /// (the user's own), remembering what was borrowed.
+    pub fn refresh(&mut self, conn: &RustConnection) -> Result<()> {
+        let fresh = Self::read(conn)?;
+        let borrowed = std::mem::take(&mut self.borrowed);
+        *self = Self { borrowed, ..fresh };
+        Ok(())
+    }
+
+    /// Empties the spare keycodes this borrowed, leaving the map as it was.
+    pub fn restore(&mut self, conn: &RustConnection) -> Result<()> {
+        let empty = vec![0; self.per];
+        for code in std::mem::take(&mut self.borrowed) {
+            conn.change_keyboard_mapping(1, code, self.per as u8, &empty)?;
+            let at = (code - self.min) as usize * self.per;
+            self.syms[at..at + self.per].copy_from_slice(&empty);
+        }
+        conn.sync()?;
+        Ok(())
     }
 
     /// The keycode for `sym`, and whether it needs shift.
@@ -115,6 +140,9 @@ impl Keymap {
         conn.sync()?;
         let at = (code - self.min) as usize * self.per;
         self.syms[at..at + self.per].copy_from_slice(&row);
+        if !self.borrowed.contains(&code) {
+            self.borrowed.push(code);
+        }
         Ok((code, false))
     }
 }

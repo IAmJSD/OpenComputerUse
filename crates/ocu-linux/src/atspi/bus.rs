@@ -73,6 +73,19 @@ pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
 /// screen positions, and GTK 4 reports wrong ones on X11 too.
 const WINDOW_COORDS: u32 = 1;
 
+/// The readers of the desktop's own accessibility bus (screen sessions),
+/// and the session bus when one of them turned accessibility on, to turn
+/// it off again once the last of them is done.
+struct DesktopReaders {
+    count: usize,
+    turned_on: Option<Connection>,
+}
+
+static DESKTOP: Mutex<DesktopReaders> = Mutex::new(DesktopReaders {
+    count: 0,
+    turned_on: None,
+});
+
 /// Apps that have embedded themselves, newest last.
 type Apps = Arc<Mutex<Vec<ObjRef>>>;
 
@@ -121,23 +134,27 @@ impl Events {
 pub struct A11y {
     /// The session's private bus; `None` on the desktop's own.
     bus: Option<Arc<ocu_core::portal::Bus>>,
-    /// On the desktop's bus, where accessibility was off until this turned
-    /// it on: the session bus, to turn it off again at the end.
-    turned_on: Option<Connection>,
+    /// One of the readers of the desktop's own bus, counted in [`DESKTOP`].
+    on_desktop: bool,
     address: String,
     conn: Connection,
     apps: Apps,
     last: Option<Read>,
 }
 
+/// Where a toplevel has its top-left in the window a tree is read as part
+/// of, given its accessible name and size; or why that is unknown.
+pub type Locate<'a> =
+    dyn Fn(&str, Option<(f64, f64)>) -> std::result::Result<(f64, f64), String> + 'a;
+
 /// The last tree read, for acting on its elements by id.
 struct Read {
     window: u64,
     /// Subtracted from frames to put them in the window's coordinates.
     origin: (f64, f64),
-    /// Whether frames could be put there: on a Wayland desktop nobody
-    /// knows where a window is, so its elements have no position.
-    placed: bool,
+    /// Why frames could not be put there, when they couldn't: on a Wayland
+    /// desktop nobody knows where a window is.
+    unplaced: Option<String>,
     refs: Vec<ObjRef>,
     raws: Vec<Raw>,
     elements: Vec<Mapped>,
@@ -171,7 +188,7 @@ impl A11y {
         Ok(Self {
             address: bus.address().to_string(),
             bus: Some(bus),
-            turned_on: None,
+            on_desktop: false,
             conn,
             apps,
             last: None,
@@ -183,7 +200,7 @@ impl A11y {
     /// if it is off, as a screen reader does: Chromium, Firefox and Qt only
     /// export their trees while it is on.
     pub fn desktop() -> Result<Self> {
-        let (address, conn, turned_on) = runtime()
+        let (address, conn, session) = runtime()
             .block_on(async {
                 let session = Connection::session().await?;
                 let reply = tokio::time::timeout(
@@ -202,20 +219,26 @@ impl A11y {
                 let conn = zbus::connection::Builder::address(address.as_str())?
                     .build()
                     .await?;
-                let on = status(&session).await.unwrap_or(false);
-                let turned_on = if on {
-                    None
-                } else {
-                    set_status(&session, true).await?;
-                    log::info!("turned the desktop's accessibility on");
-                    Some(session)
-                };
-                zbus::Result::Ok((address, conn, turned_on))
+                zbus::Result::Ok((address, conn, session))
             })
             .map_err(|e| anyhow!("the desktop's accessibility bus: {e}"))?;
+        {
+            let mut users = DESKTOP.lock().unwrap();
+            if users.turned_on.is_none() {
+                let on = runtime().block_on(status(&session)).unwrap_or(false);
+                if !on {
+                    runtime()
+                        .block_on(set_status(&session, true))
+                        .map_err(|e| anyhow!("turning the desktop's accessibility on: {e}"))?;
+                    log::info!("turned the desktop's accessibility on");
+                    users.turned_on = Some(session);
+                }
+            }
+            users.count += 1;
+        }
         Ok(Self {
             bus: None,
-            turned_on,
+            on_desktop: true,
             address,
             conn,
             apps: Arc::default(),
@@ -238,19 +261,20 @@ impl A11y {
 
     /// Reads `window`'s tree. Ids stay good until the next read.
     pub fn tree(&mut self, window: &WindowInfo, opts: &TreeOptions) -> Result<UiNode> {
-        self.tree_at(window.id, &window.title, opts, Some((0.0, 0.0)))
+        self.tree_at(window.id, &window.title, opts, &|_, _| Ok((0.0, 0.0)))
     }
 
     /// Reads the tree of the toplevel titled `title` (else the active one)
-    /// as part of window `window`, with the toplevel's top-left at `at` in
-    /// it; `None` when that is unknown, which leaves elements without
-    /// frames. Ids stay good until the next read.
+    /// as part of window `window`. `locate` says where in `window` the
+    /// toplevel the tree was read from has its top-left, given its name, or
+    /// why that is unknown, which leaves elements without frames. Ids stay
+    /// good until the next read.
     pub fn tree_at(
         &mut self,
         window: u64,
         title: &str,
         opts: &TreeOptions,
-        at: Option<(f64, f64)>,
+        locate: &Locate<'_>,
     ) -> Result<UiNode> {
         let desktop = self.bus.is_none();
         // A freshly started app may not have registered yet, nor apps that
@@ -273,7 +297,7 @@ impl A11y {
             std::thread::sleep(Duration::from_millis(100));
         };
         if apps.is_empty() {
-            if desktop && self.turned_on.is_some() {
+            if desktop && DESKTOP.lock().unwrap().turned_on.is_some() {
                 bail!(
                     "no app has registered with the desktop's accessibility bus. Accessibility \
                      was off on this desktop, and is on for this session, but apps started \
@@ -301,18 +325,22 @@ impl A11y {
         let own = raws[0]
             .extents
             .map_or((0.0, 0.0), |(x, y, _, _)| (x as f64, y as f64));
-        let (dx, dy) = at.unwrap_or_default();
+        // Where the toplevel actually read is, which need not be the one
+        // asked for when no title matched.
+        let size = raws[0].extents.map(|(_, _, w, h)| (w as f64, h as f64));
+        let at = locate(&raws[0].name, size);
+        let (dx, dy) = at.clone().unwrap_or_default();
         let origin = (own.0 - dx, own.1 - dy);
         let mut elements = Vec::new();
         let mut tree = map::build(&raws, 0, origin, &mut elements);
-        if at.is_none() {
+        if at.is_err() {
             unplace(&mut tree);
             elements.iter_mut().for_each(|e| e.frame = None);
         }
         self.last = Some(Read {
             window,
             origin,
-            placed: at.is_some(),
+            unplaced: at.err(),
             refs,
             raws,
             elements,
@@ -346,11 +374,10 @@ impl A11y {
     /// scrolled element is found where it is now.
     pub fn center(&self, id: &str) -> Result<(u64, f64, f64)> {
         let (read, r, _, mapped) = self.element(id)?;
-        if !read.placed {
+        if let Some(why) = &read.unplaced {
             bail!(
-                "where {id} is on screen is unknown: Wayland doesn't tell apps where their \
-                 windows are. Use its own actions (element_action, set_value), or click it where \
-                 the screenshot shows it"
+                "where {id} is on screen is unknown ({why}). Use its own actions \
+                 (element_action, set_value), or click it where the screenshot shows it"
             );
         }
         let fresh = self
@@ -493,11 +520,18 @@ impl Drop for A11y {
     /// Leaves the bus before ending its daemon, which zbus would otherwise
     /// log as an error.
     fn drop(&mut self) {
-        // Accessibility goes back off when this turned it on.
-        if let Some(session) = self.turned_on.take() {
-            runtime().block_on(async move {
-                let _ = tokio::time::timeout(CALL, set_status(&session, false)).await;
-            });
+        // Accessibility goes back off with the last reader, when one of them
+        // turned it on.
+        if self.on_desktop {
+            let mut users = DESKTOP.lock().unwrap();
+            users.count -= 1;
+            if users.count == 0 {
+                if let Some(session) = users.turned_on.take() {
+                    runtime().block_on(async move {
+                        let _ = tokio::time::timeout(CALL, set_status(&session, false)).await;
+                    });
+                }
+            }
         }
         let conn = self.conn.clone();
         let bus = self.bus.clone();

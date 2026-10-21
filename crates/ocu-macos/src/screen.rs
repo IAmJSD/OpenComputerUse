@@ -10,10 +10,10 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use objc2_core_foundation::{CFBoolean, CGPoint};
 
-use ocu_core::keys::{parse_chord, parse_chords, parse_held, Modifiers};
+use ocu_core::keys::{parse_chord, parse_chords, parse_held, Held, Modifiers};
 use ocu_core::{
-    pick_window, Action, CursorPosition, Description, MouseButton, Screenshot, Session,
-    TreeOptions, UiNode, WindowInfo,
+    pick_window, Action, CursorPosition, Description, Screenshot, Session, TreeOptions, UiNode,
+    WindowInfo,
 };
 
 use crate::ax::{self, Element, ElementTable};
@@ -22,11 +22,11 @@ use crate::{capture, real};
 
 #[derive(Default)]
 pub struct ScreenSession {
-    /// Modifiers held by `key_down`. Every event carries its own flags, so
-    /// they go on each one until released.
-    held: Modifiers,
-    /// The button `mouse_down` pressed, which makes moves drags.
-    pressed: Option<MouseButton>,
+    /// What `key_down` and `mouse_down` hold on the user's real keyboard and
+    /// mouse, let go when the session ends. Every event carries its own
+    /// flags, so the held modifiers go on each one, and a held button makes
+    /// moves drags.
+    held: Held,
     /// The elements of the last tree read.
     elements: ElementTable,
     /// Apps already asked to build their whole tree (Chromium and Electron
@@ -142,7 +142,8 @@ impl Session for ScreenSession {
             x: w.frame.x + x,
             y: w.frame.y + y,
         };
-        let held = self.held;
+        let held = self.held.modifiers;
+        let pressed = self.held.buttons.last().copied();
         let mods = |m: &Option<String>| -> Result<Modifiers> {
             Ok(match m.as_deref().filter(|s| !s.is_empty()) {
                 Some(s) => parse_chord(s)?.modifiers.with(held),
@@ -157,7 +158,7 @@ impl Session for ScreenSession {
                 count,
                 modifiers,
             } => real::click(at(*x, *y), *button, *count, mods(modifiers)?),
-            Action::MoveMouse { x, y } => real::move_to(at(*x, *y), self.pressed, held),
+            Action::MoveMouse { x, y } => real::move_to(at(*x, *y), pressed, held),
             Action::Drag {
                 from_x,
                 from_y,
@@ -181,29 +182,27 @@ impl Session for ScreenSession {
                 Ok(())
             }
             Action::MouseDown { x, y, button } => {
-                real::move_to(at(*x, *y), self.pressed, held)?;
+                real::move_to(at(*x, *y), pressed, held)?;
                 real::button(at(*x, *y), *button, true, 1, held)?;
-                self.pressed = Some(*button);
+                self.held.button(*button, true);
                 Ok(())
             }
             Action::MouseUp { x, y, button } => {
-                real::move_to(at(*x, *y), self.pressed, held)?;
+                real::move_to(at(*x, *y), pressed, held)?;
                 real::button(at(*x, *y), *button, false, 1, held)?;
-                if self.pressed == Some(*button) {
-                    self.pressed = None;
-                }
+                self.held.button(*button, false);
                 Ok(())
             }
             Action::KeyDown { key } => {
                 let chord = parse_held(key)?;
                 real::hold(&chord, true, held)?;
-                self.held = held.with(chord.modifiers);
+                self.held.key_down(&chord);
                 Ok(())
             }
             Action::KeyUp { key } => {
                 let chord = parse_held(key)?;
-                self.held = held.without(chord.modifiers);
-                real::hold(&chord, false, self.held)
+                self.held.key_up(&chord);
+                real::hold(&chord, false, self.held.modifiers)
             }
             Action::Wait { .. }
             | Action::ElementAction { .. }
@@ -229,23 +228,25 @@ impl Session for ScreenSession {
         true
     }
 
+    /// Lets go of whatever is still held: keys, then modifiers, then
+    /// buttons where the pointer is.
     fn close(&mut self) {
-        // Nothing stays pressed after the session.
-        if let Some(b) = self.pressed.take() {
-            if let Ok(p) = real::cursor() {
+        for chord in self.held.take_keys() {
+            if let Err(e) = real::hold(&chord, false, Modifiers::default()) {
+                log::warn!("letting go of a held key: {e:#}");
+            }
+        }
+        let buttons = std::mem::take(&mut self.held.buttons);
+        if let (false, Ok(p)) = (buttons.is_empty(), real::cursor()) {
+            for b in buttons {
                 let _ = real::button(p, b, false, 1, Modifiers::default());
             }
         }
-        if !self.held.is_empty() {
-            let held = std::mem::take(&mut self.held);
-            let _ = real::hold(
-                &ocu_core::keys::Chord {
-                    modifiers: held,
-                    key: None,
-                },
-                false,
-                Modifiers::default(),
-            );
-        }
+    }
+}
+
+impl Drop for ScreenSession {
+    fn drop(&mut self) {
+        self.close();
     }
 }

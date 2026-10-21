@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, ShowWindow, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_RESTORE,
 };
 
-use ocu_core::keys::{parse_chord, parse_chords, parse_held, Modifiers};
+use ocu_core::keys::{parse_chord, parse_chords, parse_held, Held, Modifiers};
 use ocu_core::{
     pick_window, Action, Capturer, CursorPosition, Description, LaunchSpec, MouseButton, Platform,
     Screenshot, Session, TreeOptions, UiNode, WindowInfo,
@@ -113,6 +113,7 @@ impl Platform for WindowsPlatform {
             pinned: None,
             held: Modifiers::default(),
             pressed: None,
+            real_held: Held::default(),
         };
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut sent_back = Vec::new();
@@ -180,6 +181,7 @@ fn attach_active(spec: &LaunchSpec) -> Result<Box<dyn Session>> {
         pinned: Some(hwnd.0 as usize as u64),
         held: Modifiers::default(),
         pressed: None,
+        real_held: Held::default(),
     };
     if session.foreground {
         bring_forward(hwnd);
@@ -273,6 +275,9 @@ pub struct WindowsSession {
     /// The control a posted `mouse_down` pressed in (its handle, as window
     /// ids are), and the button, until `mouse_up`.
     pressed: Option<(u64, MouseButton)>,
+    /// What a foreground session's real `key_down` and `mouse_down` hold on
+    /// the user's keyboard and mouse, let go when the session ends.
+    real_held: Held,
 }
 
 impl WindowsSession {
@@ -513,6 +518,7 @@ impl Session for WindowsSession {
             Action::MouseDown { x, y, button } => {
                 if real {
                     real::button(at(*x, *y), *button, true)?;
+                    self.real_held.button(*button, true);
                 } else {
                     let h = input::button_down(top, at(*x, *y), *button, held);
                     self.pressed = Some((h.0 as usize as u64, *button));
@@ -521,6 +527,7 @@ impl Session for WindowsSession {
             Action::MouseUp { x, y, button } => {
                 if real {
                     real::button(at(*x, *y), *button, false)?;
+                    self.real_held.button(*button, false);
                 } else {
                     let pressed = match self.pressed {
                         Some((h, b)) if b == *button => {
@@ -536,6 +543,7 @@ impl Session for WindowsSession {
                 let chord = parse_held(key)?;
                 if real {
                     real::hold(&chord, true)?;
+                    self.real_held.key_down(&chord);
                 } else {
                     input::hold(top, &chord, true, held);
                 }
@@ -546,6 +554,7 @@ impl Session for WindowsSession {
                 let still = held.without(chord.modifiers);
                 if real {
                     real::hold(&chord, false)?;
+                    self.real_held.key_up(&chord);
                 } else {
                     input::hold(top, &chord, false, still);
                 }
@@ -601,9 +610,19 @@ impl Session for WindowsSession {
 
     fn close(&mut self) {
         if !std::mem::replace(&mut self.closed, true) {
+            // Real input left held stays down on the user's machine.
+            if let Err(e) = real::release(&mut self.real_held) {
+                log::warn!("letting go of the session's keys: {e:#}");
+            }
             // Unblocks a dialog the hook is holding.
             hook::forget(self.owner.pid());
             self.owner.kill();
         }
+    }
+}
+
+impl Drop for WindowsSession {
+    fn drop(&mut self) {
+        self.close();
     }
 }
