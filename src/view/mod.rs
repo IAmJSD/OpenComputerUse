@@ -41,6 +41,7 @@ pub fn path_for(info: &SessionInfo) -> Option<String> {
 /// Largest request head and body read.
 const MAX_HEAD: usize = 16 << 10;
 const MAX_BODY: usize = 1 << 20;
+const PAGE: &[u8] = include_bytes!("page.html");
 
 /// The view server's settings: `--view-listen` and `--view-token`, or
 /// `OCU_VIEW_LISTEN` and `OCU_VIEW_TOKEN`.
@@ -76,7 +77,7 @@ impl ViewFlags {
         Ok(flags)
     }
 
-    /// The address to listen on and the token, when the server is wanted.
+    /// The address to listen on and the token, when `--view-listen` is set.
     pub fn resolve(self, fallback_token: Option<&str>) -> Result<Option<(SocketAddr, String)>> {
         let Some(listen) = self.listen else {
             return Ok(None);
@@ -283,6 +284,14 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     if status == 401 {
         head.push_str("WWW-Authenticate: Bearer\r\n");
     }
+    if content_type.starts_with("text/html") {
+        head.push_str(
+            "Content-Security-Policy: default-src 'self'; img-src 'self' blob: data:; \
+             style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self' ws: wss:; \
+             frame-ancestors 'none'\r\n\
+             Referrer-Policy: no-referrer\r\n",
+        );
+    }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
@@ -308,6 +317,9 @@ fn connection(server: &Server, mut stream: TcpStream) -> Result<()> {
     }
     if head.path == "/health" {
         return respond_json(&mut stream, 200, &json!({ "ok": true }));
+    }
+    if head.method == "GET" && matches!(head.path.as_str(), "/" | "/view") {
+        return respond(&mut stream, 200, "text/html; charset=utf-8", PAGE);
     }
     let token = head
         .header("authorization")
@@ -692,5 +704,52 @@ mod tests {
         assert!(!same("abc", "abd"));
         assert!(!same("abc", "abcd"));
         assert_eq!(percent_decode("a%2Bb+c%zz"), "a+b c%zz");
+    }
+
+    #[test]
+    fn serves_viewer_page_and_guards_api() {
+        struct DummyPlatform;
+        impl ocu_core::Platform for DummyPlatform {
+            fn name(&self) -> &'static str {
+                "linux-xvfb"
+            }
+            fn launch(&self, _: &ocu_core::LaunchSpec) -> Result<Box<dyn ocu_core::Session>> {
+                bail!("unused")
+            }
+        }
+        let service = Service::new(Arc::new(DummyPlatform), None);
+        let (tx, _rx) = mpsc::channel();
+        let server = Server {
+            service,
+            token: "0123456789abcdef".into(),
+            worker: std::sync::Mutex::new(tx),
+        };
+        let call = |req: &str| -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let mut client = TcpStream::connect(addr).unwrap();
+            let (srv, _) = listener.accept().unwrap();
+            client.write_all(req.as_bytes()).unwrap();
+            connection(&server, srv).unwrap();
+            let mut out = String::new();
+            client.read_to_string(&mut out).unwrap();
+            out
+        };
+        let root = call("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(root.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(root.contains("Content-Type: text/html; charset=utf-8\r\n"));
+        assert!(root.contains("Content-Security-Policy:"));
+        assert!(root.contains("frame-ancestors 'none'"));
+        assert!(root.contains("Referrer-Policy: no-referrer\r\n"));
+        assert!(root.contains("<title>OpenComputerUse Live View</title>"));
+
+        let unauth = call("GET /sessions HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(unauth.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+
+        let auth = call(
+            "GET /sessions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer 0123456789abcdef\r\n\r\n",
+        );
+        assert!(auth.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(auth.contains(r#"{"sessions":[]}"#));
     }
 }
