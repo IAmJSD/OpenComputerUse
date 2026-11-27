@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenComputerUse Live View</title>
+<style>
+  :root { --bg: #0f1115; --bar: #161920; --deep: #0a0c0f; --line: #262b36; --text: #e6e9ef; --dim: #9aa2b1; --accent: #3b82f6; --ok: #3fb26b; --warn: #e5a00d; --danger: #e5534b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  .shell { display: flex; flex-direction: column; height: 100%; }
+  .bar { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; background: var(--bar); border-bottom: 1px solid var(--line); flex-shrink: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--dim); flex-shrink: 0; }
+  .dot.open { background: var(--ok); }
+  .dot.connecting { background: var(--warn); }
+  .dot.error, .dot.closed { background: var(--danger); }
+  .brand { font-weight: 600; margin-right: 4px; white-space: nowrap; }
+  select, input, button { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; outline: none; }
+  select:focus, input:focus, button:focus-visible { border-color: var(--accent); }
+  select { max-width: 240px; text-overflow: ellipsis; }
+  button { cursor: pointer; white-space: nowrap; }
+  button:hover { background: #1e222d; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+  .spacer { flex: 1; min-width: 8px; }
+  .status { color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: var(--deep); padding: 8px; position: relative; }
+  canvas { max-width: 100%; max-height: 100%; border-radius: 6px; border: 1px solid var(--line); background: #000; outline: none; cursor: not-allowed; }
+  canvas.control { cursor: default; box-shadow: 0 0 0 2px var(--accent); }
+  .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(10, 12, 15, 0.82); }
+  .overlay[hidden] { display: none; }
+  .card { background: var(--bar); border: 1px solid var(--line); border-radius: 8px; padding: 16px; width: min(360px, 90vw); display: flex; flex-direction: column; gap: 10px; }
+  .card h2 { margin: 0; font-size: 14px; }
+  .card p { margin: 0; color: var(--dim); font-size: 12px; }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="bar">
+    <span id="dot" class="dot"></span>
+    <span class="brand">OpenComputerUse</span>
+    <select id="sessions" title="Active session" hidden></select>
+    <select id="windows" title="Window" hidden></select>
+    <span id="title" class="status">No session</span>
+    <div class="spacer"></div>
+    <button id="fitBtn" type="button" title="Resize virtual display to fit browser" hidden>Fit display</button>
+    <button id="refreshBtn" type="button" title="Refresh frame">Refresh</button>
+    <button id="tokenBtn" type="button" title="Change view token">Token</button>
+    <button id="controlBtn" type="button">Take control</button>
+  </div>
+  <div id="stage" class="stage">
+    <canvas id="canvas" tabindex="0" hidden></canvas>
+    <div id="empty" class="status">Waiting for a session…</div>
+    <div id="authModal" class="overlay" hidden>
+      <form id="authForm" class="card">
+        <h2>View Token Required</h2>
+        <p>Enter the server's <code>--view-token</code> (or <code>OCU_VIEW_TOKEN</code>) to watch and control sessions.</p>
+        <div class="row">
+          <input id="tokenInput" type="password" placeholder="View token" autocomplete="off" required>
+          <button type="submit" class="primary">Connect</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  const HEADER_BYTES = 20;
+  const $ = (id) => document.getElementById(id);
+  const [dot, sessionsEl, windowsEl, titleEl, fitBtn, refreshBtn, tokenBtn, controlBtn, stage, canvas, emptyEl, authModal, authForm, tokenInput] =
+    ["dot", "sessions", "windows", "title", "fitBtn", "refreshBtn", "tokenBtn", "controlBtn", "stage", "canvas", "empty", "authModal", "authForm", "tokenInput"].map($);
+  const ctx = canvas.getContext("2d");
+
+  const url = new URL(location.href);
+  const hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
+  let requestedSession = url.searchParams.get("session") || hashParams.get("session") || "";
+  let control = (url.searchParams.get("control") || hashParams.get("control")) === "1";
+
+  let token = hashParams.get("token") || url.searchParams.get("token") || sessionStorage.getItem("ocu_view_token") || "";
+  if (url.searchParams.has("token") || hashParams.has("token")) {
+    sessionStorage.setItem("ocu_view_token", token);
+    url.searchParams.delete("token");
+    hashParams.delete("token");
+    const cleanHash = hashParams.toString();
+    history.replaceState(null, "", url.pathname + url.search + (cleanHash ? "#" + cleanHash : ""));
+  }
+
+  let ws = null;
+  let currentSession = "";
+  let currentBackend = "";
+  let currentWindows = [];
+  let currentWindow = null;
+  let decoding = Promise.resolve();
+  let viewGen = 0;
+
+  function setStatus(state, text) {
+    dot.className = "dot " + state;
+    if (text !== undefined) titleEl.textContent = text;
+  }
+  function updateControlUi() {
+    controlBtn.textContent = control ? "You're in control" : "Take control";
+    controlBtn.className = control ? "primary" : "";
+    canvas.className = control ? "control" : "";
+  }
+  updateControlUi();
+
+  controlBtn.addEventListener("click", () => { control = !control; updateControlUi(); if (control) canvas.focus(); });
+  tokenBtn.addEventListener("click", () => { tokenInput.value = token; authModal.hidden = false; tokenInput.focus(); });
+  authForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    token = tokenInput.value.trim();
+    sessionStorage.setItem("ocu_view_token", token);
+    authModal.hidden = true;
+    pollSessions();
+  });
+  refreshBtn.addEventListener("click", () => { send({ type: "refresh" }); pollSessions(); });
+  fitBtn.addEventListener("click", () => {
+    const r = stage.getBoundingClientRect();
+    send({ type: "resize", width: Math.max(64, Math.min(8192, Math.floor(r.width - 16))), height: Math.max(64, Math.min(8192, Math.floor(r.height - 16))) });
+  });
+  sessionsEl.addEventListener("change", () => {
+    if (sessionsEl.value && sessionsEl.value !== currentSession) connectSession(sessionsEl.value);
+  });
+  windowsEl.addEventListener("change", () => {
+    const id = Number(windowsEl.value);
+    if (!Number.isNaN(id)) { currentWindow = id; viewGen += 1; send({ type: "window", id }); }
+  });
+  function send(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+  }
+  function sendInput(msg) { if (control) send(msg); }
+
+  function setOptions(selectEl, items, selectedValue) {
+    while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
+    for (const item of items) {
+      const opt = document.createElement("option");
+      opt.value = String(item.value);
+      opt.textContent = item.label;
+      if (String(item.value) === String(selectedValue)) opt.selected = true;
+      selectEl.appendChild(opt);
+    }
+  }
+
+  function updateWindowsUi(windows, activeId) {
+    currentWindows = Array.isArray(windows) ? windows : [];
+    const first = currentWindows[0];
+    if (activeId === null && first) send({ type: "window", id: first.id });
+    currentWindow = activeId ?? (first ? first.id : null);
+    if (currentWindows.length > 1) {
+      setOptions(windowsEl, currentWindows.map((w) => ({
+        value: w.id,
+        label: (w.title || "Window " + w.id) + " (" + Math.round(w.frame.width) + "x" + Math.round(w.frame.height) + ")",
+      })), currentWindow);
+      windowsEl.hidden = false;
+    } else {
+      windowsEl.hidden = true;
+    }
+    const win = currentWindows.find((w) => w.id === currentWindow);
+    if (win && win.title) titleEl.textContent = win.title;
+  }
+
+  function parseHeader(buf) {
+    if (buf.byteLength < HEADER_BYTES) return null;
+    const v = new DataView(buf);
+    if (v.getUint8(0) !== 1) return null;
+    const fmt = v.getUint8(1);
+    if (fmt !== 1 && fmt !== 2) return null;
+    return {
+      mime: fmt === 2 ? "image/png" : "image/jpeg", keyframe: (v.getUint16(2, true) & 1) === 1,
+      windowId: v.getUint32(4, true), x: v.getUint16(8, true), y: v.getUint16(10, true),
+      windowWidth: v.getUint16(16, true), windowHeight: v.getUint16(18, true), image: buf.slice(HEADER_BYTES),
+    };
+  }
+
+  function connectSession(sessionId) {
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    viewGen += 1;
+    currentSession = sessionId;
+    if (!sessionId) {
+      canvas.hidden = true; emptyEl.hidden = false; emptyEl.textContent = "No active sessions.";
+      setStatus("", "No session"); return;
+    }
+    setStatus("connecting", "Connecting to " + sessionId + "…");
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(proto + "//" + location.host + "/sessions/" + encodeURIComponent(sessionId) + "/view?token=" + encodeURIComponent(token));
+    socket.binaryType = "arraybuffer";
+    ws = socket;
+    socket.onopen = () => { setStatus("open", sessionId); emptyEl.hidden = true; canvas.hidden = false; };
+    socket.onerror = () => setStatus("error", "Connection error");
+    socket.onclose = () => { if (ws === socket) { ws = null; setStatus("closed", "Disconnected"); } };
+    socket.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === "hello") {
+          currentBackend = (msg.session && msg.session.backend) || "";
+          fitBtn.hidden = currentBackend !== "linux-wayland";
+          setStatus("open", (msg.session && msg.session.app) ? msg.session.app + " (" + msg.session.id + ")" : sessionId);
+          updateWindowsUi(msg.windows, msg.window);
+        } else if (msg.type === "windows") {
+          updateWindowsUi(msg.windows, msg.window);
+        } else if (msg.type === "error" && msg.message) {
+          titleEl.textContent = "Error: " + msg.message;
+        } else if (msg.type === "ended") {
+          currentSession = ""; canvas.hidden = true; emptyEl.hidden = false;
+          emptyEl.textContent = "Session ended."; setStatus("closed", "Session ended");
+          pollSessions();
+        }
+        return;
+      }
+      const frame = parseHeader(ev.data);
+      if (!frame) return;
+      const gen = viewGen;
+      decoding = decoding
+        .then(() => createImageBitmap(new Blob([frame.image], { type: frame.mime })))
+        .then((bmp) => {
+          if (gen !== viewGen || (currentWindow !== null && frame.windowId !== 0 && frame.windowId !== currentWindow)) {
+            bmp.close(); return;
+          }
+          if (frame.keyframe && (canvas.width !== frame.windowWidth || canvas.height !== frame.windowHeight)) {
+            canvas.width = frame.windowWidth; canvas.height = frame.windowHeight;
+          }
+          ctx.drawImage(bmp, frame.x, frame.y);
+          bmp.close();
+        })
+        .catch(() => {});
+    };
+  }
+
+  async function pollSessions() {
+    if (!token) { authModal.hidden = false; tokenInput.focus(); return; }
+    try {
+      const res = await fetch("/sessions", { headers: { Authorization: "Bearer " + token } });
+      if (res.status === 401) { authModal.hidden = false; tokenInput.focus(); setStatus("error", "Unauthorized"); return; }
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = Array.isArray(data.sessions) ? data.sessions : [];
+      if (list.length === 0) {
+        sessionsEl.hidden = true; windowsEl.hidden = true; fitBtn.hidden = true;
+        if (currentSession) connectSession("");
+        else { emptyEl.hidden = false; emptyEl.textContent = "No active sessions."; }
+        return;
+      }
+      const items = list.map((s) => ({ value: s.session_id, label: ((s.session && s.session.app) || s.session_id) + " (" + s.session_id + ")" }));
+      let target = currentSession;
+      if (!target || !list.some((s) => s.session_id === target)) {
+        if (requestedSession && list.some((s) => s.session_id === requestedSession)) { target = requestedSession; requestedSession = ""; }
+        else target = list[list.length - 1].session_id;
+      }
+      setOptions(sessionsEl, items, target);
+      sessionsEl.hidden = list.length <= 1;
+      if (target !== currentSession || !ws) connectSession(target);
+    } catch {}
+  }
+
+  function toWindow(e) {
+    const r = canvas.getBoundingClientRect();
+    if (!r.width || !r.height) return { x: 0, y: 0 };
+    const x = Math.round(((e.clientX - r.left) / r.width) * canvas.width);
+    const y = Math.round(((e.clientY - r.top) / r.height) * canvas.height);
+    return { x: Math.max(0, Math.min(canvas.width, x)), y: Math.max(0, Math.min(canvas.height, y)) };
+  }
+
+  function btn(b) { return b === 1 || b === 2 ? b : 0; }
+  canvas.addEventListener("contextmenu", (e) => { if (control) e.preventDefault(); });
+  canvas.addEventListener("pointermove", (e) => sendInput({ type: "pointer", action: "move", ...toWindow(e), button: btn(e.button) }));
+  canvas.addEventListener("pointerdown", (e) => { canvas.focus(); sendInput({ type: "pointer", action: "down", ...toWindow(e), button: btn(e.button) }); });
+  canvas.addEventListener("pointerup", (e) => sendInput({ type: "pointer", action: "up", ...toWindow(e), button: btn(e.button) }));
+  canvas.addEventListener("wheel", (e) => {
+    if (!control) return;
+    e.preventDefault();
+    const scale = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
+    sendInput({ type: "wheel", ...toWindow(e), dx: Math.round(e.deltaX * scale), dy: Math.round(e.deltaY * scale) });
+  }, { passive: false });
+  canvas.addEventListener("keydown", (e) => { if (!control || e.isComposing) return; e.preventDefault(); sendInput({ type: "key", action: "down", code: e.code, key: e.key }); });
+  canvas.addEventListener("keyup", (e) => { if (!control) return; e.preventDefault(); sendInput({ type: "key", action: "up", code: e.code, key: e.key }); });
+  canvas.addEventListener("paste", (e) => {
+    if (!control) return;
+    e.preventDefault();
+    const text = (e.clipboardData && e.clipboardData.getData("text")) || "";
+    if (text) sendInput({ type: "text", text });
+  });
+
+  pollSessions();
+  setInterval(pollSessions, 2000);
+})();
+</script>
+</body>
+</html>

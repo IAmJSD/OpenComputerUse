@@ -9,6 +9,7 @@
 //! it.
 
 pub mod protocol;
+pub mod vnc;
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
@@ -41,13 +42,25 @@ pub fn path_for(info: &SessionInfo) -> Option<String> {
 /// Largest request head and body read.
 const MAX_HEAD: usize = 16 << 10;
 const MAX_BODY: usize = 1 << 20;
+const PAGE: &[u8] = include_bytes!("page.html");
 
-/// The view server's settings: `--view-listen` and `--view-token`, or
-/// `OCU_VIEW_LISTEN` and `OCU_VIEW_TOKEN`.
+/// The view server's settings: `--view-listen`, `--vnc-listen` and
+/// `--view-token`, or `OCU_VIEW_LISTEN`, `OCU_VNC_LISTEN` and
+/// `OCU_VIEW_TOKEN`.
 #[derive(Debug, Default, PartialEq)]
 pub struct ViewFlags {
     pub listen: Option<String>,
+    pub vnc_listen: Option<String>,
     pub token: Option<String>,
+}
+
+/// Resolved addresses for the HTTP/WebSocket view server and the VNC (RFB)
+/// server, sharing one authentication token.
+#[derive(Debug, PartialEq)]
+pub struct ResolvedView {
+    pub http: Option<SocketAddr>,
+    pub vnc: Option<SocketAddr>,
+    pub token: String,
 }
 
 impl ViewFlags {
@@ -61,6 +74,7 @@ impl ViewFlags {
             };
             let slot = match name {
                 "--view-listen" => &mut flags.listen,
+                "--vnc-listen" => &mut flags.vnc_listen,
                 "--view-token" => &mut flags.token,
                 _ => continue,
             };
@@ -72,18 +86,32 @@ impl ViewFlags {
         }
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         flags.listen = flags.listen.or_else(|| env("OCU_VIEW_LISTEN"));
+        flags.vnc_listen = flags.vnc_listen.or_else(|| env("OCU_VNC_LISTEN"));
         flags.token = flags.token.or_else(|| env("OCU_VIEW_TOKEN"));
         Ok(flags)
     }
 
-    /// The address to listen on and the token, when the server is wanted.
-    pub fn resolve(self, fallback_token: Option<&str>) -> Result<Option<(SocketAddr, String)>> {
-        let Some(listen) = self.listen else {
+    pub fn any(&self) -> bool {
+        self.listen.is_some() || self.vnc_listen.is_some()
+    }
+
+    /// The addresses to listen on and the token, when either server is wanted.
+    pub fn resolve(self, fallback_token: Option<&str>) -> Result<Option<ResolvedView>> {
+        if !self.any() {
             return Ok(None);
+        }
+        let http = match self.listen {
+            Some(l) => Some(l.parse().map_err(|_| {
+                anyhow!("--view-listen takes an address and port, like 0.0.0.0:7900")
+            })?),
+            None => None,
         };
-        let addr: SocketAddr = listen
-            .parse()
-            .map_err(|_| anyhow!("--view-listen takes an address and port, like 0.0.0.0:7900"))?;
+        let vnc = match self.vnc_listen {
+            Some(l) => Some(l.parse().map_err(|_| {
+                anyhow!("--vnc-listen takes an address and port, like 127.0.0.1:5900")
+            })?),
+            None => None,
+        };
         let token = self
             .token
             .or_else(|| fallback_token.map(str::to_string))
@@ -91,8 +119,20 @@ impl ViewFlags {
                 anyhow!("the view server needs a token: --view-token or OCU_VIEW_TOKEN")
             })?;
         check_token(&token)?;
-        Ok(Some((addr, token)))
+        Ok(Some(ResolvedView { http, vnc, token }))
     }
+}
+
+/// Starts whichever of the HTTP live-view server and the VNC server were
+/// asked for in `resolved`.
+pub fn start_resolved(service: Arc<Service>, resolved: ResolvedView) -> Result<()> {
+    if let Some(addr) = resolved.http {
+        start(service.clone(), addr, resolved.token.clone())?;
+    }
+    if let Some(addr) = resolved.vnc {
+        vnc::start(service, addr, resolved.token)?;
+    }
+    Ok(())
 }
 
 /// Tokens are at least 16 characters a client can send in a header or a
@@ -283,6 +323,14 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     if status == 401 {
         head.push_str("WWW-Authenticate: Bearer\r\n");
     }
+    if content_type.starts_with("text/html") {
+        head.push_str(
+            "Content-Security-Policy: default-src 'self'; img-src 'self' blob: data:; \
+             style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self' ws: wss:; \
+             frame-ancestors 'none'\r\n\
+             Referrer-Policy: no-referrer\r\n",
+        );
+    }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
@@ -308,6 +356,9 @@ fn connection(server: &Server, mut stream: TcpStream) -> Result<()> {
     }
     if head.path == "/health" {
         return respond_json(&mut stream, 200, &json!({ "ok": true }));
+    }
+    if head.method == "GET" && matches!(head.path.as_str(), "/" | "/view") {
+        return respond(&mut stream, 200, "text/html; charset=utf-8", PAGE);
     }
     let token = head
         .header("authorization")
@@ -397,6 +448,9 @@ fn describe(server: &Server, info: SessionInfo) -> Value {
     let mut v = json!({ "session_id": info.id, "session": info, "windows": windows });
     if let Some(path) = view {
         v["view_path"] = json!(path);
+    }
+    if let Some(addr) = vnc::addr_for(&info) {
+        v["vnc_listen"] = json!(addr);
     }
     v
 }
@@ -656,21 +710,28 @@ mod tests {
             "mcp",
             "--view-listen",
             "0.0.0.0:7900",
+            "--vnc-listen",
+            "127.0.0.1:5900",
             "--view-token=abcdefghijklmnop",
         ]))
         .unwrap();
         assert_eq!(f.listen.as_deref(), Some("0.0.0.0:7900"));
-        let (addr, token) = f.resolve(None).unwrap().unwrap();
-        assert_eq!(addr.port(), 7900);
-        assert_eq!(token, "abcdefghijklmnop");
+        assert_eq!(f.vnc_listen.as_deref(), Some("127.0.0.1:5900"));
+        let r = f.resolve(None).unwrap().unwrap();
+        assert_eq!(r.http.unwrap().port(), 7900);
+        assert_eq!(r.vnc.unwrap().port(), 5900);
+        assert_eq!(r.token, "abcdefghijklmnop");
         assert!(ViewFlags::parse(&args(&["--view-listen"])).is_err());
+        assert!(ViewFlags::parse(&args(&["--vnc-listen"])).is_err());
         let no_token = ViewFlags {
             listen: Some("127.0.0.1:1".into()),
+            vnc_listen: None,
             token: None,
         };
         assert!(no_token.resolve(None).is_err());
         let fallback = ViewFlags {
-            listen: Some("127.0.0.1:1".into()),
+            listen: None,
+            vnc_listen: Some("127.0.0.1:5900".into()),
             token: None,
         };
         assert_eq!(
@@ -678,7 +739,7 @@ mod tests {
                 .resolve(Some("0123456789abcdef"))
                 .unwrap()
                 .unwrap()
-                .1,
+                .token,
             "0123456789abcdef"
         );
         assert!(ViewFlags::default().resolve(None).unwrap().is_none());
@@ -692,5 +753,52 @@ mod tests {
         assert!(!same("abc", "abd"));
         assert!(!same("abc", "abcd"));
         assert_eq!(percent_decode("a%2Bb+c%zz"), "a+b c%zz");
+    }
+
+    #[test]
+    fn serves_viewer_page_and_guards_api() {
+        struct DummyPlatform;
+        impl ocu_core::Platform for DummyPlatform {
+            fn name(&self) -> &'static str {
+                "linux-xvfb"
+            }
+            fn launch(&self, _: &ocu_core::LaunchSpec) -> Result<Box<dyn ocu_core::Session>> {
+                bail!("unused")
+            }
+        }
+        let service = Service::new(Arc::new(DummyPlatform), None);
+        let (tx, _rx) = mpsc::channel();
+        let server = Server {
+            service,
+            token: "0123456789abcdef".into(),
+            worker: std::sync::Mutex::new(tx),
+        };
+        let call = |req: &str| -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let mut client = TcpStream::connect(addr).unwrap();
+            let (srv, _) = listener.accept().unwrap();
+            client.write_all(req.as_bytes()).unwrap();
+            connection(&server, srv).unwrap();
+            let mut out = String::new();
+            client.read_to_string(&mut out).unwrap();
+            out
+        };
+        let root = call("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(root.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(root.contains("Content-Type: text/html; charset=utf-8\r\n"));
+        assert!(root.contains("Content-Security-Policy:"));
+        assert!(root.contains("frame-ancestors 'none'"));
+        assert!(root.contains("Referrer-Policy: no-referrer\r\n"));
+        assert!(root.contains("<title>OpenComputerUse Live View</title>"));
+
+        let unauth = call("GET /sessions HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(unauth.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+
+        let auth = call(
+            "GET /sessions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer 0123456789abcdef\r\n\r\n",
+        );
+        assert!(auth.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(auth.contains(r#"{"sessions":[]}"#));
     }
 }

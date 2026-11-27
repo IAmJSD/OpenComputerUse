@@ -388,25 +388,43 @@ The skill is the same from every host, phones included.
 ## Live view
 
 A person can watch a session's window and drive it alongside the agent,
-from a browser. On Linux the view is the session's own display. On Windows
-and macOS it's the window's own capture stream (Windows.Graphics.Capture,
-ScreenCaptureKit's `SCStream`), sending a picture whenever the window
-changes, with the watcher's clicks and keys sent as the session's actions;
-where a window can't be streamed, its screenshots are polled instead. On
-macOS, run it with `serve`, since the app's MCP server can't share its
-sessions. Start the
-server with a view address and a token (at least 16 letters, digits or
-`-._~`):
+from a browser or a VNC client. On Linux the view is the session's own
+display. On Windows and macOS it's the window's own capture stream
+(Windows.Graphics.Capture, ScreenCaptureKit's `SCStream`), sending a picture
+whenever the window changes, with the watcher's clicks and keys sent as the
+session's actions; where a window can't be streamed, its screenshots are
+polled instead. On macOS, run it with `serve`, since the app's MCP server
+can't share its sessions. Start the server with a view address and a token
+(at least 16 letters, digits or `-._~`):
 
 ```sh
 opencomputeruse mcp --view-listen 0.0.0.0:7900 --view-token "$TOKEN"
 # or OCU_VIEW_LISTEN=0.0.0.0:7900 OCU_VIEW_TOKEN=$TOKEN opencomputeruse mcp
 ```
 
+Open `http://<host>:7900/#token=<token>` in a browser for the built-in live
+viewer (`GET /` or `GET /view`), which lists active sessions, streams frames,
+and has a **Take control** toggle for forwarding clicks, scroll, keys, and
+clipboard paste.
+
+To expose an RFB 3.8 (VNC) server alongside or instead of the HTTP viewer,
+pass `--vnc-listen ADDR:PORT` (or `OCU_VNC_LISTEN=ADDR:PORT`):
+
+```sh
+opencomputeruse mcp --view-listen 0.0.0.0:7900 --vnc-listen 127.0.0.1:5900 --view-token "$TOKEN"
+```
+
+Standard VNC clients (macOS Screen Sharing `vnc://127.0.0.1:5900`, TigerVNC,
+RealVNC) authenticate with VNC Authentication (SecurityType 2) using the
+view token as the password (standard VNC truncates passwords to the first 8
+characters). The VNC server streams the newest active session and forwards
+pointer, wheel, keyboard, and clipboard events.
+
 With the view on, sessions are shared: every client can use every session,
 and a session lasts until it is ended (or the server exits), not until the
 client that started it goes. `start_session` answers with the session's
-`view_path`.
+`view_path` (when `--view-listen` is on) and `vnc_listen` (when `--vnc-listen`
+is on).
 
 ### One server in a container
 
@@ -416,24 +434,28 @@ For one long-lived server that several harnesses and a web UI share, run
 
 ```sh
 OCU_LINUX_DISPLAY=wayland opencomputeruse serve --port 7800 --token "$TOKEN" \
-  --view-listen 0.0.0.0:7900
+  --view-listen 0.0.0.0:7900 --vnc-listen 0.0.0.0:5900
 ```
 
 Harnesses connect to `http://<host>:7800/mcp` with
 `Authorization: Bearer $TOKEN` (for example `claude mcp add --transport http
 ocu http://<host>:7800/mcp --header "Authorization: Bearer $TOKEN"`). The
-view uses the same token unless `--view-token` sets another. `--token` can
-also come from `OCU_SERVE_TOKEN`.
+view and VNC listeners use the same token unless `--view-token` sets another.
+`--token` can also come from `OCU_SERVE_TOKEN`.
 
 ### HTTP API
 
-Every request but `GET /health` needs the token, as `Authorization: Bearer
-<token>` or `?token=<token>` (browsers can't set headers on a WebSocket).
-Answers are JSON; errors are `{"error": "..."}`. CORS is open, since the
-token is the only credential.
+`GET /` and `GET /view` serve the built-in browser viewer HTML page without
+requiring a token header (the page reads `#token=<token>` or `?token=<token>`
+in the browser, stores it in `sessionStorage`, and strips it from the URL
+bar). Every other request but `GET /health` needs the token, as
+`Authorization: Bearer <token>` or `?token=<token>` (browsers can't set
+headers on a WebSocket). Answers are JSON; errors are `{"error": "..."}`.
+CORS is open, since the token is the only credential.
 
 | Request | Answer |
 | --- | --- |
+| `GET /` or `GET /view` | the built-in HTML live viewer |
 | `GET /sessions` | `{"sessions": [Session]}` |
 | `POST /sessions` with `{"app", "args"?, "env"?, "cwd"?, "display"?, "display_width"?, "display_height"?}` | `201` and the new `Session` |
 | `GET /sessions/{id}` | `Session` |
@@ -442,8 +464,8 @@ token is the only credential.
 | `GET /sessions/{id}/view` | the WebSocket below |
 
 A `Session` is `{"session_id", "session": {"id", "app", "pid", "backend",
-"details"}, "windows": [Window], "view_path"}`, and a `Window` is `{"id",
-"title", "frame": {"x", "y", "width", "height"}, "on_screen"}`.
+"details"}, "windows": [Window], "view_path"?, "vnc_listen"?}`, and a `Window`
+is `{"id", "title", "frame": {"x", "y", "width", "height"}, "on_screen"}`.
 
 ### The WebSocket
 
