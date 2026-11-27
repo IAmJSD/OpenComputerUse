@@ -9,6 +9,7 @@
 //! it.
 
 pub mod protocol;
+pub mod vnc;
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
