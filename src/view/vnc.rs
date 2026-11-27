@@ -928,6 +928,7 @@ fn des_block(block: u64, subkeys: &[u64; 16]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn des_fips_and_vnc_bit_reversal() {
@@ -1077,5 +1078,161 @@ mod tests {
             }]
         );
         assert_eq!(k.release_all().len(), 1);
+    }
+
+    #[test]
+    fn rfb_handshake_frames_and_input_roundtrip() {
+        struct MockViewer {
+            inputs: Mutex<Vec<ViewInput>>,
+        }
+        impl Viewer for MockViewer {
+            fn windows(&self) -> Result<Vec<ocu_core::WindowInfo>> {
+                Ok(vec![ocu_core::WindowInfo {
+                    id: 1,
+                    title: "Test".into(),
+                    frame: ocu_core::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 4.0,
+                        height: 2.0,
+                    },
+                    on_screen: true,
+                }])
+            }
+            fn frame(&self, _: Option<u64>) -> Result<Frame> {
+                Ok(Frame {
+                    window_id: 1,
+                    width: 4,
+                    height: 2,
+                    stride: 16,
+                    data: vec![0x42; 32],
+                    order: Order::Bgra,
+                })
+            }
+            fn input(&self, _: Option<u64>, input: &ViewInput) -> Result<()> {
+                self.inputs.lock().unwrap().push(input.clone());
+                Ok(())
+            }
+            fn is_alive(&self) -> bool {
+                true
+            }
+        }
+        struct MockSession(Arc<MockViewer>);
+        impl ocu_core::Session for MockSession {
+            fn describe(&self) -> ocu_core::Description {
+                ocu_core::Description {
+                    app: "TestApp".into(),
+                    pid: Some(42),
+                    ..Default::default()
+                }
+            }
+            fn windows(&mut self) -> Result<Vec<ocu_core::WindowInfo>> {
+                self.0.windows()
+            }
+            fn screenshot(&mut self, _: Option<u64>) -> Result<ocu_core::Screenshot> {
+                bail!("unused")
+            }
+            fn perform(&mut self, _: Option<u64>, _: &ocu_core::Action) -> Result<()> {
+                Ok(())
+            }
+            fn is_alive(&mut self) -> bool {
+                true
+            }
+            fn close(&mut self) {}
+            fn viewer(&mut self) -> Option<Arc<dyn Viewer>> {
+                Some(self.0.clone())
+            }
+        }
+        struct MockPlatform(Arc<MockViewer>);
+        impl ocu_core::Platform for MockPlatform {
+            fn name(&self) -> &'static str {
+                "linux-wayland"
+            }
+            fn launch(&self, _: &ocu_core::LaunchSpec) -> Result<Box<dyn ocu_core::Session>> {
+                Ok(Box::new(MockSession(self.0.clone())))
+            }
+        }
+
+        let viewer = Arc::new(MockViewer {
+            inputs: Mutex::new(Vec::new()),
+        });
+        let service = Service::new(Arc::new(MockPlatform(viewer.clone())), None);
+        service.share_sessions();
+        let mut client_handle = service.client();
+        ocu_core::Handler::handle(
+            &mut client_handle,
+            ocu_core::Request::StartSession(ocu_core::LaunchSpec {
+                app: "TestApp".into(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        let token = "secret_token_123456";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let svc = service.clone();
+        let tok = token.to_string();
+        let handle = std::thread::spawn(move || {
+            let (srv, _) = listener.accept().unwrap();
+            connection(&svc, &tok, srv)
+        });
+
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut greeting = [0u8; 12];
+        c.read_exact(&mut greeting).unwrap();
+        assert_eq!(&greeting, b"RFB 003.008\n");
+        c.write_all(b"RFB 003.889\n").unwrap();
+
+        let mut sec = [0u8; 2];
+        c.read_exact(&mut sec).unwrap();
+        assert_eq!(sec, [1, 2]);
+        c.write_all(&[2]).unwrap();
+
+        let mut challenge = [0u8; 16];
+        c.read_exact(&mut challenge).unwrap();
+        let resp = vnc_encrypt_challenge(&challenge, token.as_bytes());
+        c.write_all(&resp).unwrap();
+
+        let mut res = [0u8; 4];
+        c.read_exact(&mut res).unwrap();
+        assert_eq!(u32::from_be_bytes(res), 0);
+
+        c.write_all(&[1]).unwrap();
+        let mut init = [0u8; 24];
+        c.read_exact(&mut init).unwrap();
+        assert_eq!(u16::from_be_bytes([init[0], init[1]]), 4);
+        assert_eq!(u16::from_be_bytes([init[2], init[3]]), 2);
+        let name_len = u32::from_be_bytes([init[20], init[21], init[22], init[23]]) as usize;
+        let mut name = vec![0u8; name_len];
+        c.read_exact(&mut name).unwrap();
+        assert!(String::from_utf8_lossy(&name).starts_with("TestApp ("));
+
+        c.write_all(&[3, 0, 0, 0, 0, 0, 0, 4, 0, 2]).unwrap();
+        c.write_all(&[5, 1, 0, 2, 0, 1]).unwrap();
+        c.write_all(&[4, 1, 0, 0, 0, 0, 0, b'x']).unwrap();
+
+        let mut fb_head = [0u8; 16];
+        c.read_exact(&mut fb_head).unwrap();
+        assert_eq!(fb_head[0], 0);
+        assert_eq!(u16::from_be_bytes([fb_head[2], fb_head[3]]), 1);
+        assert_eq!(u16::from_be_bytes([fb_head[8], fb_head[9]]), 4);
+        assert_eq!(u16::from_be_bytes([fb_head[10], fb_head[11]]), 2);
+        let mut pixels = [0u8; 32];
+        c.read_exact(&mut pixels).unwrap();
+        assert_eq!(pixels, [0x42; 32]);
+
+        drop(c);
+        handle.join().unwrap().unwrap();
+
+        let got = viewer.inputs.lock().unwrap().clone();
+        assert!(got.contains(&ViewInput::Button {
+            x: 2.0,
+            y: 1.0,
+            button: MouseButton::Left,
+            down: true,
+        }));
+        assert!(got.contains(&ViewInput::Text { text: "x".into() }));
     }
 }

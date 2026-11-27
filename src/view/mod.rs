@@ -44,12 +44,23 @@ const MAX_HEAD: usize = 16 << 10;
 const MAX_BODY: usize = 1 << 20;
 const PAGE: &[u8] = include_bytes!("page.html");
 
-/// The view server's settings: `--view-listen` and `--view-token`, or
-/// `OCU_VIEW_LISTEN` and `OCU_VIEW_TOKEN`.
+/// The view server's settings: `--view-listen`, `--vnc-listen` and
+/// `--view-token`, or `OCU_VIEW_LISTEN`, `OCU_VNC_LISTEN` and
+/// `OCU_VIEW_TOKEN`.
 #[derive(Debug, Default, PartialEq)]
 pub struct ViewFlags {
     pub listen: Option<String>,
+    pub vnc_listen: Option<String>,
     pub token: Option<String>,
+}
+
+/// Resolved addresses for the HTTP/WebSocket view server and the VNC (RFB)
+/// server, sharing one authentication token.
+#[derive(Debug, PartialEq)]
+pub struct ResolvedView {
+    pub http: Option<SocketAddr>,
+    pub vnc: Option<SocketAddr>,
+    pub token: String,
 }
 
 impl ViewFlags {
@@ -63,6 +74,7 @@ impl ViewFlags {
             };
             let slot = match name {
                 "--view-listen" => &mut flags.listen,
+                "--vnc-listen" => &mut flags.vnc_listen,
                 "--view-token" => &mut flags.token,
                 _ => continue,
             };
@@ -74,18 +86,32 @@ impl ViewFlags {
         }
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         flags.listen = flags.listen.or_else(|| env("OCU_VIEW_LISTEN"));
+        flags.vnc_listen = flags.vnc_listen.or_else(|| env("OCU_VNC_LISTEN"));
         flags.token = flags.token.or_else(|| env("OCU_VIEW_TOKEN"));
         Ok(flags)
     }
 
-    /// The address to listen on and the token, when `--view-listen` is set.
-    pub fn resolve(self, fallback_token: Option<&str>) -> Result<Option<(SocketAddr, String)>> {
-        let Some(listen) = self.listen else {
+    pub fn any(&self) -> bool {
+        self.listen.is_some() || self.vnc_listen.is_some()
+    }
+
+    /// The addresses to listen on and the token, when either server is wanted.
+    pub fn resolve(self, fallback_token: Option<&str>) -> Result<Option<ResolvedView>> {
+        if !self.any() {
             return Ok(None);
+        }
+        let http = match self.listen {
+            Some(l) => Some(l.parse().map_err(|_| {
+                anyhow!("--view-listen takes an address and port, like 0.0.0.0:7900")
+            })?),
+            None => None,
         };
-        let addr: SocketAddr = listen
-            .parse()
-            .map_err(|_| anyhow!("--view-listen takes an address and port, like 0.0.0.0:7900"))?;
+        let vnc = match self.vnc_listen {
+            Some(l) => Some(l.parse().map_err(|_| {
+                anyhow!("--vnc-listen takes an address and port, like 127.0.0.1:5900")
+            })?),
+            None => None,
+        };
         let token = self
             .token
             .or_else(|| fallback_token.map(str::to_string))
@@ -93,8 +119,20 @@ impl ViewFlags {
                 anyhow!("the view server needs a token: --view-token or OCU_VIEW_TOKEN")
             })?;
         check_token(&token)?;
-        Ok(Some((addr, token)))
+        Ok(Some(ResolvedView { http, vnc, token }))
     }
+}
+
+/// Starts whichever of the HTTP live-view server and the VNC server were
+/// asked for in `resolved`.
+pub fn start_resolved(service: Arc<Service>, resolved: ResolvedView) -> Result<()> {
+    if let Some(addr) = resolved.http {
+        start(service.clone(), addr, resolved.token.clone())?;
+    }
+    if let Some(addr) = resolved.vnc {
+        vnc::start(service, addr, resolved.token)?;
+    }
+    Ok(())
 }
 
 /// Tokens are at least 16 characters a client can send in a header or a
@@ -669,21 +707,28 @@ mod tests {
             "mcp",
             "--view-listen",
             "0.0.0.0:7900",
+            "--vnc-listen",
+            "127.0.0.1:5900",
             "--view-token=abcdefghijklmnop",
         ]))
         .unwrap();
         assert_eq!(f.listen.as_deref(), Some("0.0.0.0:7900"));
-        let (addr, token) = f.resolve(None).unwrap().unwrap();
-        assert_eq!(addr.port(), 7900);
-        assert_eq!(token, "abcdefghijklmnop");
+        assert_eq!(f.vnc_listen.as_deref(), Some("127.0.0.1:5900"));
+        let r = f.resolve(None).unwrap().unwrap();
+        assert_eq!(r.http.unwrap().port(), 7900);
+        assert_eq!(r.vnc.unwrap().port(), 5900);
+        assert_eq!(r.token, "abcdefghijklmnop");
         assert!(ViewFlags::parse(&args(&["--view-listen"])).is_err());
+        assert!(ViewFlags::parse(&args(&["--vnc-listen"])).is_err());
         let no_token = ViewFlags {
             listen: Some("127.0.0.1:1".into()),
+            vnc_listen: None,
             token: None,
         };
         assert!(no_token.resolve(None).is_err());
         let fallback = ViewFlags {
-            listen: Some("127.0.0.1:1".into()),
+            listen: None,
+            vnc_listen: Some("127.0.0.1:5900".into()),
             token: None,
         };
         assert_eq!(
@@ -691,7 +736,7 @@ mod tests {
                 .resolve(Some("0123456789abcdef"))
                 .unwrap()
                 .unwrap()
-                .1,
+                .token,
             "0123456789abcdef"
         );
         assert!(ViewFlags::default().resolve(None).unwrap().is_none());

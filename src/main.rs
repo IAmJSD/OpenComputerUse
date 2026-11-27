@@ -70,9 +70,10 @@ USAGE:
     sudo opencomputeruse install-lock     Enable working while the Mac is locked (macOS; one-time)
     sudo opencomputeruse uninstall-lock   Undo install-lock, restoring the normal unlock
 
-VIEW is the live view of sessions (Linux): --view-listen ADDR:PORT and --view-token TOKEN (or
-OCU_VIEW_LISTEN and OCU_VIEW_TOKEN; serve falls back to its --token). With it, or a serve token,
-sessions are shared by every client until they are ended.
+VIEW is the live view of sessions: --view-listen ADDR:PORT (HTTP/WebSocket and browser UI),
+--vnc-listen ADDR:PORT (VNC/RFB server) and --view-token TOKEN (or OCU_VIEW_LISTEN, OCU_VNC_LISTEN
+and OCU_VIEW_TOKEN; serve falls back to its --token). With it, or a serve token, sessions are
+shared by every client until they are ended.
 
 Settings live in the config file printed by `opencomputeruse config-path`.";
 
@@ -243,8 +244,8 @@ fn run_serve(args: &[String]) -> Result<()> {
         // One server for every harness: their sessions are each other's.
         service.share_sessions();
     }
-    if let Some((addr, token)) = view {
-        view::start(service.clone(), addr, token)?;
+    if let Some(view) = view {
+        view::start_resolved(service.clone(), view)?;
     }
     let mut server = remote::server::HttpServer::new(service, flags.token.clone());
     let mut shown: Option<(Vec<_>, Vec<String>)> = None;
@@ -675,8 +676,8 @@ fn init_stderr_log() {
 #[cfg(target_os = "macos")]
 fn run_mcp(args: &[String]) -> Result<()> {
     init_stderr_log();
-    if view::ViewFlags::parse(args)?.listen.is_some() {
-        bail!("on macOS the app owns these sessions; run `serve` with --view-listen to watch sessions live");
+    if view::ViewFlags::parse(args)?.any() {
+        bail!("on macOS the app owns these sessions; run `serve` with --view-listen or --vnc-listen to watch sessions live");
     }
     mcp::serve(Box::new(macos::AgentLink::default()))
 }
@@ -686,8 +687,8 @@ fn run_mcp(args: &[String]) -> Result<()> {
     init_stderr_log();
     let view = view::ViewFlags::parse(args)?.resolve(None)?;
     let service = ocu_core::Service::with_devices(platform(), Some(mobile_platform()), None);
-    if let Some((addr, token)) = view {
-        view::start(service.clone(), addr, token)?;
+    if let Some(view) = view {
+        view::start_resolved(service.clone(), view)?;
     }
     let client = service.client();
     let result = mcp::serve(Box::new(client));
