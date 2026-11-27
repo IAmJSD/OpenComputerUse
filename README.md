@@ -403,6 +403,11 @@ opencomputeruse mcp --view-listen 0.0.0.0:7900 --view-token "$TOKEN"
 # or OCU_VIEW_LISTEN=0.0.0.0:7900 OCU_VIEW_TOKEN=$TOKEN opencomputeruse mcp
 ```
 
+Open `http://<host>:7900/#token=<token>` in a browser for the built-in live
+viewer (`GET /` or `GET /view`), which lists active sessions, streams frames,
+and has a **Take control** toggle for forwarding clicks, scroll, keys, and
+clipboard paste.
+
 With the view on, sessions are shared: every client can use every session,
 and a session lasts until it is ended (or the server exits), not until the
 client that started it goes. `start_session` answers with the session's
@@ -427,13 +432,17 @@ also come from `OCU_SERVE_TOKEN`.
 
 ### HTTP API
 
-Every request but `GET /health` needs the token, as `Authorization: Bearer
-<token>` or `?token=<token>` (browsers can't set headers on a WebSocket).
-Answers are JSON; errors are `{"error": "..."}`. CORS is open, since the
-token is the only credential.
+`GET /` and `GET /view` serve the built-in browser viewer HTML page without
+requiring a token header (the page reads `#token=<token>` or `?token=<token>`
+in the browser, stores it in `sessionStorage`, and strips it from the URL
+bar). Every other request but `GET /health` needs the token, as
+`Authorization: Bearer <token>` or `?token=<token>` (browsers can't set
+headers on a WebSocket). Answers are JSON; errors are `{"error": "..."}`.
+CORS is open, since the token is the only credential.
 
 | Request | Answer |
 | --- | --- |
+| `GET /` or `GET /view` | the built-in HTML live viewer |
 | `GET /sessions` | `{"sessions": [Session]}` |
 | `POST /sessions` with `{"app", "args"?, "env"?, "cwd"?, "display"?, "display_width"?, "display_height"?}` | `201` and the new `Session` |
 | `GET /sessions/{id}` | `Session` |
