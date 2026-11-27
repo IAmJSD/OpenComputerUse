@@ -2,12 +2,46 @@
 //! Screen Sharing, TigerVNC, RealVNC) watch and drive a background session
 //! through its [`Viewer`], using the view token as the VNC password.
 
-use anyhow::{bail, ensure, Context as _, Result};
+use std::io::{Read as _, Write as _};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, ensure, Context as _, Result};
 
 use ocu_core::image::Order;
-use ocu_core::{Frame, MouseButton, ViewInput};
+use ocu_core::{Frame, MouseButton, Service, SessionInfo, ViewInput, Viewer};
 
-use super::protocol::{KeyAction, Keys, Region};
+use super::protocol::{changed, KeyAction, Keys, Region};
+
+/// Default framebuffer size when a VNC client connects before any session
+/// or window is open.
+const DEFAULT_WIDTH: u16 = 1280;
+const DEFAULT_HEIGHT: u16 = 800;
+const MAX_CUT_TEXT: usize = 64 << 10;
+const ENCODING_RAW: i32 = 0;
+const ENCODING_DESKTOP_SIZE: i32 = -223;
+
+pub fn start(service: Arc<Service>, addr: SocketAddr, token: String) -> Result<()> {
+    let listener = TcpListener::bind(addr).with_context(|| format!("can't listen on {addr}"))?;
+    service.share_sessions();
+    std::thread::Builder::new()
+        .name("vnc".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (service, token) = (service.clone(), token.clone());
+                let _ = std::thread::Builder::new()
+                    .name("vnc-conn".into())
+                    .spawn(move || {
+                        if let Err(e) = connection(&service, &token, stream) {
+                            log::debug!("vnc connection: {e:#}");
+                        }
+                    });
+            }
+        })?;
+    log::warn!("VNC server listening on {addr}");
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Protocol {
@@ -191,6 +225,367 @@ pub fn session_seq(id: &str) -> u64 {
         .and_then(|s| s.split_once('-'))
         .and_then(|(n, _)| n.parse().ok())
         .unwrap_or(0)
+}
+
+fn blank_frame(width: u16, height: u16) -> Frame {
+    let (w, h) = (width as u32, height as u32);
+    Frame {
+        window_id: 0,
+        width: w,
+        height: h,
+        stride: w as usize * 4,
+        data: vec![0x14; w as usize * 4 * h as usize],
+        order: Order::Bgra,
+    }
+}
+
+fn latest_watchable(service: &Service) -> Option<(SessionInfo, Arc<dyn Viewer>)> {
+    let mut sessions = service.sessions();
+    sessions.sort_by_key(|s| session_seq(&s.id));
+    sessions
+        .into_iter()
+        .rev()
+        .find_map(|info| service.viewer(&info.id).ok().map(|v| (info, v)))
+}
+
+fn read_exact_timeout(stream: &mut TcpStream, buf: &mut [u8]) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let res = stream.read_exact(buf);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(10)));
+    Ok(res?)
+}
+
+fn connection(service: &Service, token: &str, mut stream: TcpStream) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_nodelay(true)?;
+
+    stream.write_all(b"RFB 003.008\n")?;
+    stream.flush()?;
+    let mut ver_buf = [0u8; 12];
+    stream.read_exact(&mut ver_buf)?;
+    let proto = parse_version(&ver_buf)?;
+
+    if proto == Protocol::Rfb33 {
+        stream.write_all(&2u32.to_be_bytes())?;
+        stream.flush()?;
+    } else {
+        stream.write_all(&[1u8, 2u8])?;
+        stream.flush()?;
+        let mut chosen = [0u8; 1];
+        stream.read_exact(&mut chosen)?;
+        ensure!(chosen[0] == 2, "unsupported security type {}", chosen[0]);
+    }
+
+    let mut challenge = [0u8; 16];
+    getrandom::fill(&mut challenge).map_err(|e| anyhow!("no randomness: {e}"))?;
+    stream.write_all(&challenge)?;
+    stream.flush()?;
+
+    let mut response = [0u8; 16];
+    stream.read_exact(&mut response)?;
+    let expected = vnc_encrypt_challenge(&challenge, token.as_bytes());
+    if response
+        .iter()
+        .zip(&expected)
+        .fold(0u8, |d, (x, y)| d | (x ^ y))
+        != 0
+    {
+        std::thread::sleep(Duration::from_millis(200));
+        stream.write_all(&1u32.to_be_bytes())?;
+        if proto == Protocol::Rfb38 {
+            let msg = b"wrong VNC password (use the first 8 characters of --view-token)";
+            stream.write_all(&(msg.len() as u32).to_be_bytes())?;
+            stream.write_all(msg)?;
+        }
+        let _ = stream.flush();
+        bail!("VNC authentication failed");
+    }
+    stream.write_all(&0u32.to_be_bytes())?;
+    stream.flush()?;
+    stream.read_exact(&mut [0u8; 1])?;
+
+    let mut active = latest_watchable(service);
+    let mut seen: Option<u64> = None;
+    let (mut fb_width, mut fb_height, name) = match &active {
+        Some((info, viewer)) => {
+            let title = format!("{} ({})", info.app, info.id);
+            let (w, h) = if let Ok(f) = viewer.frame(None) {
+                (
+                    f.width.clamp(1, 4096) as u16,
+                    f.height.clamp(1, 4096) as u16,
+                )
+            } else if let Ok(Some(w)) = viewer.windows().map(|ws| ws.into_iter().next()) {
+                (
+                    w.frame.width.round().clamp(1.0, 4096.0) as u16,
+                    w.frame.height.round().clamp(1.0, 4096.0) as u16,
+                )
+            } else {
+                (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            };
+            (w, h, title)
+        }
+        None => (DEFAULT_WIDTH, DEFAULT_HEIGHT, "OpenComputerUse".to_string()),
+    };
+    let pf = PixelFormat::default();
+    let mut server_init = Vec::with_capacity(24 + name.len());
+    server_init.extend_from_slice(&fb_width.to_be_bytes());
+    server_init.extend_from_slice(&fb_height.to_be_bytes());
+    server_init.extend_from_slice(&pf.to_bytes());
+    server_init.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    server_init.extend_from_slice(name.as_bytes());
+    stream.write_all(&server_init)?;
+    stream.flush()?;
+
+    // 5. Main non-blocking loop: input first, then framebuffer updates.
+    stream.set_read_timeout(Some(Duration::from_millis(10)))?;
+    let mut state = ClientState {
+        pf,
+        supports_desktop_size: false,
+        pending_update: None,
+        last: None,
+        keys: Keys::default(),
+        pointer: PointerState::default(),
+    };
+    let (mut sent, mut last_session_check) =
+        (Instant::now() - Duration::from_secs(1), Instant::now());
+
+    let result: Result<()> = 'main: loop {
+        loop {
+            let mut msg_type = [0u8; 1];
+            match stream.read(&mut msg_type) {
+                Ok(0) => break 'main Ok(()),
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(e) => break 'main Err(e.into()),
+            }
+            if let Err(e) = handle_client_msg(
+                msg_type[0],
+                &mut stream,
+                &mut state,
+                active.as_ref().map(|(_, v)| &**v),
+            ) {
+                break 'main Err(e);
+            }
+        }
+
+        let still_alive = active
+            .as_ref()
+            .is_some_and(|(info, v)| v.is_alive() && service.session_info(&info.id).is_some());
+        if !still_alive || last_session_check.elapsed() >= Duration::from_millis(500) {
+            last_session_check = Instant::now();
+            let candidate = latest_watchable(service);
+            let changed_session = match (&active, &candidate) {
+                (Some((a, _)), Some((b, _))) => a.id != b.id || !still_alive,
+                (None, None) => false,
+                _ => true,
+            };
+            if changed_session {
+                let released = state
+                    .keys
+                    .release_all()
+                    .into_iter()
+                    .chain(state.pointer.release_all());
+                if let Some((_, old_viewer)) = active.take() {
+                    for input in released {
+                        let _ = old_viewer.input(None, &input);
+                    }
+                }
+                (state.last, seen, active) = (None, None, candidate);
+            }
+        }
+
+        let Some(force_full) = state.pending_update else {
+            continue;
+        };
+        let interval = match &active {
+            Some((_, v)) if v.generation().is_some() => Duration::from_millis(33),
+            _ => Duration::from_millis(100),
+        };
+        if !force_full && sent.elapsed() < interval {
+            continue;
+        }
+        let generation = active.as_ref().and_then(|(_, v)| v.generation());
+        if !force_full && generation.is_some() && generation == seen && state.last.is_some() {
+            continue;
+        }
+        let raw_frame = match &active {
+            Some((_, v)) => match v.frame(None) {
+                Ok(f) if f.width > 0 && f.height > 0 => f,
+                _ if force_full => blank_frame(fb_width, fb_height),
+                _ => continue,
+            },
+            None if force_full => blank_frame(fb_width, fb_height),
+            None => continue,
+        };
+        (sent, seen) = (Instant::now(), generation);
+
+        let (fw, fh) = (
+            raw_frame.width.clamp(1, 4096) as u16,
+            raw_frame.height.clamp(1, 4096) as u16,
+        );
+        let (mut frame, mut resize_rect) = (raw_frame, false);
+        if (fw, fh) != (fb_width, fb_height) {
+            if state.supports_desktop_size {
+                (fb_width, fb_height, state.last, resize_rect) = (fw, fh, None, true);
+            } else {
+                frame = fit_frame(&frame, fb_width, fb_height);
+            }
+        }
+
+        let region = if force_full || resize_rect {
+            Some(Region {
+                x: 0,
+                y: 0,
+                width: frame.width,
+                height: frame.height,
+            })
+        } else {
+            changed(state.last.as_ref(), &frame)
+        };
+        let Some(region) = region else {
+            continue;
+        };
+
+        let pixels = encode_raw(&frame, region, state.pf);
+        let n_rects: u16 = if resize_rect { 2 } else { 1 };
+        let mut msg = Vec::with_capacity(4 + (n_rects as usize) * 12 + pixels.len());
+        msg.extend_from_slice(&[0, 0]);
+        msg.extend_from_slice(&n_rects.to_be_bytes());
+        if resize_rect {
+            for v in [0u16, 0u16, fb_width, fb_height] {
+                msg.extend_from_slice(&v.to_be_bytes());
+            }
+            msg.extend_from_slice(&ENCODING_DESKTOP_SIZE.to_be_bytes());
+        }
+        for v in [
+            region.x as u16,
+            region.y as u16,
+            region.width as u16,
+            region.height as u16,
+        ] {
+            msg.extend_from_slice(&v.to_be_bytes());
+        }
+        msg.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        msg.extend_from_slice(&pixels);
+        if let Err(e) = stream.write_all(&msg).and_then(|_| stream.flush()) {
+            break Err(e.into());
+        }
+        (state.last, state.pending_update) = (Some(frame), None);
+    };
+
+    if let Some((_, viewer)) = active {
+        for input in state
+            .keys
+            .release_all()
+            .into_iter()
+            .chain(state.pointer.release_all())
+        {
+            let _ = viewer.input(None, &input);
+        }
+    }
+    result
+}
+
+struct ClientState {
+    pf: PixelFormat,
+    supports_desktop_size: bool,
+    pending_update: Option<bool>,
+    last: Option<Frame>,
+    keys: Keys,
+    pointer: PointerState,
+}
+
+fn handle_client_msg(
+    msg_type: u8,
+    stream: &mut TcpStream,
+    state: &mut ClientState,
+    viewer: Option<&dyn Viewer>,
+) -> Result<()> {
+    match msg_type {
+        0 => {
+            let mut buf = [0u8; 19];
+            read_exact_timeout(stream, &mut buf)?;
+            state.pf = PixelFormat::from_bytes(buf[3..19].try_into().unwrap())?;
+            state.last = None;
+        }
+        2 => {
+            let mut head = [0u8; 3];
+            read_exact_timeout(stream, &mut head)?;
+            let mut raw = vec![0u8; u16::from_be_bytes([head[1], head[2]]) as usize * 4];
+            read_exact_timeout(stream, &mut raw)?;
+            state.supports_desktop_size = raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|b| i32::from_be_bytes(*b) == ENCODING_DESKTOP_SIZE);
+        }
+        3 => {
+            let mut buf = [0u8; 9];
+            read_exact_timeout(stream, &mut buf)?;
+            let force_full = buf[0] == 0;
+            if force_full {
+                state.last = None;
+            }
+            state.pending_update = Some(state.pending_update.unwrap_or(false) || force_full);
+        }
+        4 => {
+            let mut buf = [0u8; 7];
+            read_exact_timeout(stream, &mut buf)?;
+            let keysym = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
+            if let Some(v) = viewer {
+                for input in keysym_events(&mut state.keys, keysym, buf[0] != 0) {
+                    let _ = v.input(None, &input);
+                }
+            }
+        }
+        5 => {
+            let mut buf = [0u8; 5];
+            read_exact_timeout(stream, &mut buf)?;
+            let (x, y) = (
+                u16::from_be_bytes([buf[1], buf[2]]) as f64,
+                u16::from_be_bytes([buf[3], buf[4]]) as f64,
+            );
+            for input in state.pointer.event(buf[0], x, y) {
+                if let Some(v) = viewer {
+                    let _ = v.input(None, &input);
+                }
+            }
+        }
+        6 => {
+            let mut head = [0u8; 7];
+            read_exact_timeout(stream, &mut head)?;
+            let len = u32::from_be_bytes([head[3], head[4], head[5], head[6]]) as usize;
+            ensure!(
+                len <= MAX_CUT_TEXT,
+                "ClientCutText length {len} exceeds {MAX_CUT_TEXT}"
+            );
+            let mut buf = vec![0u8; len];
+            read_exact_timeout(stream, &mut buf)?;
+            let text = match std::str::from_utf8(&buf) {
+                Ok(s) => s.replace("\r\n", "\n"),
+                Err(_) => buf
+                    .iter()
+                    .map(|&b| b as char)
+                    .collect::<String>()
+                    .replace("\r\n", "\n"),
+            };
+            if !text.is_empty() {
+                if let Some(v) = viewer {
+                    let _ = v.input(None, &ViewInput::Text { text });
+                }
+            }
+        }
+        other => bail!("unknown RFB client message type {other}"),
+    }
+    Ok(())
 }
 
 /// Parses the client's 12-byte `ProtocolVersion` banner (`RFB xxx.yyy\n`).
