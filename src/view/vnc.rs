@@ -5,9 +5,9 @@
 use anyhow::{bail, ensure, Context as _, Result};
 
 use ocu_core::image::Order;
-use ocu_core::Frame;
+use ocu_core::{Frame, MouseButton, ViewInput};
 
-use super::protocol::Region;
+use super::protocol::{KeyAction, Keys, Region};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Protocol {
@@ -215,6 +215,211 @@ pub(crate) fn parse_version(banner: &[u8; 12]) -> Result<Protocol> {
     }
 }
 
+/// Tracks VNC pointer button mask and position across `PointerEvent` messages.
+#[derive(Default)]
+pub struct PointerState {
+    mask: u8,
+    pos: Option<(f64, f64)>,
+}
+
+impl PointerState {
+    pub fn event(&mut self, mask: u8, x: f64, y: f64) -> Vec<ViewInput> {
+        let mut out = Vec::new();
+        let prev = self.mask;
+        self.mask = mask;
+        let moved = self.pos != Some((x, y));
+        self.pos = Some((x, y));
+
+        let buttons = [
+            (1u8 << 0, MouseButton::Left),
+            (1u8 << 1, MouseButton::Middle),
+            (1u8 << 2, MouseButton::Right),
+        ];
+        let mut button_changed = false;
+        for (bit, button) in buttons {
+            let was = (prev & bit) != 0;
+            let now = (mask & bit) != 0;
+            if was != now {
+                button_changed = true;
+                out.push(ViewInput::Button {
+                    x,
+                    y,
+                    button,
+                    down: now,
+                });
+            }
+        }
+        if !button_changed && moved {
+            out.push(ViewInput::Move { x, y });
+        }
+
+        // Wheel bits: 3 up, 4 down, 5 left, 6 right (act on press 0 -> 1).
+        let pressed = mask & !prev;
+        let mut dx = 0.0;
+        let mut dy = 0.0;
+        if (pressed & (1 << 3)) != 0 {
+            dy -= 40.0;
+        }
+        if (pressed & (1 << 4)) != 0 {
+            dy += 40.0;
+        }
+        if (pressed & (1 << 5)) != 0 {
+            dx -= 40.0;
+        }
+        if (pressed & (1 << 6)) != 0 {
+            dx += 40.0;
+        }
+        if dx != 0.0 || dy != 0.0 {
+            out.push(ViewInput::Wheel { x, y, dx, dy });
+        }
+        out
+    }
+
+    pub fn release_all(&mut self) -> Vec<ViewInput> {
+        let mut out = Vec::new();
+        let (x, y) = self.pos.unwrap_or((0.0, 0.0));
+        let buttons = [
+            (1u8 << 0, MouseButton::Left),
+            (1u8 << 1, MouseButton::Middle),
+            (1u8 << 2, MouseButton::Right),
+        ];
+        for (bit, button) in buttons {
+            if (self.mask & bit) != 0 {
+                out.push(ViewInput::Button {
+                    x,
+                    y,
+                    button,
+                    down: false,
+                });
+            }
+        }
+        self.mask = 0;
+        self.pos = None;
+        out
+    }
+}
+
+/// Translates an X11 keysym from a VNC `KeyEvent` into [`ViewInput`]s through
+/// [`Keys`], sharing the WebSocket view's modifier and shortcut state machine.
+pub fn keysym_events(keys: &mut Keys, keysym: u32, down: bool) -> Vec<ViewInput> {
+    let action = if down { KeyAction::Down } else { KeyAction::Up };
+    if let Some((code, key)) = keysym_to_dom(keysym) {
+        return keys.event(action, code, &key);
+    }
+    if let Some(ch) = keysym_char(keysym) {
+        let code = format!("Unicode{:04X}", ch as u32);
+        return keys.event(action, &code, &ch.to_string());
+    }
+    Vec::new()
+}
+
+fn keysym_char(keysym: u32) -> Option<char> {
+    if (0x20..=0x7e).contains(&keysym) || (0xa0..=0xff).contains(&keysym) {
+        char::from_u32(keysym)
+    } else if (keysym & 0xff00_0000) == 0x0100_0000 {
+        char::from_u32(keysym & 0x00ff_ffff).filter(|c| !c.is_control())
+    } else {
+        None
+    }
+}
+
+/// Maps an X11 keysym to its canonical unshifted DOM `(code, key)` pair.
+fn keysym_to_dom(keysym: u32) -> Option<(&'static str, String)> {
+    let named = |code: &'static str, key: &str| Some((code, key.to_string()));
+    match keysym {
+        0xff08 => return named("Backspace", "Backspace"),
+        0xff09 | 0xfe20 => return named("Tab", "Tab"),
+        0xff0d => return named("Enter", "Enter"),
+        0xff13 => return named("Pause", "Pause"),
+        0xff14 => return named("ScrollLock", "ScrollLock"),
+        0xff1b => return named("Escape", "Escape"),
+        0xff50 => return named("Home", "Home"),
+        0xff51 => return named("ArrowLeft", "ArrowLeft"),
+        0xff52 => return named("ArrowUp", "ArrowUp"),
+        0xff53 => return named("ArrowRight", "ArrowRight"),
+        0xff54 => return named("ArrowDown", "ArrowDown"),
+        0xff55 => return named("PageUp", "PageUp"),
+        0xff56 => return named("PageDown", "PageDown"),
+        0xff57 => return named("End", "End"),
+        0xff61 => return named("PrintScreen", "PrintScreen"),
+        0xff63 => return named("Insert", "Insert"),
+        0xff67 => return named("ContextMenu", "ContextMenu"),
+        0xff7f => return named("NumLock", "NumLock"),
+        0xff8d => return named("NumpadEnter", "Enter"),
+        0xffaa => return named("NumpadMultiply", "*"),
+        0xffab => return named("NumpadAdd", "+"),
+        0xffad => return named("NumpadSubtract", "-"),
+        0xffae => return named("NumpadDecimal", "."),
+        0xffaf => return named("NumpadDivide", "/"),
+        0xffb0..=0xffb9 => {
+            const CODES: [&str; 10] = [
+                "Numpad0", "Numpad1", "Numpad2", "Numpad3", "Numpad4", "Numpad5", "Numpad6",
+                "Numpad7", "Numpad8", "Numpad9",
+            ];
+            let n = (keysym - 0xffb0) as usize;
+            return Some((CODES[n], n.to_string()));
+        }
+        0xffbe..=0xffd5 => {
+            const FCODES: [&str; 24] = [
+                "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13",
+                "F14", "F15", "F16", "F17", "F18", "F19", "F20", "F21", "F22", "F23", "F24",
+            ];
+            let idx = (keysym - 0xffbe) as usize;
+            return Some((FCODES[idx], FCODES[idx].to_string()));
+        }
+        0xffe1 => return named("ShiftLeft", "Shift"),
+        0xffe2 => return named("ShiftRight", "Shift"),
+        0xffe3 => return named("ControlLeft", "Control"),
+        0xffe4 => return named("ControlRight", "Control"),
+        0xffe5 => return named("CapsLock", "CapsLock"),
+        0xffe7 | 0xffeb => return named("MetaLeft", "Meta"),
+        0xffe8 | 0xffec => return named("MetaRight", "Meta"),
+        0xffe9 => return named("AltLeft", "Alt"),
+        0xffea | 0xfe03 => return named("AltRight", "AltGraph"),
+        0xffff => return named("Delete", "Delete"),
+        _ => {}
+    }
+
+    if !(0x20..=0x7e).contains(&keysym) {
+        return None;
+    }
+    let ch = char::from_u32(keysym)?;
+    let key = ch.to_string();
+    const LETTERS: [&str; 26] = [
+        "KeyA", "KeyB", "KeyC", "KeyD", "KeyE", "KeyF", "KeyG", "KeyH", "KeyI", "KeyJ", "KeyK",
+        "KeyL", "KeyM", "KeyN", "KeyO", "KeyP", "KeyQ", "KeyR", "KeyS", "KeyT", "KeyU", "KeyV",
+        "KeyW", "KeyX", "KeyY", "KeyZ",
+    ];
+    let code = match ch {
+        'a'..='z' => LETTERS[(ch as usize) - ('a' as usize)],
+        'A'..='Z' => LETTERS[(ch as usize) - ('A' as usize)],
+        '0' | ')' => "Digit0",
+        '1' | '!' => "Digit1",
+        '2' | '@' => "Digit2",
+        '3' | '#' => "Digit3",
+        '4' | '$' => "Digit4",
+        '5' | '%' => "Digit5",
+        '6' | '^' => "Digit6",
+        '7' | '&' => "Digit7",
+        '8' | '*' => "Digit8",
+        '9' | '(' => "Digit9",
+        '`' | '~' => "Backquote",
+        '-' | '_' => "Minus",
+        '=' | '+' => "Equal",
+        '[' | '{' => "BracketLeft",
+        ']' | '}' => "BracketRight",
+        '\\' | '|' => "Backslash",
+        ';' | ':' => "Semicolon",
+        '\'' | '"' => "Quote",
+        ',' | '<' => "Comma",
+        '.' | '>' => "Period",
+        '/' | '?' => "Slash",
+        ' ' => "Space",
+        _ => return None,
+    };
+    Some((code, key))
+}
+
 /// Encrypts a 16-byte VNC challenge with `password` per RFC 6143 §7.2.2.
 pub fn vnc_encrypt_challenge(challenge: &[u8; 16], password: &[u8]) -> [u8; 16] {
     let mut key = [0u8; 8];
@@ -394,5 +599,88 @@ mod tests {
     fn session_sequence_sorts_numerically() {
         assert!(session_seq("s10-abcdef") > session_seq("s2-abcdef"));
         assert_eq!(parse_version(b"RFB 003.889\n").unwrap(), Protocol::Rfb38);
+    }
+
+    #[test]
+    fn pointer_buttons_and_wheel_transitions() {
+        let mut p = PointerState::default();
+        assert_eq!(
+            p.event(0, 10.0, 20.0),
+            vec![ViewInput::Move { x: 10.0, y: 20.0 }]
+        );
+        assert_eq!(
+            p.event(1, 10.0, 20.0),
+            vec![ViewInput::Button {
+                x: 10.0,
+                y: 20.0,
+                button: MouseButton::Left,
+                down: true,
+            }]
+        );
+        assert_eq!(
+            p.event(0, 10.0, 20.0),
+            vec![ViewInput::Button {
+                x: 10.0,
+                y: 20.0,
+                button: MouseButton::Left,
+                down: false,
+            }]
+        );
+        assert_eq!(
+            p.event(1 << 4, 10.0, 20.0),
+            vec![ViewInput::Wheel {
+                x: 10.0,
+                y: 20.0,
+                dx: 0.0,
+                dy: 40.0,
+            }]
+        );
+        assert!(p.event(0, 10.0, 20.0).is_empty());
+    }
+
+    #[test]
+    fn keysyms_type_characters_and_press_shortcuts() {
+        let mut k = Keys::default();
+        assert_eq!(
+            keysym_events(&mut k, 'a' as u32, true),
+            vec![ViewInput::Text { text: "a".into() }]
+        );
+        assert!(keysym_events(&mut k, 'a' as u32, false).is_empty());
+        assert_eq!(
+            keysym_events(&mut k, 0xffe1, true),
+            vec![ViewInput::Key {
+                code: "ShiftLeft".into(),
+                down: true,
+            }]
+        );
+        assert_eq!(
+            keysym_events(&mut k, 'A' as u32, true),
+            vec![ViewInput::Text { text: "A".into() }]
+        );
+        assert_eq!(
+            keysym_events(&mut k, 0xffe1, false),
+            vec![ViewInput::Key {
+                code: "ShiftLeft".into(),
+                down: false,
+            }]
+        );
+        assert!(keysym_events(&mut k, 'a' as u32, false).is_empty());
+
+        keysym_events(&mut k, 0xffe3, true);
+        assert_eq!(
+            keysym_events(&mut k, 'c' as u32, true),
+            vec![ViewInput::Key {
+                code: "KeyC".into(),
+                down: true,
+            }]
+        );
+        assert_eq!(
+            keysym_events(&mut k, 'c' as u32, false),
+            vec![ViewInput::Key {
+                code: "KeyC".into(),
+                down: false,
+            }]
+        );
+        assert_eq!(k.release_all().len(), 1);
     }
 }
