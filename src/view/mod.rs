@@ -449,6 +449,9 @@ fn describe(server: &Server, info: SessionInfo) -> Value {
     if let Some(path) = view {
         v["view_path"] = json!(path);
     }
+    if let Some(addr) = vnc::addr_for(&info) {
+        v["vnc_listen"] = json!(addr);
+    }
     v
 }
 

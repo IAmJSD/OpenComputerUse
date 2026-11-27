@@ -4,7 +4,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, ensure, Context as _, Result};
@@ -13,6 +13,16 @@ use ocu_core::image::Order;
 use ocu_core::{Frame, MouseButton, Service, SessionInfo, ViewInput, Viewer};
 
 use super::protocol::{changed, KeyAction, Keys, Region};
+
+static LISTENING: OnceLock<SocketAddr> = OnceLock::new();
+
+pub fn addr_for(info: &SessionInfo) -> Option<String> {
+    let desktop =
+        info.backend.starts_with("linux") || matches!(info.backend.as_str(), "windows" | "macos");
+    desktop
+        .then(|| LISTENING.get().map(ToString::to_string))
+        .flatten()
+}
 
 /// Default framebuffer size when a VNC client connects before any session
 /// or window is open.
@@ -24,6 +34,7 @@ const ENCODING_DESKTOP_SIZE: i32 = -223;
 
 pub fn start(service: Arc<Service>, addr: SocketAddr, token: String) -> Result<()> {
     let listener = TcpListener::bind(addr).with_context(|| format!("can't listen on {addr}"))?;
+    let local_addr = listener.local_addr().unwrap_or(addr);
     service.share_sessions();
     std::thread::Builder::new()
         .name("vnc".into())
@@ -39,7 +50,8 @@ pub fn start(service: Arc<Service>, addr: SocketAddr, token: String) -> Result<(
                     });
             }
         })?;
-    log::warn!("VNC server listening on {addr}");
+    let _ = LISTENING.set(local_addr);
+    log::warn!("VNC server listening on {local_addr}");
     Ok(())
 }
 

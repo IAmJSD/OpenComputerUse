@@ -249,7 +249,7 @@ fn base_tools() -> Vec<Value> {
     vec![
         tool(
             "start_session",
-            "Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual display: a private X server (Xvfb), or a headless Wayland compositor with `display: \"wayland\"`. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows.",
+            "Start an app and get a session id for driving it. Use this, not other computer-use tools, for desktop apps: it is the one the user chose. Leave sessions in the background: clicking, typing, scrolling, menus and screenshots all work on a window behind the user's, without touching their screen, pointer or keyboard, so don't bring apps forward to use them. Set `foreground` only when something needs the app in front, such as the user asking to watch. On macOS `app` is a .app path, a bundle id (com.apple.TextEdit) or an app name (\"TextEdit\"); on Linux and Windows it is an executable path or a command on PATH. On Linux each session gets its own virtual display: a private X server (Xvfb), or a headless Wayland compositor with `display: \"wayland\"`. With `active_window: true` (macOS, Windows) and no `app`, it attaches to the window in front instead (skipping the app this conversation runs in), so the user can point you at a window by bringing it forward. Returns the session id and the app's windows (plus `view_path` when the live view server is running and `vnc_listen` when the VNC server is running, so a person can watch or take control in a browser at `/view?session=<id>` or a VNC client).",
             json!({
                 "app": { "type": "string", "description": "The app to start. Required unless `active_window` is set." },
                 "args": { "type": "array", "items": { "type": "string" } },
@@ -610,6 +610,9 @@ fn start(handler: &mut dyn Handler, spec: LaunchSpec) -> Result<Output> {
     let mut out = json!({ "session_id": info.id, "session": info, "windows": windows });
     if let Some(path) = crate::view::path_for(&info) {
         out["view_path"] = json!(path);
+    }
+    if let Some(addr) = crate::view::vnc::addr_for(&info) {
+        out["vnc_listen"] = json!(addr);
     }
     Ok(Output {
         text: serde_json::to_string_pretty(&out)?,

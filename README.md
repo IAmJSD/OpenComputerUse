@@ -423,7 +423,8 @@ pointer, wheel, keyboard, and clipboard events.
 With the view on, sessions are shared: every client can use every session,
 and a session lasts until it is ended (or the server exits), not until the
 client that started it goes. `start_session` answers with the session's
-`view_path`.
+`view_path` (when `--view-listen` is on) and `vnc_listen` (when `--vnc-listen`
+is on).
 
 ### One server in a container
 
@@ -463,8 +464,8 @@ CORS is open, since the token is the only credential.
 | `GET /sessions/{id}/view` | the WebSocket below |
 
 A `Session` is `{"session_id", "session": {"id", "app", "pid", "backend",
-"details"}, "windows": [Window], "view_path"}`, and a `Window` is `{"id",
-"title", "frame": {"x", "y", "width", "height"}, "on_screen"}`.
+"details"}, "windows": [Window], "view_path"?, "vnc_listen"?}`, and a `Window`
+is `{"id", "title", "frame": {"x", "y", "width", "height"}, "on_screen"}`.
 
 ### The WebSocket
 
